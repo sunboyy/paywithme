@@ -43,7 +43,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 2.4 `hooks.server.ts`: resolve session → `locals.user`/`locals.session` @done deps:2.1
 - [x] 2.5 `/register` (email + display name) → magic link @done deps:2.2,2.3
 - [x] 2.6 Magic-link landing + capture display name to `user.name` after first verify — PLAN #26 @done deps:2.5
-- [ ] 2.7 `/login` (passkey primary + email-link fallback) @todo deps:2.2
+- [x] 2.7 `/login` (passkey primary + email-link fallback) @done deps:2.2
 - [ ] 2.8 `/onboarding/passkey` post-first-login nudge (skippable) @todo deps:2.6
 - [ ] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @todo deps:2.7
 - [ ] 2.10 Logout @todo deps:2.4

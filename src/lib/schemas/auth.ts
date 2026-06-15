@@ -22,20 +22,27 @@ const nameField = z
 	.max(100, { message: 'Display name must be 100 characters or fewer' });
 
 /**
+ * Email field rule — the single source of truth for an email input
+ * (PLAN §5.1, §12 "email unique/required"). Required; normalized to a trimmed,
+ * lowercased canonical form so the magic-link plugin always sees one shape per
+ * address. Shared by every auth form that takes an email (`registerSchema`,
+ * `loginSchema`) so the rules and their messages never drift between them.
+ */
+const emailField = z
+	.string()
+	.trim()
+	.toLowerCase()
+	.min(1, { message: 'Email is required' })
+	.email({ message: 'Enter a valid email address' });
+
+/**
  * Registration input: email + display name (PLAN §5.1, §10).
  *
- * - `email`: required, must be a valid address, normalized to a trimmed,
- *   lowercased canonical form so the magic-link plugin always sees one shape
- *   per address (PLAN §12 "email unique/required").
+ * - `email`: required, valid, normalized — see `emailField`.
  * - `name`: required display name — see `nameField`.
  */
 export const registerSchema = z.object({
-	email: z
-		.string()
-		.trim()
-		.toLowerCase()
-		.min(1, { message: 'Email is required' })
-		.email({ message: 'Enter a valid email address' }),
+	email: emailField,
 	name: nameField
 });
 
@@ -54,3 +61,18 @@ export const displayNameSchema = z.object({
 
 /** Inferred, normalized display-name input — shared by server action + client form. */
 export type DisplayNameInput = z.infer<typeof displayNameSchema>;
+
+/**
+ * Login input: email only (PLAN §5.1, §5.5). The `/login` magic-link fallback
+ * does NOT collect a display name — for an existing account the name is already
+ * stored, and a brand-new address routed in via the create-or-load magic link
+ * captures its name on the `/auth/magic-link` landing (PLAN §5.3, #26). Reuses
+ * `emailField` so the email trim / lowercase / valid rules and their messages
+ * match `registerSchema.email` exactly (no drift).
+ */
+export const loginSchema = z.object({
+	email: emailField
+});
+
+/** Inferred, normalized login input — shared by server action + client form. */
+export type LoginInput = z.infer<typeof loginSchema>;

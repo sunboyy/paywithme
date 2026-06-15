@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayNameSchema, registerSchema } from './auth';
+import { displayNameSchema, loginSchema, registerSchema } from './auth';
 
 describe('registerSchema', () => {
 	it('accepts valid input and normalizes email (trim + lowercase) and name (trim)', () => {
@@ -108,5 +108,60 @@ describe('displayNameSchema', () => {
 
 		expect(displayNameMsg).toBe(registerMsg);
 		expect(displayNameMsg).toBe('Display name is required');
+	});
+});
+
+describe('loginSchema', () => {
+	// `loginSchema.email` shares its rule (`emailField`) with
+	// `registerSchema.email`. Login is email-only (no display name — PLAN §5.5).
+
+	it('accepts a valid email and normalizes it (trim + lowercase)', () => {
+		const result = loginSchema.safeParse({ email: '  ALICE@Example.COM ' });
+		expect(result.success).toBe(true);
+		expect(result.data).toEqual({ email: 'alice@example.com' });
+	});
+
+	it('does not require (or accept extra) a display name', () => {
+		// Login is email-only: a name is neither required nor part of the output.
+		const result = loginSchema.safeParse({ email: 'a@b.com' });
+		expect(result.success).toBe(true);
+		expect(result.data).toEqual({ email: 'a@b.com' });
+		expect(result.data).not.toHaveProperty('name');
+	});
+
+	it('rejects a missing email', () => {
+		const result = loginSchema.safeParse({});
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'email')).toBe(true);
+	});
+
+	it('rejects an empty email', () => {
+		const result = loginSchema.safeParse({ email: '' });
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'email')).toBe(true);
+	});
+
+	it('rejects an invalid email', () => {
+		const result = loginSchema.safeParse({ email: 'not-an-email' });
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'email')).toBe(true);
+	});
+
+	it('rejects a whitespace-only email (trimmed to empty)', () => {
+		const result = loginSchema.safeParse({ email: '   ' });
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'email')).toBe(true);
+	});
+
+	it('shares the same email messages as registerSchema (no drift)', () => {
+		const bad = { email: 'not-an-email' };
+		const fromLogin = loginSchema.safeParse(bad);
+		const fromRegister = registerSchema.safeParse({ ...bad, name: 'Alice' });
+
+		const loginMsg = fromLogin.error?.issues.find((i) => i.path[0] === 'email')?.message;
+		const registerMsg = fromRegister.error?.issues.find((i) => i.path[0] === 'email')?.message;
+
+		expect(loginMsg).toBe(registerMsg);
+		expect(loginMsg).toBe('Enter a valid email address');
 	});
 });

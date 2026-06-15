@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { registerSchema } from '$lib/schemas/auth';
@@ -101,13 +102,9 @@
 	<Card.Footer>
 		<p class="text-muted-foreground text-sm">
 			Already have an account?
-			<!--
-				Forward reference to the `/login` route built in task 2.7. It is not a
-				known route yet, so `resolve('/login')` would not typecheck; the raw
-				href is intentional until 2.7 lands.
-			-->
-			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-			<a href="/login" class="text-foreground font-medium underline underline-offset-4">Sign in</a>
+			<a href={resolve('/login')} class="text-foreground font-medium underline underline-offset-4"
+				>Sign in</a
+			>
 		</p>
 	</Card.Footer>
 </Card.Root>
