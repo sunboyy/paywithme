@@ -62,11 +62,12 @@ export const load: PageServerLoad = async ({ url, locals }) => {
 		return { error: friendlyAuthError('INVALID_TOKEN') };
 	}
 
-	// (3) Authenticated. If the user already has a display name, onboarding is
-	// complete — send them onward. Onward target is `/onboarding/passkey` (task
-	// 2.8) → `/groups` (task 3.4); both are unbuilt, so route to `/` for now.
+	// (3) Authenticated with a display name already set — send them on to the
+	// passkey onboarding nudge (task 2.8). That page self-gates: a returning user
+	// who already has a passkey bounces straight to `/`, so routing everyone here
+	// unconditionally is safe. (`/groups`, task 3.4, becomes the eventual target.)
 	if (locals.user.name?.trim()) {
-		redirect(303, '/');
+		redirect(303, '/onboarding/passkey');
 	}
 
 	// Authenticated but no name yet (PLAN §5.3, #26): render the capture form.
@@ -107,8 +108,8 @@ export const actions: Actions = {
 			);
 		}
 
-		// Onward to the app (see the `load` forward-ref note above for the eventual
-		// onboarding/groups target).
-		redirect(303, '/');
+		// Onward to the passkey onboarding nudge (task 2.8), which self-gates (see
+		// the `load` note above). `/groups` (task 3.4) is the eventual target.
+		redirect(303, '/onboarding/passkey');
 	}
 };

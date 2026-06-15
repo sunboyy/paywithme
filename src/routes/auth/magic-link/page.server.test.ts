@@ -51,7 +51,7 @@ describe('/auth/magic-link load', () => {
 		expect(result.error.toLowerCase()).toContain('invalid');
 	});
 
-	it('redirects an authenticated, already-named user to / (303)', async () => {
+	it('redirects an authenticated, already-named user to /onboarding/passkey (303)', async () => {
 		try {
 			await load(makeLoadEvent('', { name: 'Alice' }));
 			expect.unreachable('expected a redirect to be thrown');
@@ -59,7 +59,7 @@ describe('/auth/magic-link load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/');
+				expect(e.location).toBe('/onboarding/passkey');
 			}
 		}
 	});
@@ -88,7 +88,7 @@ describe('/auth/magic-link default action', () => {
 		updateUser.mockResolvedValue({ status: true });
 	});
 
-	it('saves the normalized name then redirects to / (303)', async () => {
+	it('saves the normalized name then redirects to /onboarding/passkey (303)', async () => {
 		try {
 			await actions.default(makeActionEvent({ name: '  Alice  ' }, { name: '' }));
 			expect.unreachable('expected a redirect to be thrown');
@@ -96,7 +96,7 @@ describe('/auth/magic-link default action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/');
+				expect(e.location).toBe('/onboarding/passkey');
 			}
 		}
 
