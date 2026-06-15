@@ -31,7 +31,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 1.9 Base app shell + root layout (mobile-first, responsive) — PLAN §10/#28 @done deps:1.4
 - [x] 1.10 ESLint + Prettier config; `lint` + `format:check` scripts @done deps:1.1
 - [x] 1.11 Vitest config + `test:unit` script + sample test @done deps:1.1
-- [ ] 1.12 Playwright config (incl. virtual authenticator) + `test:e2e` script @todo deps:1.1
+- [x] 1.12 Playwright config (incl. virtual authenticator) + `test:e2e` script @done deps:1.1
 - [ ] 1.13 CI workflow (GitHub Actions): lint + typecheck + unit @todo deps:1.10,1.11
 - [ ] 1.14 Wire `package.json` scripts so `scripts/gate.sh`/`gate-full.sh` have teeth (`lint`,`format:check`,`check`,`test:unit`,`test:e2e`) @todo deps:1.10,1.11,1.12
 

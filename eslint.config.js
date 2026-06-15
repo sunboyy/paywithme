@@ -17,6 +17,9 @@ export default ts.config(
 			'node_modules/**',
 			'drizzle/**',
 			'coverage/**',
+			'test-results/**',
+			'playwright-report/**',
+			'playwright/.cache/**',
 			'src/lib/components/ui/**'
 		]
 	},

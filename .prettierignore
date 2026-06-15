@@ -17,5 +17,10 @@ dist/
 # Vitest coverage output
 coverage/
 
+# Playwright e2e output / cache
+test-results/
+playwright-report/
+playwright/.cache/
+
 # Generated database migrations (Drizzle Kit output)
 drizzle/
