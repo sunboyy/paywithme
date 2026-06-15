@@ -8,6 +8,13 @@
       "when": 1781502191075,
       "tag": "0000_melted_rafael_vega",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781543457066,
+      "tag": "0001_purple_catseye",
+      "breakpoints": true
     }
   ]
 }

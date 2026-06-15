@@ -161,8 +161,10 @@ describe('auth instance wiring', () => {
 		expect(rateLimit).toBeDefined();
 		// Always-on (better-auth otherwise enables it only in production).
 		expect(rateLimit?.enabled).toBe(true);
-		// In-memory default store (the documented v1 limitation: per-instance).
-		expect(rateLimit?.storage).toBe('memory');
+		// Postgres-backed store (task 2.11 hardening): counters persist in the
+		// `rate_limit` table and are shared across serverless instances, instead of
+		// the per-instance in-memory default. Backed by `db/rate-limit-schema.ts`.
+		expect(rateLimit?.storage).toBe('database');
 		// Sane global fallback bucket.
 		expect(typeof rateLimit?.window).toBe('number');
 		expect(typeof rateLimit?.max).toBe('number');

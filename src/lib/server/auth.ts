@@ -74,24 +74,27 @@ const PASSKEY_SIGN_IN_PATH = '/passkey/verify-authentication';
 const MAGIC_LINK_RATE_LIMIT = { window: 60, max: 5 } as const;
 const PASSKEY_RATE_LIMIT = { window: 60, max: 10 } as const;
 
-// PRODUCTION FOLLOW-UP (multi-instance / serverless): the default `storage:
-// 'memory'` rate-limit store is PER-INSTANCE. On Vercel's serverless/edge fleet
+// Storage: POSTGRES-backed (production hardening from task 2.11). The default
+// `storage: 'memory'` store is PER-INSTANCE: on Vercel's serverless/edge fleet
 // each instance keeps its own counters, so the effective limit scales with the
 // number of warm instances and a determined attacker can dodge it by spraying
-// across instances. Before relying on this as a hard production control, move
-// rate-limit storage to a shared backend (better-auth `storage: 'database'` —
-// which needs a `rateLimit` table via `@better-auth/cli generate` — or a
-// `secondary-storage`/`customStorage` such as Redis). We deliberately use
-// in-memory here: DB-backed storage would require generating that table with
-// `@better-auth/cli generate`, and the CLI cannot resolve the `$app/server`
-// import this module now carries (the `sveltekitCookies` plugin).
+// across instances. With `storage: 'database'` better-auth persists its
+// per-(IP+path) counters in Postgres instead, so the limit is SHARED across all
+// instances. The backing table is defined in `db/rate-limit-schema.ts` (a
+// hand-authored `rateLimit` Drizzle export → the `rate_limit` SQL table); it
+// lives outside the CLI-generated `auth-schema.ts` because `@better-auth/cli
+// generate` cannot resolve the `$app/server` import the `sveltekitCookies`
+// plugin pulls into this module. The drizzle adapter resolves the better-auth
+// `rateLimit` model via `schema['rateLimit']` and increments `count` per request
+// through its `incrementOne` support.
 const rateLimit = {
 	// Always on, in every environment (default is production-only).
 	enabled: true,
 	window: RATE_LIMIT_WINDOW_SECONDS,
 	max: RATE_LIMIT_MAX,
-	// Default in-memory store — see the PRODUCTION FOLLOW-UP note above.
-	storage: 'memory',
+	// Postgres-backed, shared across instances — see the note above. Counters live
+	// in the `rate_limit` table (db/rate-limit-schema.ts).
+	storage: 'database',
 	customRules: {
 		[MAGIC_LINK_SEND_PATH]: MAGIC_LINK_RATE_LIMIT,
 		[MAGIC_LINK_VERIFY_PATH]: MAGIC_LINK_RATE_LIMIT,
