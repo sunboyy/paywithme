@@ -11,11 +11,15 @@ if [ ! -f package.json ]; then
   exit 0
 fi
 
-if pnpm run | grep -qE "^[[:space:]]*test:e2e([[:space:]]|$)"; then
-  echo "[gate-full] pnpm test:e2e"
-  pnpm run test:e2e
-else
-  echo "[gate-full] (skip) no 'test:e2e' script defined"
+# Once package.json exists, test:e2e is a hard contract (task 1.14) — a missing
+# script is a failure, not a silent skip.
+if ! pnpm run | grep -qE "^[[:space:]]*test:e2e([[:space:]]|$)"; then
+  echo "[gate-full] ERROR: required script 'test:e2e' is missing from package.json." >&2
+  echo "[gate-full] The full gate requires the e2e script wired by task 1.14." >&2
+  exit 1
 fi
+
+echo "[gate-full] pnpm test:e2e"
+pnpm run test:e2e
 
 echo "[gate-full] full gate OK"
