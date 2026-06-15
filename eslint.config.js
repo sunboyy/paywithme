@@ -16,6 +16,7 @@ export default ts.config(
 			'dist/**',
 			'node_modules/**',
 			'drizzle/**',
+			'coverage/**',
 			'src/lib/components/ui/**'
 		]
 	},

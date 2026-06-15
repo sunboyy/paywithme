@@ -14,5 +14,8 @@ node_modules/
 build/
 dist/
 
+# Vitest coverage output
+coverage/
+
 # Generated database migrations (Drizzle Kit output)
 drizzle/
