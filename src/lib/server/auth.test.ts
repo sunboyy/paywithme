@@ -9,7 +9,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 //   - that the `auth` instance constructs and registers exactly the magic-link
 //     and passkey plugins with email/password disabled and no social providers,
 //   - that the env-default for the WebAuthn rpID resolves to `localhost`,
-//   - that the placeholder `sendMagicLink` (task 2.3 seam) is callable and logs.
+//   - that the `sendMagicLink` callback routes through the `lib/server/email`
+//     helper (`sendMagicLinkEmail`) rather than emailing directly. The email
+//     helper's own behaviour (Mailgun POST + dev fallback) is covered in
+//     `email.test.ts`.
 //
 // NOTE: under Vitest, `$env/dynamic/private` does not reflect arbitrary
 // `vi.stubEnv` values set at runtime, so the env-PARSING contract is asserted
@@ -86,20 +89,28 @@ describe('auth instance wiring', () => {
 		expect(magicLink({ sendMagicLink: async () => {} }).id).toBe('magic-link');
 	});
 
-	it('placeholder sendMagicLink (task 2.3 seam) is callable and logs the link', async () => {
-		// Asserts the documented placeholder contract in auth.ts: until the Mailgun
-		// helper lands in task 2.3, sendMagicLink logs the email + url and resolves.
-		// We import and invoke the REAL exported `placeholderSendMagicLink` — the
-		// same function wired into the magic-link plugin — so this is a regression
-		// guard that fails if the placeholder changes or is removed.
-		const { placeholderSendMagicLink } = await import('./auth');
-		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+	it('sendMagicLink routes through the lib/server/email helper', async () => {
+		// The exported `sendMagicLink` (the exact function wired into the magic-link
+		// plugin) must delegate to `sendMagicLinkEmail` from `./email`, mapping
+		// `email` → `to` and forwarding the `url`. We mock the email module so this
+		// stays a wiring assertion; the helper's Mailgun/dev-fallback behaviour is
+		// covered in email.test.ts.
+		vi.resetModules();
+		const sendMagicLinkEmail = vi.fn().mockResolvedValue(undefined);
+		vi.doMock('./email', () => ({ sendMagicLinkEmail }));
 
+		const { sendMagicLink } = await import('./auth');
 		await expect(
-			placeholderSendMagicLink({ email: 'a@b.com', url: 'http://localhost:5173/verify?token=x' })
+			sendMagicLink({ email: 'a@b.com', url: 'http://localhost:5173/verify?token=x' })
 		).resolves.toBeUndefined();
-		expect(log).toHaveBeenCalledWith(
-			'[auth] (placeholder) magic link for a@b.com: http://localhost:5173/verify?token=x'
-		);
+
+		expect(sendMagicLinkEmail).toHaveBeenCalledTimes(1);
+		expect(sendMagicLinkEmail).toHaveBeenCalledWith({
+			to: 'a@b.com',
+			url: 'http://localhost:5173/verify?token=x'
+		});
+
+		vi.doUnmock('./email');
+		vi.resetModules();
 	});
 });

@@ -16,8 +16,6 @@
 // What still gets wired in by LATER Phase 2 tasks (seams marked inline below):
 //   - task 2.2: the `/api/auth/[...all]/+server.ts` handler mount that serves
 //     `auth.handler`.
-//   - task 2.3: the real Mailgun email helper called from `sendMagicLink`
-//     (currently a console.log placeholder — see TODO(2.3) below).
 //   - task 2.4: `hooks.server.ts` session resolution → `event.locals`.
 //
 // Session cookies (HTTP-only, Secure, SameSite=Lax — PLAN §5.7) are better-auth
@@ -29,6 +27,7 @@ import { magicLink } from 'better-auth/plugins';
 import { passkey } from '@better-auth/passkey';
 import { env } from '$env/dynamic/private';
 import { db } from './db';
+import { sendMagicLinkEmail } from './email';
 
 // rpName is the constant the OS passkey prompt shows (PLAN §5.2) — not an env var.
 const RP_NAME = 'Pay with me';
@@ -51,26 +50,17 @@ export function parseTrustedOrigins(raw: string | undefined): string[] {
 }
 
 /**
- * Placeholder `sendMagicLink` callback wired into the `magicLink` plugin below.
+ * `sendMagicLink` callback wired into the `magicLink` plugin below.
  *
- * TODO(2.3): replace this placeholder with the Mailgun email helper in
- * `lib/server` (`sendMagicLink({ email, url })` → Mailgun HTTP API). The plugin
- * passes everything the helper needs (`email`, `url`, and the raw `token` if a
- * custom template wants it). For now it logs the link so local dev works before
- * email is wired up.
- *
- * Exported (and used directly as the plugin's callback) so the 2.3 seam is a
- * single source of truth: the test exercises this exact function rather than a
- * copy, so they cannot drift.
+ * Routes the single-use, short-lived link (PLAN §5.3) through the swappable
+ * `lib/server/email` helper, which sends via the Mailgun HTTP API or, when
+ * Mailgun is unconfigured, logs the link for local dev. Exported and used
+ * directly as the plugin's callback so the email seam is a single source of
+ * truth that cannot drift from what the plugin actually calls.
  */
-export async function placeholderSendMagicLink({
-	email,
-	url
-}: {
-	email: string;
-	url: string;
-}): Promise<void> {
-	console.log(`[auth] (placeholder) magic link for ${email}: ${url}`);
+export async function sendMagicLink({ email, url }: { email: string; url: string }): Promise<void> {
+	// (PLAN §5.3 single-use/short-lived)
+	await sendMagicLinkEmail({ to: email, url });
 }
 
 // Read config from env at runtime via $env/dynamic/private so `pnpm run build`
@@ -93,9 +83,9 @@ export const auth = betterAuth({
 		magicLink({
 			// Single-use, short-lived tokens (PLAN §5.3).
 			expiresIn: MAGIC_LINK_EXPIRES_IN_SECONDS,
-			// TODO(2.3): `placeholderSendMagicLink` (defined above) logs the link for
-			// local dev and is replaced by the Mailgun email helper in task 2.3.
-			sendMagicLink: placeholderSendMagicLink
+			// Routes through the `lib/server/email` helper (Mailgun HTTP API, with a
+			// local console fallback). See `sendMagicLink` above.
+			sendMagicLink
 		}),
 		passkey({
 			rpID,
