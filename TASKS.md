@@ -39,7 +39,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 - [x] 2.1 better-auth server config: `drizzleAdapter` + `magicLink` + `passkey` plugins (no password/social) @done deps:1.8
 - [x] 2.2 `/api/auth/[...all]/+server.ts` handler mount @done deps:2.1
-- [x] 2.3 `lib/server` email helper (Mailgun HTTP API) with **local console-log fallback** — PLAN #24. NEEDS-INPUT: real MAILGUN\_\* for live send (local path built + Mailgun path unit-tested; live send awaits creds) @done deps:2.1
+- [x] 2.3 `lib/server` email helper (Mailgun HTTP API) with **local console-log fallback** — PLAN #24. Live Mailgun send verified end-to-end (domain `mg.sunboyy.com`, real creds in `.env`) on 2026-06-16. @done deps:2.1
 - [x] 2.4 `hooks.server.ts`: resolve session → `locals.user`/`locals.session` @done deps:2.1
 - [x] 2.5 `/register` (email + display name) → magic link @done deps:2.2,2.3
 - [x] 2.6 Magic-link landing + capture display name to `user.name` after first verify — PLAN #26 @done deps:2.5
@@ -111,7 +111,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Blocked / NEEDS-INPUT register
 
-- **2.3** — live Mailgun send (`MAILGUN_API_KEY`/`MAILGUN_DOMAIN`/`MAILGUN_BASE_URL`/`EMAIL_FROM`). Local console-log path built meanwhile.
+- ~~**2.3** — live Mailgun send~~ ✅ RESOLVED 2026-06-16: real `MAILGUN_*` creds added to `.env`; live send verified end-to-end (HTTP 200 via `mg.sunboyy.com`, real POST path, no dev-fallback).
 - **7.6** — real PWA icons + theme/background colors. Placeholders used meanwhile.
 - **Deploy** (not a numbered task) — real Neon pooled+direct URLs. Local Postgres used for the whole build.
 - **2.11 prod hardening** — rate-limit storage is now **Postgres-backed** (`rate_limit` table, migration `0001`, `storage: 'database'`), so counters are shared across serverless instances. _Remaining:_ in production set `advanced.ipAddress.ipAddressHeaders` so better-auth derives a true per-IP bucket from the proxy's forwarded header (without it, all clients share one bucket — the preview logs this warning). Per-email throttling across many IPs stays a documented v1 limitation (better-auth keys on IP+path; mitigated by account-existence-agnostic responses + single-use short-lived tokens).

@@ -74,6 +74,32 @@ const PASSKEY_SIGN_IN_PATH = '/passkey/verify-authentication';
 const MAGIC_LINK_RATE_LIMIT = { window: 60, max: 5 } as const;
 const PASSKEY_RATE_LIMIT = { window: 60, max: 10 } as const;
 
+// Trusted client-IP header for rate-limit bucketing (PLAN §12 — production
+// hardening for task 2.11).
+//
+// better-auth derives the rate-limit key from the client IP (see
+// `getIp()` in better-auth/utils/get-request-ip), iterating
+// `advanced.ipAddress.ipAddressHeaders` IN ORDER and taking the FIRST valid IP,
+// read as `value.split(",")[0].trim()`. Its DEFAULT list is just
+// `["x-forwarded-for"]`. On a platform that lets a client prepend its own
+// entry, that first value is attacker-controlled, so an attacker could rotate it
+// to mint unlimited fresh rate-limit buckets and slip past the magic-link cap.
+//
+// This app deploys on Vercel (`@sveltejs/adapter-vercel`, task 1.1). Per
+// Vercel's request-headers docs:
+//   - `x-real-ip` is SET BY VERCEL to the real client IP as a SINGLE value and
+//     overwrites any client-supplied value — it is not spoofable.
+//   - `x-forwarded-for` is also overwritten by Vercel to the public client IP
+//     ("do not forward external IPs … to prevent IP spoofing"), BUT it may carry
+//     extra entries when a proxy sits on top of Vercel.
+// So we put the single-value, Vercel-guaranteed `x-real-ip` FIRST (the trusted
+// header), with `x-forwarded-for` as a fallback. The first/trusted header is the
+// non-spoofable one, which is what closes the bucket-evasion gap.
+//
+// Locally (dev/test) neither header is present, so better-auth falls back to a
+// localhost bucket — this only changes/hardens production behaviour.
+const IP_ADDRESS_HEADERS = ['x-real-ip', 'x-forwarded-for'] as const;
+
 // Storage: POSTGRES-backed (production hardening from task 2.11). The default
 // `storage: 'memory'` store is PER-INSTANCE: on Vercel's serverless/edge fleet
 // each instance keeps its own counters, so the effective limit scales with the
@@ -255,6 +281,14 @@ export const auth = betterAuth({
 	// Always-on, IP+path keyed rate limiting with a tightened magic-link rule to
 	// blunt email bombing (PLAN §12). See the `rateLimit` definition above.
 	rateLimit,
+	// Trust the spoof-resistant, Vercel-set client-IP header FIRST so production
+	// rate-limit buckets are keyed on the REAL client IP and can't be evaded by a
+	// client-supplied `x-forwarded-for` (PLAN §12). See `IP_ADDRESS_HEADERS` above.
+	advanced: {
+		ipAddress: {
+			ipAddressHeaders: [...IP_ADDRESS_HEADERS]
+		}
+	},
 	// Passwordless: email/password and social providers are intentionally off
 	// (PLAN §5.1). Email is verified implicitly by clicking the magic link.
 	emailAndPassword: { enabled: false },

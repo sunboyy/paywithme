@@ -184,6 +184,21 @@ describe('auth instance wiring', () => {
 		expect(customRules['/passkey/verify-authentication']).toEqual({ window: 60, max: 10 });
 	});
 
+	it('trusts the spoof-resistant Vercel client-IP header first for rate-limit bucketing (PLAN §12)', async () => {
+		// better-auth keys its rate limiter on the client IP, taking the FIRST valid
+		// IP from `advanced.ipAddress.ipAddressHeaders` (read as
+		// `value.split(',')[0]`). The trusted/first header must be Vercel's
+		// non-spoofable, single-value `x-real-ip` so an attacker can't rotate a
+		// client-supplied `x-forwarded-for` to mint fresh buckets (task 2.11).
+		const { auth } = await import('./auth');
+		const ipAddress = (
+			auth.options.advanced as { ipAddress?: { ipAddressHeaders?: string[] } } | undefined
+		)?.ipAddress;
+		expect(ipAddress?.ipAddressHeaders).toEqual(['x-real-ip', 'x-forwarded-for']);
+		// The trusted (first) header is the spoof-resistant Vercel-set one.
+		expect(ipAddress?.ipAddressHeaders?.[0]).toBe('x-real-ip');
+	});
+
 	it('defaults the WebAuthn rpID to "localhost" when AUTH_RP_ID is unset', async () => {
 		// AUTH_RP_ID is unset in the test env, so the config falls back to the
 		// `localhost` default; the passkey plugin carries that resolved rpID.
