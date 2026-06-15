@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+.svelte-kit/
+build/
+dist/
+.vercel/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Test / coverage
+coverage/
+playwright-report/
+test-results/
+.playwright/
+
+# Logs / OS
+*.log
+npm-debug.log*
+.DS_Store
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
