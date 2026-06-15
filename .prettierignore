@@ -1,0 +1,18 @@
+# Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Dependencies
+node_modules/
+
+# Build output / framework cache
+.svelte-kit/
+.vercel/
+build/
+dist/
+
+# Generated database migrations (Drizzle Kit output)
+drizzle/

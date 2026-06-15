@@ -25,7 +25,7 @@ function getPool(): Pool {
 		const connectionString = env.DATABASE_URL;
 		if (!connectionString) {
 			throw new Error(
-				'DATABASE_URL is not set. The app needs Neon\'s pooled connection string at runtime.'
+				"DATABASE_URL is not set. The app needs Neon's pooled connection string at runtime."
 			);
 		}
 		_pool = new Pool({ connectionString });

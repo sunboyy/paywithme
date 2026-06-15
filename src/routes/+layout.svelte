@@ -1,5 +1,6 @@
 <script lang="ts">
 	import '../app.css';
+	import { resolve } from '$app/paths';
 	import favicon from '$lib/assets/favicon.svg';
 	import { Toaster } from '$lib/components/ui/sonner';
 
@@ -25,13 +26,16 @@
 			style="padding-top: env(safe-area-inset-top);"
 		>
 			<div class="flex h-14 items-center justify-between px-4">
-				<a href="/" class="text-lg font-semibold tracking-tight">Pay with me</a>
+				<a href={resolve('/')} class="text-lg font-semibold tracking-tight">Pay with me</a>
 				<!-- Placeholder for page-level header actions (filled by feature pages later). -->
 				<div class="flex items-center gap-2"></div>
 			</div>
 		</header>
 
-		<main class="flex-1 px-4 py-6" style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom));">
+		<main
+			class="flex-1 px-4 py-6"
+			style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom));"
+		>
 			{@render children()}
 		</main>
 
