@@ -118,11 +118,11 @@ test.describe('auth e2e — magic link + passkey + recovery', () => {
 		await page.goto('/login');
 		await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
 
-		// The client lands on `/` after a successful assertion. Force a fresh
-		// full-page load so the auth-aware chrome reflects the server-resolved
-		// session (rather than any cached SPA `load` data from before sign-in).
+		// The client lands on `/` after a successful assertion. No reload: the login
+		// handler's `goto(..., { invalidateAll: true })` re-runs the root layout load
+		// so the auth-aware chrome reflects the server-resolved session from the SPA
+		// navigation alone. This asserts the regression fix holds without a refresh.
 		await page.waitForURL(new RegExp(`^${escapeRegExp(appBaseURL)}/?$`));
-		await page.reload();
 
 		// Back in the app and authenticated via the passkey: the logout control
 		// returns and the header shows the signed-in user.

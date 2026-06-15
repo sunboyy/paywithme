@@ -41,8 +41,13 @@
 			}
 
 			if (result) {
-				// Session cookie is set by better-auth; land on the app.
-				await goto(resolve('/'));
+				// `signIn.passkey()` set the better-auth session cookie client-side, but
+				// the root `+layout.server.ts` load already ran while logged-out (→
+				// `user: null`). A plain `goto` would reuse that cached data and leave
+				// the header stale ("Sign in" instead of name + "Log out") until a manual
+				// refresh. `invalidateAll: true` forces every `load` to re-run so the
+				// layout re-reads the now-authenticated session and the chrome reflects it.
+				await goto(resolve('/'), { invalidateAll: true });
 			}
 		} catch {
 			// Defensive: an unexpected thrown error (e.g. WebAuthn cancellation in
