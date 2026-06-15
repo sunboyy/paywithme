@@ -47,7 +47,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 2.8 `/onboarding/passkey` post-first-login nudge (skippable) @done deps:2.6
 - [x] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @done deps:2.7
 - [x] 2.10 Logout @done deps:2.4
-- [ ] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @todo deps:2.5
+- [x] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @done deps:2.5
 - [ ] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @todo deps:2.9
 
 ## Phase 3 — Groups & members (PLAN §6, §14.3)
@@ -114,3 +114,4 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - **2.3** — live Mailgun send (`MAILGUN_API_KEY`/`MAILGUN_DOMAIN`/`MAILGUN_BASE_URL`/`EMAIL_FROM`). Local console-log path built meanwhile.
 - **7.6** — real PWA icons + theme/background colors. Placeholders used meanwhile.
 - **Deploy** (not a numbered task) — real Neon pooled+direct URLs. Local Postgres used for the whole build.
+- **2.11 prod hardening** (not blocking) — rate-limit storage is in-memory/per-instance; on multi-instance serverless (Vercel) move to `storage: 'database'` (needs a `rateLimit` table via `@better-auth/cli generate`, currently impeded by `auth.ts`'s `$app/server` import) or a Redis `customStorage`. Per-email throttling across many IPs is a documented v1 limitation (better-auth keys on IP+path; mitigated by account-existence-agnostic responses + single-use short-lived tokens).

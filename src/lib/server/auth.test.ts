@@ -40,6 +40,85 @@ describe('parseTrustedOrigins', () => {
 	});
 });
 
+describe('resolveAuthEnv (strict per environment — PLAN §12)', () => {
+	// Pure function: we pass a fake `env` slice + `isProduction` flag, so these
+	// tests never mutate the real process.env / $env.
+	const PROD_ENV = {
+		BETTER_AUTH_URL: 'https://paywithme.example.com',
+		BETTER_AUTH_SECRET: 'super-secret-value-do-not-leak',
+		AUTH_RP_ID: 'paywithme.example.com',
+		AUTH_TRUSTED_ORIGINS: 'https://paywithme.example.com'
+	};
+
+	it('production + all required vars present → resolved values (rpID from env, origin = BETTER_AUTH_URL)', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({ env: PROD_ENV, isProduction: true });
+		expect(resolved).toEqual({
+			baseURL: 'https://paywithme.example.com',
+			rpID: 'paywithme.example.com',
+			origin: 'https://paywithme.example.com',
+			trustedOrigins: ['https://paywithme.example.com'],
+			secret: 'super-secret-value-do-not-leak'
+		});
+	});
+
+	it.each([
+		['BETTER_AUTH_URL', { ...PROD_ENV, BETTER_AUTH_URL: undefined }],
+		['BETTER_AUTH_SECRET', { ...PROD_ENV, BETTER_AUTH_SECRET: undefined }],
+		['AUTH_RP_ID', { ...PROD_ENV, AUTH_RP_ID: undefined }],
+		['AUTH_TRUSTED_ORIGINS', { ...PROD_ENV, AUTH_TRUSTED_ORIGINS: '' }]
+	])(
+		'production + missing %s → throws, naming the var but no secret value',
+		async (missing, env) => {
+			const { resolveAuthEnv } = await import('./auth');
+			let thrown: Error | undefined;
+			try {
+				resolveAuthEnv({ env, isProduction: true });
+			} catch (e) {
+				thrown = e as Error;
+			}
+			expect(thrown).toBeInstanceOf(Error);
+			expect(thrown?.message).toContain(missing);
+			// The message must never leak the secret value.
+			expect(thrown?.message).not.toContain('super-secret-value-do-not-leak');
+		}
+	);
+
+	it('production reports every missing required var at once', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		expect(() => resolveAuthEnv({ env: {}, isProduction: true })).toThrow(
+			/BETTER_AUTH_URL.*BETTER_AUTH_SECRET.*AUTH_RP_ID.*AUTH_TRUSTED_ORIGINS/s
+		);
+	});
+
+	it('dev + nothing set → lenient fallbacks (rpID "localhost"), no throw', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({ env: {}, isProduction: false });
+		expect(resolved).toEqual({
+			baseURL: undefined,
+			rpID: 'localhost',
+			origin: null,
+			trustedOrigins: [],
+			secret: undefined
+		});
+	});
+
+	it('dev still honours provided values when present', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({
+			env: {
+				BETTER_AUTH_URL: 'http://localhost:5173',
+				AUTH_TRUSTED_ORIGINS: 'http://localhost:5173'
+			},
+			isProduction: false
+		});
+		expect(resolved.baseURL).toBe('http://localhost:5173');
+		expect(resolved.origin).toBe('http://localhost:5173');
+		expect(resolved.rpID).toBe('localhost');
+		expect(resolved.trustedOrigins).toEqual(['http://localhost:5173']);
+	});
+});
+
 describe('auth instance wiring', () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -74,6 +153,33 @@ describe('auth instance wiring', () => {
 		// `socialProviders` is absent from the options object entirely.
 		const options = auth.options as { socialProviders?: unknown };
 		expect(options.socialProviders).toBeUndefined();
+	});
+
+	it('enables rate limiting in every environment with the magic-link custom rules (PLAN §12)', async () => {
+		const { auth } = await import('./auth');
+		const rateLimit = auth.options.rateLimit;
+		expect(rateLimit).toBeDefined();
+		// Always-on (better-auth otherwise enables it only in production).
+		expect(rateLimit?.enabled).toBe(true);
+		// In-memory default store (the documented v1 limitation: per-instance).
+		expect(rateLimit?.storage).toBe('memory');
+		// Sane global fallback bucket.
+		expect(typeof rateLimit?.window).toBe('number');
+		expect(typeof rateLimit?.max).toBe('number');
+		expect(rateLimit?.max).toBeGreaterThan(0);
+
+		// Tightened, IP+path keyed rule for the magic-link SEND and VERIFY paths —
+		// the email-bombing surface (PLAN §12). Read the resolved option, don't
+		// re-derive the constant. max must stay >= 5 so the auth e2e (task 2.12)
+		// can still make a few unique sends.
+		const customRules = rateLimit?.customRules ?? {};
+		const sendRule = customRules['/sign-in/magic-link'];
+		const verifyRule = customRules['/magic-link/verify'];
+		expect(sendRule).toEqual({ window: 60, max: 5 });
+		expect(verifyRule).toEqual({ window: 60, max: 5 });
+		expect((sendRule as { max: number }).max).toBeGreaterThanOrEqual(5);
+		// Passkey sign-in challenge is also throttled (cheap to cover).
+		expect(customRules['/passkey/verify-authentication']).toEqual({ window: 60, max: 10 });
 	});
 
 	it('defaults the WebAuthn rpID to "localhost" when AUTH_RP_ID is unset', async () => {
