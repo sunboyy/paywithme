@@ -23,7 +23,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 1.1 Scaffold SvelteKit + TS via pnpm; add `@sveltejs/adapter-vercel` (Node runtime) @done
 - [x] 1.2 Tailwind CSS setup @done deps:1.1
 - [x] 1.3 Init shadcn-svelte via CLI; verify `@lucide/svelte` present @done deps:1.2
-- [ ] 1.4 Add base shadcn components via CLI (button, card, dialog, sheet/drawer, form, input, select, tabs, avatar, badge, table, sonner/toast, separator) @todo deps:1.3
+- [x] 1.4 Add base shadcn components via CLI (button, card, dialog, sheet/drawer, form, input, select, tabs, avatar, badge, table, sonner/toast, separator) @done deps:1.3
 - [ ] 1.5 Drizzle ORM + drizzle-kit config; `pg` driver; pooled (app) vs direct (migrations) URL wiring @todo deps:1.1
 - [ ] 1.6 `.env.example` documenting every env var (Neon pooled+direct, MAILGUN\_\*, EMAIL_FROM, rpID/origin/trustedOrigins) — PLAN #24 @todo deps:1.5
 - [ ] 1.7 Local Postgres dev setup (docker-compose or doc) + first migration runs @todo deps:1.5
