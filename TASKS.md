@@ -27,7 +27,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 1.5 Drizzle ORM + drizzle-kit config; `pg` driver; pooled (app) vs direct (migrations) URL wiring @done deps:1.1
 - [x] 1.6 `.env.example` documenting every env var (Neon pooled+direct, MAILGUN\_\*, EMAIL_FROM, rpID/origin/trustedOrigins) — PLAN #24 @done deps:1.5
 - [x] 1.7 Local Postgres dev setup (docker-compose or doc) + first migration runs @done deps:1.5
-- [ ] 1.8 Install better-auth + Drizzle adapter; generate/migrate auth tables (user/session/account/verification/passkey) @todo deps:1.7
+- [x] 1.8 Install better-auth + Drizzle adapter; generate/migrate auth tables (user/session/account/verification/passkey) @done deps:1.7
 - [ ] 1.9 Base app shell + root layout (mobile-first, responsive) — PLAN §10/#28 @todo deps:1.4
 - [ ] 1.10 ESLint + Prettier config; `lint` + `format:check` scripts @todo deps:1.1
 - [ ] 1.11 Vitest config + `test:unit` script + sample test @todo deps:1.1

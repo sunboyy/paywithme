@@ -52,6 +52,8 @@
 		}
 	},
 	"dependencies": {
+		"@better-auth/passkey": "^1.6.18",
+		"better-auth": "^1.6.18",
 		"drizzle-orm": "^0.45.2",
 		"pg": "^8.21.0"
 	}
