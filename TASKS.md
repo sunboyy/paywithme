@@ -20,7 +20,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 1 — Foundation (PLAN §3, §14.1)
 
-- [ ] 1.1 Scaffold SvelteKit + TS via pnpm; add `@sveltejs/adapter-vercel` (Node runtime) @todo
+- [x] 1.1 Scaffold SvelteKit + TS via pnpm; add `@sveltejs/adapter-vercel` (Node runtime) @done
 - [ ] 1.2 Tailwind CSS setup @todo deps:1.1
 - [ ] 1.3 Init shadcn-svelte via CLI; verify `@lucide/svelte` present @todo deps:1.2
 - [ ] 1.4 Add base shadcn components via CLI (button, card, dialog, sheet/drawer, form, input, select, tabs, avatar, badge, table, sonner/toast, separator) @todo deps:1.3
