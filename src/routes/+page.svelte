@@ -1,2 +1,18 @@
-<h1 class="text-2xl font-bold">Welcome to SvelteKit</h1>
-<p>Visit <a href="https://svelte.dev/docs/kit">svelte.dev/docs/kit</a> to read the documentation</p>
+<script lang="ts">
+	import * as Card from '$lib/components/ui/card';
+
+	// Static landing placeholder that sits inside the app shell.
+	// The "redirect to dashboard if logged in" behaviour (PLAN §10) needs a
+	// session and is intentionally deferred to Phase 2.
+</script>
+
+<svelte:head>
+	<title>Pay with me</title>
+</svelte:head>
+
+<Card.Root>
+	<Card.Header>
+		<Card.Title class="text-2xl">Pay with me</Card.Title>
+		<Card.Description>Split group spending and settle up, the easy way.</Card.Description>
+	</Card.Header>
+</Card.Root>
