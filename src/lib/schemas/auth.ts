@@ -76,3 +76,19 @@ export const loginSchema = z.object({
 
 /** Inferred, normalized login input — shared by server action + client form. */
 export type LoginInput = z.infer<typeof loginSchema>;
+
+/**
+ * Delete-passkey input (PLAN §5.4, §5.6). Backs the `/settings` `?/delete`
+ * server action, which works without JS via a plain `<form>` carrying the
+ * passkey `id` in a hidden field. `id` is the better-auth passkey row id (a
+ * non-empty string); the action forwards it to `auth.api.deletePasskey`, which
+ * scopes the delete to the authenticated user's own passkeys, so we only
+ * validate shape here. Deleting the last passkey is intentionally allowed —
+ * recovery is via email magic link (PLAN §5.6).
+ */
+export const deletePasskeySchema = z.object({
+	id: z.string().min(1, { message: 'A passkey id is required' })
+});
+
+/** Inferred delete-passkey input — shared by the `/settings` action + form. */
+export type DeletePasskeyInput = z.infer<typeof deletePasskeySchema>;

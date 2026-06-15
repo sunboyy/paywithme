@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayNameSchema, loginSchema, registerSchema } from './auth';
+import { deletePasskeySchema, displayNameSchema, loginSchema, registerSchema } from './auth';
 
 describe('registerSchema', () => {
 	it('accepts valid input and normalizes email (trim + lowercase) and name (trim)', () => {
@@ -163,5 +163,34 @@ describe('loginSchema', () => {
 
 		expect(loginMsg).toBe(registerMsg);
 		expect(loginMsg).toBe('Enter a valid email address');
+	});
+});
+
+describe('deletePasskeySchema', () => {
+	// Backs the `/settings` `?/delete` action (PLAN §5.4): a single required,
+	// non-empty `id` string identifying the passkey row to remove.
+
+	it('accepts a non-empty id', () => {
+		const result = deletePasskeySchema.safeParse({ id: 'pk_abc123' });
+		expect(result.success).toBe(true);
+		expect(result.data).toEqual({ id: 'pk_abc123' });
+	});
+
+	it('rejects a missing id', () => {
+		const result = deletePasskeySchema.safeParse({});
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'id')).toBe(true);
+	});
+
+	it('rejects an empty id', () => {
+		const result = deletePasskeySchema.safeParse({ id: '' });
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'id')).toBe(true);
+	});
+
+	it('rejects a non-string id', () => {
+		const result = deletePasskeySchema.safeParse({ id: 123 });
+		expect(result.success).toBe(false);
+		expect(result.error?.issues.some((i) => i.path[0] === 'id')).toBe(true);
 	});
 });

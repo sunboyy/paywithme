@@ -23,10 +23,12 @@ declare global {
 		// Typed status message for sveltekit-superforms (task 2.5 `/register`).
 		// superforms resolves the form message type from `App.Superforms.Message`,
 		// so this namespace MUST be nested inside `App`. `sent` carries the target
-		// email for the confirmation; `error` a generic message. Same shape
-		// regardless of account existence (PLAN §12).
+		// email for the confirmation; `success` confirms a completed mutation
+		// (e.g. a passkey removed — task 2.9 `/settings`); `error` a generic
+		// message. The error shape is the same regardless of account existence
+		// (PLAN §12).
 		namespace Superforms {
-			type Message = { type: 'sent' | 'error'; text: string };
+			type Message = { type: 'sent' | 'success' | 'error'; text: string };
 		}
 	}
 }
