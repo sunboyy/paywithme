@@ -37,7 +37,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 2 — Auth (magic link + passkey) (PLAN §5, §11.1, §14.2)
 
-- [ ] 2.1 better-auth server config: `drizzleAdapter` + `magicLink` + `passkey` plugins (no password/social) @todo deps:1.8
+- [x] 2.1 better-auth server config: `drizzleAdapter` + `magicLink` + `passkey` plugins (no password/social) @done deps:1.8
 - [ ] 2.2 `/api/auth/[...all]/+server.ts` handler mount @todo deps:2.1
 - [ ] 2.3 `lib/server` email helper (Mailgun HTTP API) with **local console-log fallback** — PLAN #24. NEEDS-INPUT: real MAILGUN\_\* for live send (build local path now) @todo deps:2.1
 - [ ] 2.4 `hooks.server.ts`: resolve session → `locals.user`/`locals.session` @todo deps:2.1
