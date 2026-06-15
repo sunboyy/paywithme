@@ -48,7 +48,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @done deps:2.7
 - [x] 2.10 Logout @done deps:2.4
 - [x] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @done deps:2.5
-- [ ] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @todo deps:2.9
+- [x] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @done deps:2.9
 
 ## Phase 3 — Groups & members (PLAN §6, §14.3)
 

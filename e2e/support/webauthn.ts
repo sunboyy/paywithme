@@ -60,3 +60,23 @@ export async function addVirtualAuthenticator(
 
 	return authenticatorId;
 }
+
+/**
+ * Inspect the discoverable credentials currently stored on a virtual
+ * authenticator. Used by task 2.12 to assert a passkey was actually created by
+ * an enrolment ceremony (in addition to the user-visible `/settings` list).
+ *
+ * Opens its own short-lived CDP session, so it can run after `addVirtualAuthenticator`
+ * without threading the original client through the test.
+ */
+export async function getCredentials(
+	page: Page,
+	authenticatorId: string
+): Promise<Array<{ credentialId: string; isResidentCredential: boolean }>> {
+	const client = await page.context().newCDPSession(page);
+	const { credentials } = await client.send('WebAuthn.getCredentials', { authenticatorId });
+	return credentials.map((c) => ({
+		credentialId: c.credentialId,
+		isResidentCredential: c.isResidentCredential
+	}));
+}
