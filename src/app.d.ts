@@ -19,6 +19,15 @@ declare global {
 		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}
+
+		// Typed status message for sveltekit-superforms (task 2.5 `/register`).
+		// superforms resolves the form message type from `App.Superforms.Message`,
+		// so this namespace MUST be nested inside `App`. `sent` carries the target
+		// email for the confirmation; `error` a generic message. Same shape
+		// regardless of account existence (PLAN §12).
+		namespace Superforms {
+			type Message = { type: 'sent' | 'error'; text: string };
+		}
 	}
 }
 
