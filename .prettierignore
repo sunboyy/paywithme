@@ -1,0 +1,26 @@
+# Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Dependencies
+node_modules/
+
+# Build output / framework cache
+.svelte-kit/
+.vercel/
+build/
+dist/
+
+# Vitest coverage output
+coverage/
+
+# Playwright e2e output / cache
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Generated database migrations (Drizzle Kit output)
+drizzle/

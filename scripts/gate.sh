@@ -10,20 +10,28 @@ if [ ! -f package.json ]; then
   exit 0
 fi
 
-# Helper: run a pnpm script only if it is defined in package.json.
-run_if_present() {
-  local script="$1"
-  if pnpm run | grep -qE "^[[:space:]]*${script}([[:space:]]|$)"; then
-    echo "[gate] pnpm ${script}"
-    pnpm run "${script}"
-  else
-    echo "[gate] (skip) no '${script}' script defined"
-  fi
+# Detect whether a pnpm script is defined in package.json.
+script_present() {
+  pnpm run | grep -qE "^[[:space:]]*$1([[:space:]]|$)"
 }
 
-run_if_present lint
-run_if_present format:check
-run_if_present check        # svelte-check / tsc typecheck
-run_if_present test:unit
+# Assert a required script exists, then run it. Once package.json exists these
+# scripts are a hard contract — a missing one is a failure, not a silent skip.
+require_script() {
+  local script="$1"
+  if ! script_present "${script}"; then
+    echo "[gate] ERROR: required script '${script}' is missing from package.json." >&2
+    echo "[gate] The fast gate requires the scripts wired by task 1.14:" >&2
+    echo "[gate]   lint, format:check, check, test:unit" >&2
+    exit 1
+  fi
+  echo "[gate] pnpm ${script}"
+  pnpm run "${script}"
+}
+
+require_script lint
+require_script format:check
+require_script check        # svelte-check / tsc typecheck
+require_script test:unit
 
 echo "[gate] fast gate OK"

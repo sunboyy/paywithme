@@ -1,0 +1,39 @@
+# Local development database for "Pay with me".
+#
+# This is the canonical, reproducible local Postgres for development. It matches
+# the local connection URL documented in `.env.example`:
+#
+#   postgresql://postgres:postgres@localhost:5432/paywithme
+#
+# Quick start:
+#   docker compose up -d        # start Postgres in the background
+#   cp .env.example .env        # then point DATABASE_URL* at localhost (already the default)
+#   pnpm db:migrate             # run migrations against it
+#   docker compose down         # stop (data persists in the named volume)
+#   docker compose down -v      # stop AND wipe the data volume
+#
+# Production uses Neon (see PLAN §3/§4); this file is dev-only.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: paywithme-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: paywithme
+    ports:
+      - '5432:5432'
+    volumes:
+      - paywithme_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` returns 0 once the server accepts connections.
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d paywithme']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  paywithme_pgdata:

@@ -20,20 +20,20 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 1 — Foundation (PLAN §3, §14.1)
 
-- [ ] 1.1 Scaffold SvelteKit + TS via pnpm; add `@sveltejs/adapter-vercel` (Node runtime) @todo
-- [ ] 1.2 Tailwind CSS setup @todo deps:1.1
-- [ ] 1.3 Init shadcn-svelte via CLI; verify `@lucide/svelte` present @todo deps:1.2
-- [ ] 1.4 Add base shadcn components via CLI (button, card, dialog, sheet/drawer, form, input, select, tabs, avatar, badge, table, sonner/toast, separator) @todo deps:1.3
-- [ ] 1.5 Drizzle ORM + drizzle-kit config; `pg` driver; pooled (app) vs direct (migrations) URL wiring @todo deps:1.1
-- [ ] 1.6 `.env.example` documenting every env var (Neon pooled+direct, MAILGUN\_\*, EMAIL_FROM, rpID/origin/trustedOrigins) — PLAN #24 @todo deps:1.5
-- [ ] 1.7 Local Postgres dev setup (docker-compose or doc) + first migration runs @todo deps:1.5
-- [ ] 1.8 Install better-auth + Drizzle adapter; generate/migrate auth tables (user/session/account/verification/passkey) @todo deps:1.7
-- [ ] 1.9 Base app shell + root layout (mobile-first, responsive) — PLAN §10/#28 @todo deps:1.4
-- [ ] 1.10 ESLint + Prettier config; `lint` + `format:check` scripts @todo deps:1.1
-- [ ] 1.11 Vitest config + `test:unit` script + sample test @todo deps:1.1
-- [ ] 1.12 Playwright config (incl. virtual authenticator) + `test:e2e` script @todo deps:1.1
-- [ ] 1.13 CI workflow (GitHub Actions): lint + typecheck + unit @todo deps:1.10,1.11
-- [ ] 1.14 Wire `package.json` scripts so `scripts/gate.sh`/`gate-full.sh` have teeth (`lint`,`format:check`,`check`,`test:unit`,`test:e2e`) @todo deps:1.10,1.11,1.12
+- [x] 1.1 Scaffold SvelteKit + TS via pnpm; add `@sveltejs/adapter-vercel` (Node runtime) @done
+- [x] 1.2 Tailwind CSS setup @done deps:1.1
+- [x] 1.3 Init shadcn-svelte via CLI; verify `@lucide/svelte` present @done deps:1.2
+- [x] 1.4 Add base shadcn components via CLI (button, card, dialog, sheet/drawer, form, input, select, tabs, avatar, badge, table, sonner/toast, separator) @done deps:1.3
+- [x] 1.5 Drizzle ORM + drizzle-kit config; `pg` driver; pooled (app) vs direct (migrations) URL wiring @done deps:1.1
+- [x] 1.6 `.env.example` documenting every env var (Neon pooled+direct, MAILGUN\_\*, EMAIL_FROM, rpID/origin/trustedOrigins) — PLAN #24 @done deps:1.5
+- [x] 1.7 Local Postgres dev setup (docker-compose or doc) + first migration runs @done deps:1.5
+- [x] 1.8 Install better-auth + Drizzle adapter; generate/migrate auth tables (user/session/account/verification/passkey) @done deps:1.7
+- [x] 1.9 Base app shell + root layout (mobile-first, responsive) — PLAN §10/#28 @done deps:1.4
+- [x] 1.10 ESLint + Prettier config; `lint` + `format:check` scripts @done deps:1.1
+- [x] 1.11 Vitest config + `test:unit` script + sample test @done deps:1.1
+- [x] 1.12 Playwright config (incl. virtual authenticator) + `test:e2e` script @done deps:1.1
+- [x] 1.13 CI workflow (GitHub Actions): lint + typecheck + unit @done deps:1.10,1.11
+- [x] 1.14 Wire `package.json` scripts so `scripts/gate.sh`/`gate-full.sh` have teeth (`lint`,`format:check`,`check`,`test:unit`,`test:e2e`) @done deps:1.10,1.11,1.12
 
 ## Phase 2 — Auth (magic link + passkey) (PLAN §5, §11.1, §14.2)
 
