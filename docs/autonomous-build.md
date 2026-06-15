@@ -1,85 +1,174 @@
-# Autonomous build — operations guide
+# Autonomous build — protocol & operations
 
-How "Pay with me" gets built hands-off from `PLAN.md`, and how to operate,
-pause, resume, and recover the loop. The short contract lives in `CLAUDE.md`;
-this is the detail.
+The canonical, **project-agnostic** contract for building an app hands-off from
+`PLAN.md` via an implement → review → test → commit loop. This is the single
+source of truth for _how_ the build runs.
+
+**Reusing this harness in another app:** copy `.claude/agents/`, `scripts/`, and
+this file; then write a fresh project-specific `PLAN.md` (the spec), `TASKS.md`
+(the decomposition), and `CLAUDE.md` (project conventions + a pointer here). The
+protocol below does not change between projects.
 
 ## Components
 
-| Piece | File(s) | Role |
-|---|---|---|
-| Orchestrator | the `/loop` main agent, per `CLAUDE.md` | Picks tasks, runs gate + git, delegates, pauses per phase |
-| Implementer | `.claude/agents/implementer.md` (Opus) | Writes code + tests for one task |
-| Reviewer | `.claude/agents/reviewer.md` (Sonnet) | Independent review → APPROVE / CHANGES |
-| Task tracker | `TASKS.md` | Single source of truth for progress (git-backed) |
-| Fast gate | `scripts/gate.sh` | lint + format + typecheck + unit (per task) |
-| Full gate | `scripts/gate-full.sh` | fast gate + Playwright e2e (per phase) |
-| Build branch | `impl/autonomous-build` | Where the loop commits |
+| Piece         | File(s)                                | Role                                                      | Reusable?      |
+| ------------- | -------------------------------------- | --------------------------------------------------------- | -------------- |
+| Orchestrator  | the `/loop` main agent (this protocol) | Picks tasks, runs gate + git, delegates, pauses per phase | ✅             |
+| Implementer   | `.claude/agents/implementer.md` (Opus) | Writes code + tests for one task                          | ✅             |
+| Reviewer      | `.claude/agents/reviewer.md` (Sonnet)  | Independent review → APPROVE / CHANGES                    | ✅             |
+| Fast gate     | `scripts/gate.sh`                      | lint + format + typecheck + unit (per task)               | ✅             |
+| Full gate     | `scripts/gate-full.sh`                 | fast gate + e2e (per phase)                               | ✅             |
+| Spec          | `PLAN.md`                              | _What_ to build                                           | ❌ per project |
+| Task tracker  | `TASKS.md`                             | Progress source-of-truth                                  | ❌ per project |
+| Project guide | `CLAUDE.md`                            | Project conventions + pointer here                        | ❌ per project |
+| Build branch  | `impl/autonomous-build`                | Where the loop commits                                    | ✅             |
 
-## Operating the loop
+## How to run the build
 
-**Start / resume:**
+Driven by the `/loop` skill in an interactive session; the main agent is the
+**orchestrator**. Start (or resume):
+
 ```
-/loop continue the autonomous build per CLAUDE.md
+/loop continue the autonomous build per docs/autonomous-build.md
 ```
 
-**At a phase boundary** the loop runs the full gate, then stops and asks you to:
-```
-git checkout main
-git merge --no-ff impl/autonomous-build
-git checkout impl/autonomous-build   # continue next phase here
-```
-Then restart the loop for the next phase. (No remote is configured; all local.
-Add one with `git remote add origin <url>` and push if you want off-machine
-backup later.)
+The build commits to branch **`impl/autonomous-build`**. `main` only advances by
+the human merging at phase boundaries. No git remote is configured; all local
+(add one with `git remote add origin <url>` and push later if you want backup).
+
+## Orchestrator loop (each tick)
+
+1. **Resume check.** If a task is marked `in-progress` in `TASKS.md`, recover it
+   first (see _Resume contract_) before picking new work.
+2. **Pick task.** From `TASKS.md`, select the first `todo` task in the current
+   phase whose dependencies are `done` and that is not `blocked`. Mark it
+   `in-progress`. (The **current phase** is the earliest phase that still has a
+   task not `done`/`blocked`; there is no separate on-disk phase marker — it is
+   always inferred from `TASKS.md`.) **Invariant:** at most one task is
+   `in-progress` at any time.
+3. **Phase boundary.** If no _actionable_ task remains in the current phase
+   (every task is `done` or `blocked`): run the **full gate**
+   (`scripts/gate-full.sh`). If green → **STOP** and hand back to the human. Do
+   not start the next phase yourself. The hand-back message must state whether
+   the phase is **fully done** (all tasks `done`) or **done-with-blocks** (some
+   tasks `blocked`), and list every `blocked` task with its reason
+   (`NEEDS-INPUT:` or the reviewer's notes). A blocked task does **not** prevent
+   the boundary stop — it is reported, not waited on.
+4. **Implement.** Spawn the **`implementer`** subagent (Opus) with the task spec
+   and the relevant `PLAN.md` sections. It writes code **and** tests.
+5. **Fast gate.** Run `scripts/gate.sh` (lint + prettier + typecheck + unit). If
+   red, hand the failures back to the implementer (draws from the shared 3-round
+   budget — see step 7) and do not proceed to review until green.
+6. **Review.** Mark the task `in-review`. Spawn the **`reviewer`** subagent
+   (Sonnet) with the task spec and the full diff **including new files** — use
+   `git add -A && git diff --staged` (a bare `git diff` omits untracked files,
+   which scaffolding tasks create). It returns **APPROVE** or findings.
+7. **Iterate.** On findings or a red gate, send them back to the implementer
+   (mark the task `in-progress` again). Both red-gate fixes and review findings
+   draw from **one shared budget of 3 rounds** total per task. If the budget is
+   exhausted while still red or unapproved → mark the task `blocked` with the
+   reviewer's notes (or the failing gate output, if review was never reached),
+   and continue with other tasks.
+8. **Commit.** On APPROVE **and** green fast gate: commit (see _Commit format_),
+   mark the task `done` in `TASKS.md` (commit that too).
+9. **Reschedule** the loop and repeat.
+
+The orchestrator never writes feature code — it only edits `TASKS.md`, runs the
+gate/git, and delegates to the two subagents.
 
 ## Task lifecycle
 
 ```
 todo ──> in-progress ──> in-review ──> done
-                  │            │
-                  └──> blocked <┘   (3 failed review rounds, or NEEDS-INPUT)
+            ▲   │            │
+            └───┘            │   (iterate: review/gate sends it back)
+            │                │
+            └──> blocked <───┘   (shared budget of 3 rounds exhausted, or NEEDS-INPUT)
 ```
 
 Status is tracked in `TASKS.md` via the checkbox + a `@status` tag per task.
-Only the orchestrator edits `TASKS.md`.
+The orchestrator sets `in-progress` (step 2), `in-review` (step 6, flipping back
+to `in-progress` on each iterate), `done` (step 8), or `blocked` (step 7). Only
+the orchestrator edits `TASKS.md`.
+
+**Blocked dependents.** A `blocked` task is never `done`, so step 2 will never
+pick a task that depends on it — its dependents would stall silently. When a task
+becomes `blocked`, also mark every task that (transitively) depends on it
+`blocked` with a `blocked-by:<id>` note, so the stall is visible in `TASKS.md`
+and reported at the phase boundary. Tasks blocked only this way auto-unblock when
+the blocker is resolved.
 
 ## Quality gates
 
-- **Fast gate** runs on every task; must be green to commit.
-- **Full gate** runs at each phase boundary; must be green before the merge pause.
+- **Fast gate** (`scripts/gate.sh`, every task): ESLint, Prettier check, type
+  check, unit tests. Must be green to commit.
+- **Full gate** (`scripts/gate-full.sh`, phase boundary): fast gate + e2e. Must
+  be green before the human merge pause.
 - Both no-op cleanly before Phase 1 scaffolds `package.json`. After scaffold, the
   implementer must wire these `package.json` scripts so the gate has teeth:
   `lint`, `format:check`, `check`, `test:unit`, `test:e2e`.
 
-## Resume / crash recovery
+## Commit format
 
-The system is designed to survive token-out and API errors because **all state
-is on disk + git**, never only in conversation context:
+One commit per completed task. Conventional commits, referencing the task id:
 
-1. A fresh session reads `CLAUDE.md` + `TASKS.md`.
+```
+<type>(<scope>): <summary>  [<task-id>]
+
+<what/why, 1–3 lines>
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+
+Commit only when fast gate is green **and** the reviewer approved. Commit the
+`TASKS.md` status change with (or immediately after) the task.
+
+## Phase boundary (human checkpoint)
+
+When a phase has no actionable task left (every task `done` or `blocked`) and the
+full gate is green, the loop stops and reports the phase status — **fully done**
+or **done-with-blocks** (listing each blocked task and reason) per loop step 3 —
+then asks the human to:
+
+```
+git checkout main
+git merge --no-ff impl/autonomous-build
+git checkout impl/autonomous-build   # continue next phase here
+```
+
+Then restart the loop. The loop **never auto-merges to `main`** — that's the
+human's per-phase checkpoint.
+
+## Resume contract (continuable across token-out / API error)
+
+State lives **on disk and in git**, never only in context, so any fresh session
+can resume:
+
+1. A fresh session reads `CLAUDE.md` + this file + `TASKS.md`.
 2. If a task is `in-progress`, run `scripts/gate.sh` on the working tree:
-   - green → review → commit (resume mid-loop);
-   - red/partial → implementer **continues** the existing working tree.
+   - **green** → review → commit (resume at loop step 6);
+   - **red / partial** → implementer **continues** the existing working tree
+     (do **not** discard partial work).
 3. Committed tasks are immutable history; only the current task can be partial.
 
-Because the orchestrator marks a task `in-progress` *before* delegating and only
-marks it `done` *after* committing, there is always exactly one recoverable point
+Because the orchestrator marks a task `in-progress` _before_ delegating and only
+marks it `done` _after_ committing, there is always exactly one recoverable point
 of uncertainty (the current task), and its partial work is preserved in the
 working tree.
 
 ## Blocked / external inputs
 
-Tasks needing real secrets/assets (PLAN #24 credentials, #25 brand assets) are
-built against the local-dev path (local Postgres, console-logged magic link,
-placeholder assets), the dependent part is marked `blocked` with a `NEEDS-INPUT:`
-note, and the loop continues. Provide these when prompted; then the blocked tasks
-can be unblocked in a later pass.
+Tasks needing real secrets/assets only the human can supply are listed in the
+_Blocked / NEEDS-INPUT register_ in `TASKS.md`. For these: build the local-dev
+path, mark the dependent part `blocked` with a `NEEDS-INPUT:` note, and continue.
+Provide the inputs when prompted; blocked tasks are then unblocked in a later
+pass. Never hard-code secrets — everything via `.env` (documented in
+`.env.example`).
 
 ## Guardrails
 
 - Orchestrator writes no feature code — only `TASKS.md`, gate runs, and git.
 - Implementer never commits or edits `TASKS.md`.
 - Reviewer never edits files.
-- No secrets in git; everything via `.env` (documented in `.env.example`).
-- The loop never auto-merges to `main` — that is the human's per-phase checkpoint.
+- No secrets in git.
+- The loop never auto-merges to `main`.
