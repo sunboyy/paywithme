@@ -24,7 +24,9 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { magicLink } from 'better-auth/plugins';
+import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { passkey } from '@better-auth/passkey';
+import { getRequestEvent } from '$app/server';
 import { env } from '$env/dynamic/private';
 import { db } from './db';
 import { sendMagicLinkEmail } from './email';
@@ -92,7 +94,16 @@ export const auth = betterAuth({
 			rpName: RP_NAME,
 			// WebAuthn origin = the app's canonical origin (BETTER_AUTH_URL).
 			origin: baseURL ?? null
-		})
+		}),
+		// MUST stay LAST in this array (better-auth requirement). This plugin runs
+		// its cookie handler in an `after` hook, so every server-side `auth.api.*`
+		// call (e.g. the logout `signOut` in task 2.10) routes its Set-Cookie
+		// through SvelteKit's own cookie API via `getRequestEvent` — so cleared /
+		// refreshed session cookies actually reach the browser. `getRequestEvent`
+		// is only invoked at request time, never at construction, so importing it
+		// here keeps module import side-effect free for `pnpm build` / the
+		// `@better-auth/cli generate` step.
+		sveltekitCookies(getRequestEvent)
 	]
 });
 

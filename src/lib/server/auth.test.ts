@@ -52,14 +52,19 @@ describe('auth instance wiring', () => {
 		expect(auth.options).toBeDefined();
 	});
 
-	it('registers exactly the magic-link and passkey plugins', async () => {
+	it('registers exactly the magic-link, passkey, and sveltekit-cookies plugins', async () => {
 		const { auth } = await import('./auth');
 		const pluginIds = (auth.options.plugins ?? []).map((p) => p.id);
 		expect(pluginIds).toContain('magic-link');
 		expect(pluginIds).toContain('passkey');
-		// Exactly two plugins — catches an accidental third plugin such as a
-		// forbidden social provider (PLAN §5.1).
-		expect(pluginIds).toHaveLength(2);
+		// `sveltekit-cookies` (added in task 2.10) makes server-side `auth.api.*`
+		// calls route their Set-Cookie through SvelteKit so cleared/refreshed
+		// session cookies reach the browser (e.g. logout). It MUST stay last.
+		expect(pluginIds).toContain('sveltekit-cookies');
+		// Exactly these three — asserting the exact set still catches an accidental
+		// extra plugin such as a forbidden social provider (PLAN §5.1).
+		expect(pluginIds).toHaveLength(3);
+		expect(new Set(pluginIds)).toEqual(new Set(['magic-link', 'passkey', 'sveltekit-cookies']));
 	});
 
 	it('disables email/password and configures no social providers', async () => {

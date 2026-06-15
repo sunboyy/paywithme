@@ -46,7 +46,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 2.7 `/login` (passkey primary + email-link fallback) @done deps:2.2
 - [x] 2.8 `/onboarding/passkey` post-first-login nudge (skippable) @done deps:2.6
 - [x] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @done deps:2.7
-- [ ] 2.10 Logout @todo deps:2.4
+- [x] 2.10 Logout @done deps:2.4
 - [ ] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @todo deps:2.5
 - [ ] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @todo deps:2.9
 
