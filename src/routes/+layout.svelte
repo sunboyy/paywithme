@@ -22,7 +22,7 @@
 <div class="bg-background text-foreground flex min-h-dvh flex-col">
 	<div class="mx-auto flex w-full max-w-screen-sm flex-1 flex-col">
 		<header
-			class="bg-background/95 supports-[backdrop-filter]:bg-background/80 sticky top-0 z-10 border-b backdrop-blur"
+			class="bg-background/95 supports-backdrop-filter:bg-background/80 sticky top-0 z-10 border-b backdrop-blur"
 			style="padding-top: env(safe-area-inset-top);"
 		>
 			<div class="flex h-14 items-center justify-between px-4">
