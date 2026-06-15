@@ -37,18 +37,18 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 2 — Auth (magic link + passkey) (PLAN §5, §11.1, §14.2)
 
-- [ ] 2.1 better-auth server config: `drizzleAdapter` + `magicLink` + `passkey` plugins (no password/social) @todo deps:1.8
-- [ ] 2.2 `/api/auth/[...all]/+server.ts` handler mount @todo deps:2.1
-- [ ] 2.3 `lib/server` email helper (Mailgun HTTP API) with **local console-log fallback** — PLAN #24. NEEDS-INPUT: real MAILGUN\_\* for live send (build local path now) @todo deps:2.1
-- [ ] 2.4 `hooks.server.ts`: resolve session → `locals.user`/`locals.session` @todo deps:2.1
-- [ ] 2.5 `/register` (email + display name) → magic link @todo deps:2.2,2.3
-- [ ] 2.6 Magic-link landing + capture display name to `user.name` after first verify — PLAN #26 @todo deps:2.5
-- [ ] 2.7 `/login` (passkey primary + email-link fallback) @todo deps:2.2
-- [ ] 2.8 `/onboarding/passkey` post-first-login nudge (skippable) @todo deps:2.6
-- [ ] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @todo deps:2.7
-- [ ] 2.10 Logout @todo deps:2.4
-- [ ] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @todo deps:2.5
-- [ ] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @todo deps:2.9
+- [x] 2.1 better-auth server config: `drizzleAdapter` + `magicLink` + `passkey` plugins (no password/social) @done deps:1.8
+- [x] 2.2 `/api/auth/[...all]/+server.ts` handler mount @done deps:2.1
+- [x] 2.3 `lib/server` email helper (Mailgun HTTP API) with **local console-log fallback** — PLAN #24. Live Mailgun send verified end-to-end (domain `mg.sunboyy.com`, real creds in `.env`) on 2026-06-16. @done deps:2.1
+- [x] 2.4 `hooks.server.ts`: resolve session → `locals.user`/`locals.session` @done deps:2.1
+- [x] 2.5 `/register` (email + display name) → magic link @done deps:2.2,2.3
+- [x] 2.6 Magic-link landing + capture display name to `user.name` after first verify — PLAN #26 @done deps:2.5
+- [x] 2.7 `/login` (passkey primary + email-link fallback) @done deps:2.2
+- [x] 2.8 `/onboarding/passkey` post-first-login nudge (skippable) @done deps:2.6
+- [x] 2.9 Passkey enrolment (`addPasskey`) + `/settings` manage passkeys (multiple devices) @done deps:2.7
+- [x] 2.10 Logout @done deps:2.4
+- [x] 2.11 Rate-limit magic-link requests; strict rpID/origin/trustedOrigins per env — PLAN §12 @done deps:2.5
+- [x] 2.12 Auth e2e: magic-link register/login (intercept link), passkey enrol+login (virtual authenticator), recovery path — PLAN §13 @done deps:2.9
 
 ## Phase 3 — Groups & members (PLAN §6, §14.3)
 
@@ -111,6 +111,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Blocked / NEEDS-INPUT register
 
-- **2.3** — live Mailgun send (`MAILGUN_API_KEY`/`MAILGUN_DOMAIN`/`MAILGUN_BASE_URL`/`EMAIL_FROM`). Local console-log path built meanwhile.
+- ~~**2.3** — live Mailgun send~~ ✅ RESOLVED 2026-06-16: real `MAILGUN_*` creds added to `.env`; live send verified end-to-end (HTTP 200 via `mg.sunboyy.com`, real POST path, no dev-fallback).
 - **7.6** — real PWA icons + theme/background colors. Placeholders used meanwhile.
 - **Deploy** (not a numbered task) — real Neon pooled+direct URLs. Local Postgres used for the whole build.
+- ~~**2.11 prod hardening**~~ ✅ RESOLVED 2026-06-16: rate-limit storage is **Postgres-backed** (`rate_limit` table, migration `0001`, `storage: 'database'`) so counters are shared across serverless instances, AND `advanced.ipAddress.ipAddressHeaders = ['x-real-ip','x-forwarded-for']` pins Vercel's non-spoofable client IP for true per-IP buckets. Enforcement verified live (429 after the 5/60s magic-link cap; counts persist in `rate_limit`). _Residual (by design, v1):_ per-email throttling across many IPs is not done — better-auth keys on IP+path; mitigated by account-existence-agnostic responses + single-use short-lived tokens.

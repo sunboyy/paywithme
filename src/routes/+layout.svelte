@@ -1,10 +1,12 @@
 <script lang="ts">
 	import '../app.css';
 	import { resolve } from '$app/paths';
+	import { enhance } from '$app/forms';
 	import favicon from '$lib/assets/favicon.svg';
+	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
 
-	let { children } = $props();
+	let { children, data } = $props();
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
@@ -17,7 +19,10 @@
 	  bottom-anchored action region stays reachable one-handed.
 	- Safe-area padding so content clears notches / home indicators on phones.
 	- App-wide <Toaster /> is mounted once here so toasts work everywhere.
-	- Auth-aware nav / user menu is intentionally NOT here (Phase 2: no session).
+	- Auth-aware chrome: when a session exists (`data.user`, projected by
+	  `+layout.server.ts`) the header shows a compact user indicator + a logout
+	  button. Logout is a real form POST to `/logout` (works without JS), upgraded
+	  by `use:enhance` when JS is present.
 -->
 <div class="bg-background text-foreground flex min-h-dvh flex-col">
 	<div class="mx-auto flex w-full max-w-screen-sm flex-1 flex-col">
@@ -27,8 +32,24 @@
 		>
 			<div class="flex h-14 items-center justify-between px-4">
 				<a href={resolve('/')} class="text-lg font-semibold tracking-tight">Pay with me</a>
-				<!-- Placeholder for page-level header actions (filled by feature pages later). -->
-				<div class="flex items-center gap-2"></div>
+				<!-- Auth-aware header actions. -->
+				<div class="flex min-w-0 items-center gap-2">
+					{#if data.user}
+						<span
+							class="text-muted-foreground max-w-[40vw] truncate text-sm"
+							title={data.user.email}
+						>
+							{data.user.name || data.user.email}
+						</span>
+						<form method="POST" action="/logout" use:enhance>
+							<Button type="submit" variant="ghost" size="sm">Log out</Button>
+						</form>
+					{:else}
+						<a href={resolve('/login')} class="text-muted-foreground text-sm hover:underline">
+							Sign in
+						</a>
+					{/if}
+				</div>
 			</div>
 		</header>
 
