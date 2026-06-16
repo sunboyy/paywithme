@@ -17,12 +17,13 @@
 // ineligible invite target (`InviteTargetError`) surfaces as a friendly message;
 // any other failure is a generic message (never leaking the raw cause — §12).
 
-import { error, fail, redirect } from '@sveltejs/kit';
+import { error, fail } from '@sveltejs/kit';
 import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { addMemberSchema, memberIdSchema, renameMemberSchema } from '$lib/schemas/member';
 import { createInviteSchema, revokeInviteSchema } from '$lib/schemas/invite';
-import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
+import { GroupAccessError } from '$lib/server/groups';
+import { requireGroupAccess, requireUser } from '$lib/server/access';
 import {
 	addMember,
 	listMembers,
@@ -52,26 +53,19 @@ function isNotFoundError(e: unknown): boolean {
 }
 
 export const load: PageServerLoad = async ({ params, locals, url }) => {
-	// Member management requires an authenticated session (access is via a linked
-	// member — PLAN §6.1). `redirect()` THROWS, so it lives OUTSIDE the try/catch
-	// below or the catch would swallow the navigation.
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
-
-	// Access-checked group fetch (3.3 service). `null` = no access / soft-deleted
-	// → not-found (PLAN §6.4 "routes return not-found"). We never leak existence.
-	const group = await getGroupForUser(locals.user.id, params.id);
-	if (!group) {
-		error(404, 'Group not found');
-	}
+	// Single centralized guard (task 3.8): anonymous → `redirect(303,'/login')`,
+	// no-access / not-found / soft-deleted → `error(404)` (PLAN §12 single check,
+	// existence never leaked). Both helpers THROW control flow, so this call lives
+	// OUTSIDE the try/catch blocks below or the catch would swallow the navigation.
+	// It also returns the already-loaded `group`, so we don't re-query.
+	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
 
 	// Degrade gracefully (PLAN §12): a transient list failure renders an empty
 	// member list rather than 500-ing the whole page. (Access already succeeded,
 	// so the group header still shows.)
 	let members: MemberListItem[];
 	try {
-		members = await listMembers({ userId: locals.user.id, groupId: params.id });
+		members = await listMembers({ userId: user.id, groupId: params.id });
 	} catch (e) {
 		// A real access/not-found here would be a race (the group vanished between
 		// the two reads) — re-surface as 404. Anything else → empty list.
@@ -86,7 +80,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// (A real access/not-found here would be a race — re-surface as 404.)
 	let invites: ActiveInvite[];
 	try {
-		invites = await listActiveInvites({ userId: locals.user.id, groupId: params.id });
+		invites = await listActiveInvites({ userId: user.id, groupId: params.id });
 	} catch (e) {
 		if (isNotFoundError(e)) {
 			error(404, 'Group not found');
@@ -96,7 +90,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	return {
 		// The viewer's own user id so the page can mark their linked member "You".
-		viewerUserId: locals.user.id,
+		viewerUserId: user.id,
 		group: { id: group.id, name: group.name, settlementCurrency: group.settlementCurrency },
 		members,
 		invites,
@@ -115,10 +109,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 export const actions: Actions = {
 	addMember: async ({ request, params, locals }) => {
-		// Guard the mutation too — never trust that `load` ran. THROWS.
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		// Guard the mutation too — never trust that `load` ran. `requireUser` THROWS
+		// a redirect for an anonymous caller (task 3.8 centralized guard); the
+		// service then re-asserts group access (→ 404) as defense in depth.
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(addMemberSchema));
 		if (!form.valid) {
@@ -127,7 +121,7 @@ export const actions: Actions = {
 
 		try {
 			await addMember({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				displayName: form.data.displayName
 			});
@@ -147,9 +141,7 @@ export const actions: Actions = {
 	},
 
 	renameMember: async ({ request, params, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(renameMemberSchema));
 		if (!form.valid) {
@@ -158,7 +150,7 @@ export const actions: Actions = {
 
 		try {
 			await renameMember({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				memberId: form.data.memberId,
 				displayName: form.data.displayName
@@ -178,9 +170,7 @@ export const actions: Actions = {
 	},
 
 	removeMember: async ({ request, params, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(memberIdSchema));
 		if (!form.valid) {
@@ -189,7 +179,7 @@ export const actions: Actions = {
 
 		try {
 			await removeMember({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				memberId: form.data.memberId
 			});
@@ -208,9 +198,7 @@ export const actions: Actions = {
 	},
 
 	reactivate: async ({ request, params, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(memberIdSchema));
 		if (!form.valid) {
@@ -219,7 +207,7 @@ export const actions: Actions = {
 
 		try {
 			await reactivateMember({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				memberId: form.data.memberId
 			});
@@ -238,9 +226,7 @@ export const actions: Actions = {
 	},
 
 	createInvite: async ({ request, params, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(createInviteSchema));
 		if (!form.valid) {
@@ -249,7 +235,7 @@ export const actions: Actions = {
 
 		try {
 			await createInvite({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				// Empty/absent target → open invite (normalized to undefined in the schema).
 				memberId: form.data.memberId ?? null
@@ -275,9 +261,7 @@ export const actions: Actions = {
 	},
 
 	revokeInvite: async ({ request, params, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(revokeInviteSchema));
 		if (!form.valid) {
@@ -286,7 +270,7 @@ export const actions: Actions = {
 
 		try {
 			await revokeInvite({
-				userId: locals.user.id,
+				userId: user.id,
 				groupId: params.id,
 				inviteId: form.data.inviteId
 			});

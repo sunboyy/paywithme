@@ -59,7 +59,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 3.5 `/groups/[id]/members`: manage members + soft-deactivate — PLAN §6.3 @done deps:3.3
 - [x] 3.6 Invite links: create/copy/revoke (reusable, 7-day expiry, multiple active) — PLAN §6.2 @done deps:3.5
 - [x] 3.7 `/invite/[token]` accept flow (login required; assign/create member; one-member-per-user-per-group) @done deps:3.6,2.7
-- [ ] 3.8 Group-access enforcement in `lib/server` (membership-based) — PLAN §12 @todo deps:3.3
+- [x] 3.8 Group-access enforcement in `lib/server` (membership-based) — PLAN §12 @done deps:3.3
 - [ ] 3.9 Integration tests: invite/accept, access control, member lifecycle @todo deps:3.7,3.8
 
 ## Phase 4 — Transactions (PLAN §7, §14.4)

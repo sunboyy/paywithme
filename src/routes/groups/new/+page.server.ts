@@ -10,15 +10,14 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { createGroupSchema } from '$lib/schemas/group';
 import { createGroup } from '$lib/server/groups';
+import { requireUser } from '$lib/server/access';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	// Creating a group requires an authenticated session (the creator becomes the
-	// first member — PLAN §6.1). `redirect()` THROWS, so it stays outside any
-	// try/catch.
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
+	// first member — PLAN §6.1). `requireUser` THROWS the redirect, so it stays
+	// outside any try/catch.
+	requireUser(locals);
 
 	return { form: await superValidate(zod4(createGroupSchema)) };
 };
@@ -26,10 +25,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 export const actions: Actions = {
 	default: async ({ request, locals }) => {
 		// Guard the mutation too — never trust that `load` ran for this request.
-		// THROWS, so it stays above the validate/try below.
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
+		// `requireUser` THROWS the redirect, so it stays above the validate/try below.
+		const user = requireUser(locals);
 
 		const form = await superValidate(request, zod4(createGroupSchema));
 		if (!form.valid) {
@@ -41,8 +38,8 @@ export const actions: Actions = {
 			// CREATE (a brand-new group has no transactions), so we only guard the
 			// generic failure path here.
 			await createGroup({
-				userId: locals.user.id,
-				userName: locals.user.name,
+				userId: user.id,
+				userName: user.name,
 				name: form.data.name,
 				settlementCurrency: form.data.settlementCurrency
 			});
