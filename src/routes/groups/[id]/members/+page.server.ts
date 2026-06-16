@@ -7,18 +7,21 @@
 // action works with JS disabled (each posts to a real form action with a hidden
 // `memberId`, like settings' delete form); superforms `enhance` upgrades them.
 //
-// SCOPE: invite links (create/copy/revoke) are task 3.6 and are NOT built here,
-// even though PLAN §10 lists them on this route — 3.6 adds that section.
+// SCOPE: task 3.6 ADDS the invite-links section to this route (PLAN §10 hosts
+// create/copy/revoke here). The ACCEPT flow (`/invite/[token]`) is task 3.7 and
+// is NOT built here.
 //
 // ERROR MAPPING (consistent with the 3.3/3.5 error model): `GroupAccessError`
-// (no access / soft-deleted group) and `MemberNotFoundError` (member not in this
-// group) both map to `error(404)`; any other failure surfaces as a generic
-// message (never leaking the raw cause — PLAN §12).
+// (no access / soft-deleted group), `MemberNotFoundError` (member not in group),
+// and `InviteNotFoundError` (invite not in group) all map to `error(404)`; an
+// ineligible invite target (`InviteTargetError`) surfaces as a friendly message;
+// any other failure is a generic message (never leaking the raw cause — §12).
 
 import { error, fail, redirect } from '@sveltejs/kit';
 import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { addMemberSchema, memberIdSchema, renameMemberSchema } from '$lib/schemas/member';
+import { createInviteSchema, revokeInviteSchema } from '$lib/schemas/invite';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import {
 	addMember,
@@ -29,14 +32,26 @@ import {
 	MemberNotFoundError,
 	type MemberListItem
 } from '$lib/server/members';
+import {
+	createInvite,
+	listActiveInvites,
+	revokeInvite,
+	InviteNotFoundError,
+	InviteTargetError,
+	type ActiveInvite
+} from '$lib/server/invites';
 import type { Actions, PageServerLoad } from './$types';
 
 /** Maps the service error model to HTTP: not-found errors → 404, else rethrow. */
 function isNotFoundError(e: unknown): boolean {
-	return e instanceof GroupAccessError || e instanceof MemberNotFoundError;
+	return (
+		e instanceof GroupAccessError ||
+		e instanceof MemberNotFoundError ||
+		e instanceof InviteNotFoundError
+	);
 }
 
-export const load: PageServerLoad = async ({ params, locals }) => {
+export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Member management requires an authenticated session (access is via a linked
 	// member — PLAN §6.1). `redirect()` THROWS, so it lives OUTSIDE the try/catch
 	// below or the catch would swallow the navigation.
@@ -66,16 +81,35 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		members = [];
 	}
 
+	// Active invite links (PLAN §6.2). Degrade gracefully: a transient invites
+	// failure renders an empty list rather than 500-ing the whole members page.
+	// (A real access/not-found here would be a race — re-surface as 404.)
+	let invites: ActiveInvite[];
+	try {
+		invites = await listActiveInvites({ userId: locals.user.id, groupId: params.id });
+	} catch (e) {
+		if (isNotFoundError(e)) {
+			error(404, 'Group not found');
+		}
+		invites = [];
+	}
+
 	return {
 		// The viewer's own user id so the page can mark their linked member "You".
 		viewerUserId: locals.user.id,
 		group: { id: group.id, name: group.name, settlementCurrency: group.settlementCurrency },
 		members,
+		invites,
+		// The request origin so the page can render the ABSOLUTE invite URL
+		// `${origin}/invite/${token}` (selectable text + a Copy button).
+		origin: url.origin,
 		// Seeded forms for the per-row + add controls (their ids fill in per row).
 		addForm: await superValidate(zod4(addMemberSchema)),
 		renameForm: await superValidate(zod4(renameMemberSchema)),
 		removeForm: await superValidate(zod4(memberIdSchema)),
-		reactivateForm: await superValidate(zod4(memberIdSchema))
+		reactivateForm: await superValidate(zod4(memberIdSchema)),
+		createInviteForm: await superValidate(zod4(createInviteSchema)),
+		revokeInviteForm: await superValidate(zod4(revokeInviteSchema))
 	};
 };
 
@@ -201,5 +235,72 @@ export const actions: Actions = {
 		}
 
 		return message(form, { type: 'success', text: 'Member reactivated' });
+	},
+
+	createInvite: async ({ request, params, locals }) => {
+		if (!locals.user) {
+			redirect(303, '/login');
+		}
+
+		const form = await superValidate(request, zod4(createInviteSchema));
+		if (!form.valid) {
+			return fail(400, { form });
+		}
+
+		try {
+			await createInvite({
+				userId: locals.user.id,
+				groupId: params.id,
+				// Empty/absent target → open invite (normalized to undefined in the schema).
+				memberId: form.data.memberId ?? null
+			});
+		} catch (e) {
+			if (isNotFoundError(e)) {
+				error(404, 'Group not found');
+			}
+			// An ineligible target slot is a user-correctable input problem, not a
+			// server fault — surface its (safe) message rather than a generic 500.
+			if (e instanceof InviteTargetError) {
+				return message(form, { type: 'error', text: e.message }, { status: 400 });
+			}
+			return message(
+				form,
+				{ type: 'error', text: 'Could not create an invite link. Please try again.' },
+				{ status: 500 }
+			);
+		}
+
+		// `load` re-runs after the action, so the new link appears in the list.
+		return message(form, { type: 'success', text: 'Invite link created' });
+	},
+
+	revokeInvite: async ({ request, params, locals }) => {
+		if (!locals.user) {
+			redirect(303, '/login');
+		}
+
+		const form = await superValidate(request, zod4(revokeInviteSchema));
+		if (!form.valid) {
+			return fail(400, { form });
+		}
+
+		try {
+			await revokeInvite({
+				userId: locals.user.id,
+				groupId: params.id,
+				inviteId: form.data.inviteId
+			});
+		} catch (e) {
+			if (isNotFoundError(e)) {
+				error(404, 'Invite not found');
+			}
+			return message(
+				form,
+				{ type: 'error', text: 'Could not revoke that invite. Please try again.' },
+				{ status: 500 }
+			);
+		}
+
+		return message(form, { type: 'success', text: 'Invite link revoked' });
 	}
 };

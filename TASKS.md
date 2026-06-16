@@ -57,7 +57,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 3.3 Group CRUD: create/rename/soft-delete; settlement currency editable only pre-first-tx then locked — PLAN §6.4 @done deps:3.1,3.2
 - [x] 3.4 `/groups` dashboard + `/groups/new` @done deps:3.3
 - [x] 3.5 `/groups/[id]/members`: manage members + soft-deactivate — PLAN §6.3 @done deps:3.3
-- [ ] 3.6 Invite links: create/copy/revoke (reusable, 7-day expiry, multiple active) — PLAN §6.2 @todo deps:3.5
+- [x] 3.6 Invite links: create/copy/revoke (reusable, 7-day expiry, multiple active) — PLAN §6.2 @done deps:3.5
 - [ ] 3.7 `/invite/[token]` accept flow (login required; assign/create member; one-member-per-user-per-group) @todo deps:3.6,2.7
 - [ ] 3.8 Group-access enforcement in `lib/server` (membership-based) — PLAN §12 @todo deps:3.3
 - [ ] 3.9 Integration tests: invite/accept, access control, member lifecycle @todo deps:3.7,3.8

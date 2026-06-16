@@ -20,14 +20,25 @@ const {
 	renameMember,
 	removeMember,
 	reactivateMember,
+	createInvite,
+	listActiveInvites,
+	revokeInvite,
 	GroupAccessError,
-	MemberNotFoundError
+	MemberNotFoundError,
+	InviteNotFoundError,
+	InviteTargetError
 } = vi.hoisted(() => {
 	class GroupAccessError extends Error {
 		readonly code = 'group_access' as const;
 	}
 	class MemberNotFoundError extends Error {
 		readonly code = 'member_not_found' as const;
+	}
+	class InviteNotFoundError extends Error {
+		readonly code = 'invite_not_found' as const;
+	}
+	class InviteTargetError extends Error {
+		readonly code = 'invite_target' as const;
 	}
 	return {
 		getGroupForUser: vi.fn(),
@@ -36,8 +47,13 @@ const {
 		renameMember: vi.fn(),
 		removeMember: vi.fn(),
 		reactivateMember: vi.fn(),
+		createInvite: vi.fn(),
+		listActiveInvites: vi.fn(),
+		revokeInvite: vi.fn(),
 		GroupAccessError,
-		MemberNotFoundError
+		MemberNotFoundError,
+		InviteNotFoundError,
+		InviteTargetError
 	};
 });
 
@@ -50,16 +66,24 @@ vi.mock('$lib/server/members', () => ({
 	reactivateMember,
 	MemberNotFoundError
 }));
+vi.mock('$lib/server/invites', () => ({
+	createInvite,
+	listActiveInvites,
+	revokeInvite,
+	InviteNotFoundError,
+	InviteTargetError
+}));
 
 import { load, actions } from './+page.server';
 
 type User = { id: string; name: string };
 
-/** Minimal `load` event with `locals.user` + route params. */
+/** Minimal `load` event with `locals.user` + route params + request `url`. */
 function makeLoadEvent(user: User | null, id = 'g1') {
 	return {
 		params: { id },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL(`http://localhost/groups/${id}/members`)
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -87,6 +111,11 @@ beforeEach(() => {
 	renameMember.mockReset();
 	removeMember.mockReset();
 	reactivateMember.mockReset();
+	createInvite.mockReset();
+	listActiveInvites.mockReset();
+	revokeInvite.mockReset();
+	// Default the invite list to empty so member-focused load tests don't 500.
+	listActiveInvites.mockResolvedValue([]);
 });
 
 describe('/groups/[id]/members load', () => {
@@ -130,14 +159,43 @@ describe('/groups/[id]/members load', () => {
 			viewerUserId: string;
 			group: { id: string; name: string };
 			members: unknown[];
+			invites: unknown[];
+			origin: string;
 			addForm: unknown;
+			createInviteForm: unknown;
+			revokeInviteForm: unknown;
 		};
 
 		expect(listMembers).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
+		expect(listActiveInvites).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
 		expect(result.viewerUserId).toBe('u1');
 		expect(result.group).toMatchObject({ id: 'g1', name: 'Trip' });
 		expect(result.members).toHaveLength(1);
+		// Invite-link load additions (task 3.6): the active list + the request origin
+		// for the absolute `${origin}/invite/${token}` URL, plus seeded forms.
+		expect(result.invites).toEqual([]);
+		expect(result.origin).toBe('http://localhost');
 		expect(result.addForm).toBeDefined();
+		expect(result.createInviteForm).toBeDefined();
+		expect(result.revokeInviteForm).toBeDefined();
+	});
+
+	it('returns the active invite links from listActiveInvites', async () => {
+		getGroupForUser.mockResolvedValueOnce({ id: 'g1', name: 'Trip', settlementCurrency: 'THB' });
+		listMembers.mockResolvedValueOnce([]);
+		listActiveInvites.mockResolvedValueOnce([
+			{
+				id: 'i1',
+				token: 'tok',
+				memberId: null,
+				expiresAt: '2026-07-01T00:00:00.000Z',
+				createdAt: '2026-06-16T00:00:00.000Z'
+			}
+		]);
+
+		const result = (await load(makeLoadEvent(AUTH_USER))) as { invites: { id: string }[] };
+		expect(result.invites).toHaveLength(1);
+		expect(result.invites[0].id).toBe('i1');
 	});
 
 	it('degrades to an empty member list when listMembers throws a generic error', async () => {
@@ -146,6 +204,16 @@ describe('/groups/[id]/members load', () => {
 
 		const result = (await load(makeLoadEvent(AUTH_USER))) as { members: unknown[] };
 		expect(result.members).toEqual([]);
+	});
+
+	it('degrades to an empty invite list when listActiveInvites throws a generic error', async () => {
+		getGroupForUser.mockResolvedValueOnce({ id: 'g1', name: 'Trip', settlementCurrency: 'THB' });
+		listMembers.mockResolvedValueOnce([]);
+		listActiveInvites.mockReset();
+		listActiveInvites.mockRejectedValueOnce(new Error('invites backend down'));
+
+		const result = (await load(makeLoadEvent(AUTH_USER))) as { invites: unknown[] };
+		expect(result.invites).toEqual([]);
 	});
 });
 
@@ -318,6 +386,103 @@ describe('/groups/[id]/members ?/reactivate action', () => {
 		reactivateMember.mockRejectedValueOnce(new GroupAccessError());
 		try {
 			await actions.reactivate(makeActionEvent({ memberId: 'm1' }, AUTH_USER));
+			expect.unreachable('expected a 404');
+		} catch (e) {
+			expect(isHttpError(e)).toBe(true);
+			if (isHttpError(e)) expect(e.status).toBe(404);
+		}
+	});
+});
+
+describe('/groups/[id]/members ?/createInvite action', () => {
+	it('redirects anonymous to /login and never calls the service', async () => {
+		try {
+			await actions.createInvite(makeActionEvent({ memberId: '' }, null));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.status).toBe(303);
+				expect(e.location).toBe('/login');
+			}
+		}
+		expect(createInvite).not.toHaveBeenCalled();
+	});
+
+	it('calls createInvite once with an OPEN target (null) when no member chosen', async () => {
+		createInvite.mockResolvedValueOnce({ id: 'i1', token: 't', memberId: null });
+		const result = await actions.createInvite(makeActionEvent({ memberId: '' }, AUTH_USER));
+
+		expect(createInvite).toHaveBeenCalledTimes(1);
+		// Empty target normalizes to a null (open) invite.
+		expect(createInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', memberId: null });
+		const msg = (result as { form: { message?: { type: string } } }).form.message;
+		expect(msg?.type).toBe('success');
+	});
+
+	it('calls createInvite with the chosen target member id', async () => {
+		createInvite.mockResolvedValueOnce({ id: 'i1', token: 't', memberId: 'm5' });
+		await actions.createInvite(makeActionEvent({ memberId: 'm5' }, AUTH_USER));
+		expect(createInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', memberId: 'm5' });
+	});
+
+	it('maps a GroupAccessError to error(404)', async () => {
+		createInvite.mockRejectedValueOnce(new GroupAccessError());
+		try {
+			await actions.createInvite(makeActionEvent({ memberId: '' }, AUTH_USER));
+			expect.unreachable('expected a 404');
+		} catch (e) {
+			expect(isHttpError(e)).toBe(true);
+			if (isHttpError(e)) expect(e.status).toBe(404);
+		}
+	});
+
+	it('surfaces an InviteTargetError as a friendly 400 message (no throw)', async () => {
+		createInvite.mockRejectedValueOnce(new InviteTargetError('That member is already linked.'));
+		const result = (await actions.createInvite(makeActionEvent({ memberId: 'm5' }, AUTH_USER))) as {
+			status: number;
+			data: { form: { message?: { type: string; text: string } } };
+		};
+		expect(result.status).toBe(400);
+		expect(result.data.form.message?.type).toBe('error');
+		expect(result.data.form.message?.text).toContain('already linked');
+	});
+});
+
+describe('/groups/[id]/members ?/revokeInvite action', () => {
+	it('redirects anonymous to /login and never calls the service', async () => {
+		try {
+			await actions.revokeInvite(makeActionEvent({ inviteId: 'i1' }, null));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.status).toBe(303);
+				expect(e.location).toBe('/login');
+			}
+		}
+		expect(revokeInvite).not.toHaveBeenCalled();
+	});
+
+	it('returns fail(400) and does NOT call the service on a missing inviteId', async () => {
+		const result = (await actions.revokeInvite(makeActionEvent({}, AUTH_USER))) as {
+			status: number;
+			data: { form: { valid: boolean } };
+		};
+		expect(result.status).toBe(400);
+		expect(revokeInvite).not.toHaveBeenCalled();
+	});
+
+	it('calls revokeInvite once with the right args on a valid submit', async () => {
+		revokeInvite.mockResolvedValueOnce(undefined);
+		await actions.revokeInvite(makeActionEvent({ inviteId: 'i1' }, AUTH_USER));
+		expect(revokeInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', inviteId: 'i1' });
+	});
+
+	it('maps an InviteNotFoundError to error(404)', async () => {
+		revokeInvite.mockRejectedValueOnce(new InviteNotFoundError());
+		try {
+			await actions.revokeInvite(makeActionEvent({ inviteId: 'i1' }, AUTH_USER));
 			expect.unreachable('expected a 404');
 		} catch (e) {
 			expect(isHttpError(e)).toBe(true);
