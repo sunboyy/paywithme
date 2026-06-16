@@ -34,7 +34,10 @@ const groupNameField = z
  */
 export const createGroupSchema = z.object({
 	name: groupNameField,
-	settlementCurrency: currencyCodeSchema
+	// Defaults to THB (Thai Baht) — the app's primary audience settles in baht, so
+	// the create form and superValidate seed select it out of the box (still any of
+	// the 29 codes; `usd` / `BTC` / unknown are rejected — §7.5.1).
+	settlementCurrency: currencyCodeSchema.default('THB')
 });
 
 /** Inferred, normalized create-group input — shared by server action + client form. */

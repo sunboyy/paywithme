@@ -53,10 +53,10 @@ describe('/groups/new load', () => {
 		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
 			form: { data: { name: string; settlementCurrency: string } };
 		};
-		// superValidate seeds the enum field with its first member (no JS-less
-		// "unselected" default exists for a z.enum), and the name field empty.
+		// superValidate seeds from the schema default — settlementCurrency defaults
+		// to THB (createGroupSchema), and the name field empty.
 		expect(result.form.data.name).toBe('');
-		expect(result.form.data.settlementCurrency).toBe('CNY');
+		expect(result.form.data.settlementCurrency).toBe('THB');
 	});
 });
 
