@@ -15,6 +15,13 @@
       "when": 1781543457066,
       "tag": "0001_purple_catseye",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781580244534,
+      "tag": "0002_fuzzy_domino",
+      "breakpoints": true
     }
   ]
 }

@@ -14,10 +14,15 @@
 //     MUST be present here so both drizzle-kit and the app's
 //     `drizzle(pool, { schema })` pick it up — the drizzle adapter resolves the
 //     better-auth `rateLimit` model via `schema['rateLimit']`.
+//   - groups / members / invites (task 3.1) → re-exported from `groups-schema.ts`,
+//     hand-authored domain tables (PLAN §6, §9): groups (+ soft-delete), member
+//     slots (+ soft-deactivate, partial-unique one-member-per-user-per-group),
+//     and reusable 7-day invite links (+ revoke).
 //
 // Tables still to come in later tasks:
-//   - groups / members         → task 3.1
+//   - currencies (seed)        → task 3.2
 //   - transactions / audit_log → Phase 4+
 
 export * from './auth-schema';
 export * from './rate-limit-schema';
+export * from './groups-schema';
