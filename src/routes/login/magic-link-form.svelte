@@ -10,7 +10,10 @@
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
 
-	let { data }: { data: SuperValidated<LoginInput> } = $props();
+	let {
+		data,
+		redirectTo = null
+	}: { data: SuperValidated<LoginInput>; redirectTo?: string | null } = $props();
 
 	// Seed from the initial validated form; superForm syncs later updates
 	// internally (the warning is a known false positive for this pattern).
@@ -44,6 +47,11 @@
 	{/if}
 
 	<form method="POST" use:enhance class="space-y-4">
+		<!-- Carry the sanitized post-auth destination (task 3.7) so the magic-link
+		     callbackURL forwards there. Server re-sanitizes; empty/absent = default. -->
+		{#if redirectTo}
+			<input type="hidden" name="redirectTo" value={redirectTo} />
+		{/if}
 		<Form.Field {form} name="email">
 			<Form.Control>
 				{#snippet children({ props })}

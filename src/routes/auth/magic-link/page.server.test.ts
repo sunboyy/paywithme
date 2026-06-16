@@ -64,6 +64,39 @@ describe('/auth/magic-link load', () => {
 		}
 	});
 
+	it('redirects an already-named user to a sanitized redirectTo (overrides onboarding)', async () => {
+		try {
+			await load(makeLoadEvent('?redirectTo=%2Finvite%2Ftok-abc', { name: 'Alice' }));
+			expect.unreachable('expected a redirect to be thrown');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.status).toBe(303);
+				expect(e.location).toBe('/invite/tok-abc');
+			}
+		}
+	});
+
+	it('ignores an UNSAFE redirectTo and still routes to /onboarding/passkey', async () => {
+		try {
+			await load(makeLoadEvent('?redirectTo=https%3A%2F%2Fevil.com', { name: 'Alice' }));
+			expect.unreachable('expected a redirect to be thrown');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.location).toBe('/onboarding/passkey');
+			}
+		}
+	});
+
+	it('passes a sanitized redirectTo to the capture form data', async () => {
+		const result = (await load(makeLoadEvent('?redirectTo=%2Finvite%2Ftok-abc', { name: '' }))) as {
+			form: unknown;
+			redirectTo: string | null;
+		};
+		expect(result.redirectTo).toBe('/invite/tok-abc');
+	});
+
 	it('renders the capture form for an authenticated user with an empty name', async () => {
 		const result = (await load(makeLoadEvent('', { name: '' }))) as {
 			form: { valid: boolean; data: { name: string } };
@@ -104,6 +137,36 @@ describe('/auth/magic-link default action', () => {
 		const arg = updateUser.mock.calls[0][0];
 		expect(arg.body).toEqual({ name: 'Alice' });
 		expect(arg.headers).toBeInstanceOf(Headers);
+	});
+
+	it('redirects to a sanitized redirectTo after saving the name (overrides onboarding)', async () => {
+		try {
+			await actions.default(
+				makeActionEvent({ name: 'Alice', redirectTo: '/invite/tok-abc' }, { name: '' })
+			);
+			expect.unreachable('expected a redirect to be thrown');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.status).toBe(303);
+				expect(e.location).toBe('/invite/tok-abc');
+			}
+		}
+		expect(updateUser).toHaveBeenCalledTimes(1);
+	});
+
+	it('falls back to /onboarding/passkey when redirectTo is unsafe (unchanged behavior)', async () => {
+		try {
+			await actions.default(
+				makeActionEvent({ name: 'Alice', redirectTo: '//evil.com' }, { name: '' })
+			);
+			expect.unreachable('expected a redirect to be thrown');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.location).toBe('/onboarding/passkey');
+			}
+		}
 	});
 
 	it('returns a 400 fail and does NOT call updateUser on an invalid (empty) name', async () => {

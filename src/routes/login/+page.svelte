@@ -11,6 +11,13 @@
 
 	let { data }: { data: PageData } = $props();
 
+	// Optional sanitized post-auth destination (task 3.7). The server already
+	// sanitized it; we only use it to override the default `goto`/links target.
+	const redirectTo = $derived(data.redirectTo ?? null);
+	const registerHref = $derived(
+		redirectTo ? '/register?redirectTo=' + encodeURIComponent(redirectTo) : resolve('/register')
+	);
+
 	// Passkey sign-in state. The button is a real <button type="button"> so it
 	// never submits the email form; WebAuthn is inherently JS-only, so this path
 	// simply does nothing without JS (the email fallback covers no-JS).
@@ -47,7 +54,11 @@
 				// the header stale ("Sign in" instead of name + "Log out") until a manual
 				// refresh. `invalidateAll: true` forces every `load` to re-run so the
 				// layout re-reads the now-authenticated session and the chrome reflects it.
-				await goto(resolve('/'), { invalidateAll: true });
+				// `redirectTo` is a server-sanitized local path (`safeRedirectTo`), so it's
+				// safe to navigate to even though it can't be a statically `resolve()`d
+				// route id (it's dynamic — e.g. `/invite/<token>`).
+				// eslint-disable-next-line svelte/no-navigation-without-resolve
+				await goto(redirectTo ?? resolve('/'), { invalidateAll: true });
 			}
 		} catch {
 			// Defensive: an unexpected thrown error (e.g. WebAuthn cancellation in
@@ -90,15 +101,16 @@
 		</div>
 
 		<!-- Fallback: email magic link (PLAN §5.5 / §5.3). -->
-		<MagicLinkForm data={data.form} />
+		<MagicLinkForm data={data.form} {redirectTo} />
 	</Card.Content>
 
 	<Card.Footer>
 		<p class="text-muted-foreground text-sm">
 			Don't have an account?
-			<a
-				href={resolve('/register')}
-				class="text-foreground font-medium underline underline-offset-4">Create one</a
+			<!-- `registerHref` is a server-sanitized local path; dynamic, so not `resolve()`able. -->
+			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+			<a href={registerHref} class="text-foreground font-medium underline underline-offset-4"
+				>Create one</a
 			>
 		</p>
 	</Card.Footer>

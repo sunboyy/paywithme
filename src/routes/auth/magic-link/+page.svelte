@@ -33,6 +33,7 @@
 		</Card.Footer>
 	</Card.Root>
 {:else if data.form}
-	<!-- Authenticated but no display name yet (PLAN §5.3, #26): capture it. -->
-	<DisplayNameForm data={data.form} />
+	<!-- Authenticated but no display name yet (PLAN §5.3, #26): capture it. The
+	     sanitized `redirectTo` (task 3.7) survives the capture POST via a hidden field. -->
+	<DisplayNameForm data={data.form} redirectTo={data.redirectTo ?? null} />
 {/if}

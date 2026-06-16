@@ -364,25 +364,31 @@ real account holder. v1 uses **invite links only**:
 The invite link is **reusable with a 7-day expiry**: one link can be shared with
 several people and accepted multiple times until it expires (or is revoked). A
 group may have **multiple active links at once**, each managed via a **revocation
-UI** (see §10).
+UI** (see §10). An invite link is **member-agnostic** — it grants entry to the
+group, not to a pre-chosen slot; **the invitee decides how to join at accept time**.
 
 Flow:
 
 1. A group member generates an **invite link** (token) for the group. It expires
-   **7 days** after creation (default). The link may optionally target a specific
-   **unlinked member** (the slot to fill), or be open (creates a new member on
-   accept). Multiple links can be active simultaneously.
+   **7 days** after creation (default). The link is **open / member-agnostic** —
+   it does **not** target a particular member. Multiple links can be active
+   simultaneously.
 2. The invitee opens the link. **Accepting always requires a registered,
    logged-in user** — there is no anonymous/guest accept. If not logged in, they
    must register or log in via passkey first, then continue the accept.
-3. If the token is **valid and unexpired**, on accepting the user is **assigned
-   to the member**: set `members.user_id = currentUser`. If the link was **open**,
-   a **new member is created and linked**, with its `display_name` defaulting to
-   the accepting **user's display name** (editable afterwards in member
-   management).
+3. If the token is **valid and unexpired**, the invitee is **prompted to choose
+   how to join the group**:
+   - **Link an existing member** — claim one of the group's **unlinked, active**
+     member slots (e.g. a placeholder someone added ahead of time): set
+     `members.user_id = currentUser` on the chosen slot, keeping its existing
+     `display_name`. A slot can be claimed only while still unlinked — a repeat
+     or concurrent claim of the same slot is rejected (effectively single-use
+     per slot).
+   - **Join as a new member** — create a **new member** linked to the user, with
+     `display_name` defaulting to the accepting **user's display name** (editable
+     afterwards in member management).
 4. The link stays valid for further accepts until it expires or is revoked
-   (reusable). A **member-targeted** link, however, is effectively single-use:
-   once that slot is claimed it can't be claimed again.
+   (reusable) — each accept is independent and member-agnostic.
 
 Rules:
 
@@ -867,8 +873,9 @@ groups           (id, name, settlement_currency, created_by, created_at,
                   -- currency code → exponent/symbol resolved via a currency constant (§7.5)
 members          (id, group_id, display_name, user_id?,  -- nullable, → user.id
                   deactivated_at?)   -- soft-deactivate; stays in ledger (§6.3)
-invites          (id, group_id, token, member_id?,       -- member_id targets a slot
-                  expires_at, revoked_at?, created_by, created_at)  -- reusable + expiry
+invites          (id, group_id, token,                   -- member-agnostic link
+                  expires_at, revoked_at?, created_by, created_at)  -- reusable + 7-day
+                  -- expiry; invitee picks link-existing vs create-new at accept (§6.2)
 
 categories       (id, name, icon, applies_to)         -- spending|transfer (seeded, fixed)
 
@@ -956,12 +963,32 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 /groups/[id]/settle       Debt summary + suggested settlements + settle action
 /groups/[id]/activity     Audit log: who did what & when (newest first) (§12.1)
 /settings                 Manage passkeys (add/remove additional devices); email
-/invite/[token]           Accept an invite link (assign member, grant access)
+/invite/[token]           Accept an invite link (link an existing member or
+                          create a new one; grant access)
 ```
 
 UI building blocks (shadcn-svelte): Button, Card, Dialog, Drawer/Sheet (mobile
 add-transaction), Form + Input + Select, Tabs (spending/transfer), Avatar,
-Badge, Table/list, Toast, Separator. Mobile-first layout.
+Badge, Table/list, Toast, Separator, Alert Dialog (destructive confirmations).
+Mobile-first layout.
+
+**Destructive actions require explicit confirmation.** Any action that destroys,
+hides, or revokes (remove/deactivate a member, soft-delete a group, revoke an
+invite link, delete/restore a transaction) must be guarded by a confirmation
+step — a shadcn **Alert Dialog** naming the specific target ("Remove _Alex_?")
+with a clearly-labelled, visually-distinct (destructive-variant) confirm button
+and a Cancel — so a single mis-tap can't trigger it. Confirmation is a
+JS-progressive-enhancement layer: with JS the dialog gates the submit; **without
+JS the underlying real form action still works** (the server is the source of
+truth and re-validates). The confirmation is a UX guard, not an authz control —
+authorization is still the §12 membership check, and the change is still recorded
+in the audit log (§12.1).
+
+**Self-affecting actions must not strand the user.** When an action removes the
+acting user's OWN access to the area they're on — most notably **removing the
+member linked to yourself** (which revokes your group access per §6.3) — the
+server redirects them somewhere they still belong (e.g. `/groups`) instead of
+re-rendering a now-inaccessible page as a confusing "not found".
 
 **Currency & FX (all transaction types):** a currency picker defaulting to the
 group's settlement currency. When a **different** currency is chosen, an FX field
