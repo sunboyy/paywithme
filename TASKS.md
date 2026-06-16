@@ -54,7 +54,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 - [x] 3.1 Schema: `groups`, `members`, `invites` (+ indexes, unique member-per-user-per-group) @done deps:1.8
 - [x] 3.2 Currency constant/table seed: 29 fiat currencies w/ exponent+symbol — PLAN §7.5.1/#19 @done deps:3.1
-- [ ] 3.3 Group CRUD: create/rename/soft-delete; settlement currency editable only pre-first-tx then locked — PLAN §6.4 @todo deps:3.1,3.2
+- [x] 3.3 Group CRUD: create/rename/soft-delete; settlement currency editable only pre-first-tx then locked — PLAN §6.4 @done deps:3.1,3.2
 - [ ] 3.4 `/groups` dashboard + `/groups/new` @todo deps:3.3
 - [ ] 3.5 `/groups/[id]/members`: manage members + soft-deactivate — PLAN §6.3 @todo deps:3.3
 - [ ] 3.6 Invite links: create/copy/revoke (reusable, 7-day expiry, multiple active) — PLAN §6.2 @todo deps:3.5
