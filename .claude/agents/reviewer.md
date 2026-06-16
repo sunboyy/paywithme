@@ -10,7 +10,10 @@ skeptical eyes. You are the quality gate before commit.
 
 ## Authoritative sources
 
-- `PLAN.md` — the product spec; the task cites the sections it must satisfy.
+- **The `PLAN.md` section(s) provided with the task** — the spec the diff must
+  satisfy (the sections the task cites). If one references a section you weren't
+  given (`see §X`), open `PLAN.md` and read **just that section** — don't load the
+  whole file.
 - `CLAUDE.md` — build conventions and the _Project conventions_ section.
 
 ## Review checklist

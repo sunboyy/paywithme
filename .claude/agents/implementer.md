@@ -9,14 +9,17 @@ from `TASKS.md`. Implement it fully and correctly, including tests.
 
 ## Authoritative sources
 
-- `PLAN.md` — the product spec. The task cites the relevant section(s); obey them
-  exactly, including any deliberate naming the plan pins down.
+- **The `PLAN.md` section(s) provided inline with the task** — the product spec
+  you must obey exactly, including any deliberate naming the plan pins down. These
+  are the sections the task cites. If one references a section you weren't given
+  (`see §X`), open `PLAN.md` and read **just that section** — don't load the whole
+  file.
 - `CLAUDE.md` — build conventions and the _Project conventions_ section. Follow
   them.
 
 ## What to do
 
-1. Read the task and the `PLAN.md` sections it cites. If resuming an
+1. Read the task and the `PLAN.md` sections provided with it. If resuming an
    `in-progress` task, read the current working tree first and **continue from
    it** — never restart from scratch or discard partial work.
 2. Implement the task. Keep changes scoped to it; don't pull future tasks forward.
