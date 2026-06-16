@@ -46,6 +46,29 @@ describe('/register default action', () => {
 		expect((result as { form: { message?: { type: string } } }).form.message?.type).toBe('sent');
 	});
 
+	it('threads a sanitized redirectTo into the magic-link callbackURL when present', async () => {
+		await actions.default(
+			makeEvent({ email: 'a@b.com', name: 'Bob', redirectTo: '/invite/tok-abc' })
+		);
+
+		expect(signInMagicLink).toHaveBeenCalledTimes(1);
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe(
+			'/auth/magic-link?redirectTo=' + encodeURIComponent('/invite/tok-abc')
+		);
+	});
+
+	it('drops an UNSAFE redirectTo (open redirect) and keeps the bare callbackURL', async () => {
+		await actions.default(makeEvent({ email: 'a@b.com', name: 'Bob', redirectTo: 'https://evil' }));
+
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe('/auth/magic-link');
+	});
+
+	it('uses the bare callbackURL when no redirectTo is present (unchanged behavior)', async () => {
+		await actions.default(makeEvent({ email: 'a@b.com', name: 'Bob' }));
+
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe('/auth/magic-link');
+	});
+
 	it('returns a 400 fail and does NOT call the auth API on invalid input', async () => {
 		const result = (await actions.default(makeEvent({ email: 'not-an-email', name: '' }))) as {
 			status: number;

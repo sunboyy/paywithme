@@ -21,6 +21,7 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { displayNameSchema } from '$lib/schemas/auth';
 import { auth } from '$lib/server/auth';
+import { safeRedirectTo } from '$lib/redirect';
 import type { Actions, PageServerLoad } from './$types';
 
 /**
@@ -62,16 +63,23 @@ export const load: PageServerLoad = async ({ url, locals }) => {
 		return { error: friendlyAuthError('INVALID_TOKEN') };
 	}
 
-	// (3) Authenticated with a display name already set — send them on to the
+	// Optional, SANITIZED final destination (task 3.7). When an invitee
+	// authenticated via the magic link from `/invite/<token>`, the callbackURL
+	// carried `?redirectTo=…`; when present it OVERRIDES the default onward routing.
+	const redirectTo = safeRedirectTo(url.searchParams.get('redirectTo'));
+
+	// (3) Authenticated with a display name already set — send them on. With a
+	// sanitized `redirectTo` (the invite accept), go straight there; otherwise the
 	// passkey onboarding nudge (task 2.8). That page self-gates: a returning user
-	// who already has a passkey bounces straight to `/`, so routing everyone here
-	// unconditionally is safe. (`/groups`, task 3.4, becomes the eventual target.)
+	// who already has a passkey bounces straight to `/`, so routing everyone there
+	// unconditionally is safe. (`/groups`, task 3.4, is the eventual default.)
 	if (locals.user.name?.trim()) {
-		redirect(303, '/onboarding/passkey');
+		redirect(303, redirectTo ?? '/onboarding/passkey');
 	}
 
-	// Authenticated but no name yet (PLAN §5.3, #26): render the capture form.
-	return { form: await superValidate(zod4(displayNameSchema)) };
+	// Authenticated but no name yet (PLAN §5.3, #26): render the capture form,
+	// carrying `redirectTo` so it survives the name-capture POST.
+	return { form: await superValidate(zod4(displayNameSchema)), redirectTo };
 };
 
 export const actions: Actions = {
@@ -85,6 +93,11 @@ export const actions: Actions = {
 		// `request.formData()` is consumed by superValidate; clone the headers we
 		// forward to better-auth BEFORE that (the Request body is single-use).
 		const headers = new Headers(request.headers);
+
+		// Read + sanitize the optional `redirectTo` hidden field before the body is
+		// consumed. Present → it's the FINAL destination after saving the name.
+		const formData = await request.clone().formData();
+		const redirectTo = safeRedirectTo(formData.get('redirectTo'));
 
 		const form = await superValidate(request, zod4(displayNameSchema));
 		if (!form.valid) {
@@ -108,8 +121,9 @@ export const actions: Actions = {
 			);
 		}
 
-		// Onward to the passkey onboarding nudge (task 2.8), which self-gates (see
-		// the `load` note above). `/groups` (task 3.4) is the eventual target.
-		redirect(303, '/onboarding/passkey');
+		// Onward: a sanitized `redirectTo` (the invite accept, task 3.7) is the final
+		// destination; otherwise the passkey onboarding nudge (task 2.8), which
+		// self-gates (see the `load` note above). `/groups` (3.4) is the default.
+		redirect(303, redirectTo ?? '/onboarding/passkey');
 	}
 };

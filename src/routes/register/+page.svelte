@@ -10,6 +10,13 @@
 
 	let { data }: { data: PageData } = $props();
 
+	// Optional sanitized post-auth destination (task 3.7), threaded into the
+	// magic-link callbackURL via a hidden field and into the "Sign in" link.
+	const redirectTo = $derived(data.redirectTo ?? null);
+	const loginHref = $derived(
+		redirectTo ? '/login?redirectTo=' + encodeURIComponent(redirectTo) : resolve('/login')
+	);
+
 	// `message` shape is the global `App.Superforms.Message` (see app.d.ts):
 	// `{ type: 'sent' | 'error'; text }`, set by the server action.
 	// Capturing `data.form` once is intentional: superForm seeds from the initial
@@ -59,6 +66,11 @@
 			{/if}
 
 			<form method="POST" use:enhance class="space-y-4">
+				<!-- Carry the sanitized post-auth destination (task 3.7) into the
+				     magic-link callbackURL. Server re-sanitizes; empty/absent = default. -->
+				{#if redirectTo}
+					<input type="hidden" name="redirectTo" value={redirectTo} />
+				{/if}
 				<Form.Field {form} name="email">
 					<Form.Control>
 						{#snippet children({ props })}
@@ -102,7 +114,9 @@
 	<Card.Footer>
 		<p class="text-muted-foreground text-sm">
 			Already have an account?
-			<a href={resolve('/login')} class="text-foreground font-medium underline underline-offset-4"
+			<!-- `loginHref` is a server-sanitized local path; dynamic, so not `resolve()`able. -->
+			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+			<a href={loginHref} class="text-foreground font-medium underline underline-offset-4"
 				>Sign in</a
 			>
 		</p>

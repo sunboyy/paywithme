@@ -19,12 +19,30 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //     expires_at > now) and returns only the rows the mock yields, newest-first.
 
 // --- Fluent DB mock -------------------------------------------------------
-const { selectQueue, whereCalls, insertCalls, updateCalls, makeDb } = vi.hoisted(() => {
+const {
+	selectQueue,
+	whereCalls,
+	insertCalls,
+	updateCalls,
+	updateReturningQueue,
+	insertReturningQueue,
+	insertThrow,
+	makeDb
+} = vi.hoisted(() => {
 	// A queue of row-sets the SELECT chains resolve to, in call order.
 	const selectQueue: unknown[][] = [];
 	const whereCalls: unknown[] = [];
 	const insertCalls: { table: unknown; values: unknown }[] = [];
 	const updateCalls: { set: unknown }[] = [];
+	// Queues for `.returning()` row-sets on UPDATE / INSERT so the accept-flow
+	// tests can simulate the conditional-update affected-row count (0 vs 1) and the
+	// created-member id. Empty → fall back to the legacy default shapes (so the
+	// pre-existing create/revoke tests keep passing unchanged).
+	const updateReturningQueue: unknown[][] = [];
+	const insertReturningQueue: unknown[][] = [];
+	// When set, the NEXT insert `.values()` throws this (e.g. a Postgres unique
+	// violation `{ code: '23505' }`) to exercise the open-invite race backstop.
+	const insertThrow: { error: unknown } = { error: undefined };
 
 	function nextSelectRows(): unknown[] {
 		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
@@ -49,15 +67,24 @@ const { selectQueue, whereCalls, insertCalls, updateCalls, makeDb } = vi.hoisted
 		return {
 			values(values: unknown) {
 				insertCalls.push({ table, values });
+				if (insertThrow.error !== undefined) {
+					const err = insertThrow.error;
+					insertThrow.error = undefined;
+					throw err;
+				}
 				return {
 					returning: () =>
-						Promise.resolve([
-							{
-								id: 'invite-1',
-								createdAt: new Date('2026-06-16T00:00:00.000Z'),
-								...(values as object)
-							}
-						]),
+						Promise.resolve(
+							insertReturningQueue.length > 0
+								? (insertReturningQueue.shift() as unknown[])
+								: [
+										{
+											id: 'invite-1',
+											createdAt: new Date('2026-06-16T00:00:00.000Z'),
+											...(values as object)
+										}
+									]
+						),
 					then: (resolve: (v: unknown) => unknown) => resolve(undefined)
 				};
 			}
@@ -71,7 +98,12 @@ const { selectQueue, whereCalls, insertCalls, updateCalls, makeDb } = vi.hoisted
 			return chain;
 		};
 		chain.where = () => chain;
-		chain.returning = () => Promise.resolve([{ id: 'invite-1' }]);
+		chain.returning = () =>
+			Promise.resolve(
+				updateReturningQueue.length > 0
+					? (updateReturningQueue.shift() as unknown[])
+					: [{ id: 'invite-1' }]
+			);
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 		return chain;
 	}
@@ -87,7 +119,16 @@ const { selectQueue, whereCalls, insertCalls, updateCalls, makeDb } = vi.hoisted
 		transaction: (cb: (tx: typeof executor) => Promise<unknown>) => cb(executor)
 	};
 
-	return { selectQueue, whereCalls, insertCalls, updateCalls, makeDb: () => db };
+	return {
+		selectQueue,
+		whereCalls,
+		insertCalls,
+		updateCalls,
+		updateReturningQueue,
+		insertReturningQueue,
+		insertThrow,
+		makeDb: () => db
+	};
 });
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
@@ -96,6 +137,8 @@ import {
 	createInvite,
 	listActiveInvites,
 	revokeInvite,
+	getInvitePreview,
+	acceptInvite,
 	inviteExpiresAt,
 	INVITE_TTL_DAYS,
 	InviteNotFoundError,
@@ -117,6 +160,9 @@ beforeEach(() => {
 	whereCalls.length = 0;
 	insertCalls.length = 0;
 	updateCalls.length = 0;
+	updateReturningQueue.length = 0;
+	insertReturningQueue.length = 0;
+	insertThrow.error = undefined;
 });
 
 describe('INVITE_TTL_DAYS / inviteExpiresAt (PLAN §6.2 — 7-day expiry)', () => {
@@ -276,5 +322,122 @@ describe('revokeInvite (PLAN §6.2 — stamp revoked_at, cross-group guard)', ()
 
 		expect(updateCalls).toHaveLength(1);
 		expect((updateCalls[0].set as Record<string, unknown>).revokedAt).toBeInstanceOf(Date);
+	});
+});
+
+// --- ACCEPT side (task 3.7, PLAN §6.2) ------------------------------------
+
+/** A still-valid resolved-invite row (the resolve SELECT yields this). */
+function validInviteRow(memberId: string | null) {
+	return { id: 'i1', groupId: 'g1', memberId, groupName: 'Trip to Tokyo' };
+}
+
+describe('getInvitePreview (PLAN §6.2 — safe, auth-free landing preview)', () => {
+	it('returns { status: valid, groupName } for a live invite (only the group name leaks)', async () => {
+		queueSelects([validInviteRow(null)]);
+		const preview = await getInvitePreview('tok-abc');
+		expect(preview).toEqual({ status: 'valid', groupName: 'Trip to Tokyo' });
+	});
+
+	it('returns { status: invalid } when the token resolves to nothing (not-found/revoked/expired)', async () => {
+		// The resolve SELECT already filters revoked/expired/dead-group, so a
+		// not-found / revoked / expired token simply yields no row.
+		queueSelects([]);
+		const preview = await getInvitePreview('missing-or-revoked-or-expired');
+		expect(preview).toEqual({ status: 'invalid' });
+	});
+
+	it('does not throw for an invalid token (returns the status)', async () => {
+		queueSelects([]);
+		await expect(getInvitePreview('nope')).resolves.toEqual({ status: 'invalid' });
+	});
+});
+
+describe('acceptInvite (PLAN §6.2 — discriminated outcomes)', () => {
+	it('OPEN invite: creates a new member linked to the user (userId set, displayName = userName)', async () => {
+		// (1) resolve → valid OPEN invite; (2) membership check → none.
+		queueSelects([validInviteRow(null)], []);
+		insertReturningQueue.push([{ id: 'new-member-1' }]);
+
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-1' });
+		// The new member is linked to the accepting user with their name as default.
+		expect(insertCalls).toHaveLength(1);
+		const values = insertCalls[0].values as Record<string, unknown>;
+		expect(values.groupId).toBe('g1');
+		expect(values.userId).toBe('u9');
+		expect(values.displayName).toBe('Dana');
+		// Open invite does NOT touch members via UPDATE.
+		expect(updateCalls).toHaveLength(0);
+	});
+
+	it('TARGETED invite: conditionally claims the empty slot (accepted, no displayName overwrite)', async () => {
+		// (1) resolve → valid TARGETED invite (memberId m5); (2) membership → none.
+		queueSelects([validInviteRow('m5')], []);
+		// The conditional UPDATE affects exactly one row → claim succeeds.
+		updateReturningQueue.push([{ id: 'm5' }]);
+
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'm5' });
+		// Claim is an UPDATE that ONLY sets user_id — never the display_name.
+		expect(updateCalls).toHaveLength(1);
+		const set = updateCalls[0].set as Record<string, unknown>;
+		expect(set.userId).toBe('u9');
+		expect(set).not.toHaveProperty('displayName');
+		// Targeted accept creates NO new member.
+		expect(insertCalls).toHaveLength(0);
+	});
+
+	it('TARGETED invite already claimed: 0 rows updated → slot_taken', async () => {
+		queueSelects([validInviteRow('m5')], []);
+		// The conditional UPDATE matches nothing (user_id already set / deactivated).
+		updateReturningQueue.push([]);
+
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+
+		expect(result).toEqual({ status: 'slot_taken' });
+		expect(insertCalls).toHaveLength(0);
+	});
+
+	it('existing membership: one-per-user-per-group → already_member (no mutation)', async () => {
+		// (1) resolve → valid; (2) membership check FINDS an existing linked member.
+		queueSelects([validInviteRow(null)], [{ id: 'existing-member' }]);
+
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+		expect(insertCalls).toHaveLength(0);
+		expect(updateCalls).toHaveLength(0);
+	});
+
+	it('not-found / revoked / expired token: resolve yields nothing → invalid (no mutation)', async () => {
+		queueSelects([]); // resolve SELECT finds no live invite
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'dead' });
+
+		expect(result).toEqual({ status: 'invalid' });
+		expect(insertCalls).toHaveLength(0);
+		expect(updateCalls).toHaveLength(0);
+	});
+
+	it('OPEN invite race: a unique-violation on insert is backstopped → already_member', async () => {
+		// (1) resolve → valid OPEN; (2) membership → none (lost the race). The insert
+		// then trips the partial unique index `(group_id, user_id)`.
+		queueSelects([validInviteRow(null)], []);
+		insertThrow.error = { code: '23505' }; // Postgres unique_violation
+
+		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+	});
+
+	it('OPEN invite: a NON-unique insert error still propagates (not swallowed)', async () => {
+		queueSelects([validInviteRow(null)], []);
+		insertThrow.error = new Error('connection reset');
+
+		await expect(acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' })).rejects.toThrow(
+			'connection reset'
+		);
 	});
 });

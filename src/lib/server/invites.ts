@@ -40,7 +40,7 @@
 import { randomBytes } from 'node:crypto';
 import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from './db';
-import { invites, members } from './db/groups-schema';
+import { groups, invites, members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
@@ -303,5 +303,205 @@ export async function revokeInvite({
 
 		// TODO(6.1): append audit_log row (action='revoke', entity_type='invite') in
 		// this same transaction.
+	});
+}
+
+// --- ACCEPT side (task 3.7, PLAN §6.2) ------------------------------------
+//
+// Accepting an invite ALWAYS requires a registered, logged-in user (PLAN §6.2);
+// the route layer enforces the login gate and feeds us the authenticated
+// `userId` + `userName`. These functions are the testable core of that flow.
+
+/** A still-acceptable invite resolved by token, with its group name. */
+type ResolvedInvite = {
+	id: string;
+	groupId: string;
+	memberId: string | null;
+	groupName: string;
+};
+
+/**
+ * Resolve a STILL-VALID invite by token on the given executor, joining the group
+ * for its name. "Valid" = exists, NOT revoked (`revoked_at IS NULL`), and NOT
+ * expired (`expires_at > now`). The group must also not be soft-deleted
+ * (`groups.deleted_at IS NULL`) — a dead group can't be joined. Returns `null`
+ * for any invalid/not-found case (callers map that to their own status). Runs on
+ * the passed executor so the accept path re-validates inside its transaction.
+ */
+async function resolveValidInvite(
+	token: string,
+	executor: DbExecutor,
+	now: Date = new Date()
+): Promise<ResolvedInvite | null> {
+	const [row] = await executor
+		.select({
+			id: invites.id,
+			groupId: invites.groupId,
+			memberId: invites.memberId,
+			groupName: groups.name
+		})
+		.from(invites)
+		.innerJoin(groups, eq(invites.groupId, groups.id))
+		.where(
+			and(
+				eq(invites.token, token),
+				isNull(invites.revokedAt),
+				gt(invites.expiresAt, now),
+				isNull(groups.deletedAt)
+			)
+		)
+		.limit(1);
+
+	return row ?? null;
+}
+
+/** The safe, auth-free landing preview (PLAN §6.2 step 2). */
+export type InvitePreview =
+	| { status: 'valid'; groupName: string }
+	| { status: 'invalid'; groupName?: undefined };
+
+/**
+ * A SAFE preview of an invite for the `/invite/[token]` landing page, usable
+ * WITHOUT auth (the accept itself still requires login). We only ever expose the
+ * GROUP NAME — the holder of a valid token was invited, so showing them which
+ * group they're joining is appropriate; nothing else leaks.
+ *
+ * `invalid` deliberately conflates not-found / revoked / expired (and a
+ * soft-deleted group) so the page can't be used to probe which tokens exist.
+ * Never throws for the invalid case — returns the discriminated status.
+ */
+export async function getInvitePreview(token: string): Promise<InvitePreview> {
+	const invite = await resolveValidInvite(token, db);
+	if (!invite) {
+		return { status: 'invalid' };
+	}
+	return { status: 'valid', groupName: invite.groupName };
+}
+
+/** Discriminated outcome of an accept attempt (PLAN §6.2). */
+export type AcceptResult =
+	| { status: 'invalid' }
+	| { status: 'already_member'; groupId: string }
+	| { status: 'slot_taken' }
+	| { status: 'accepted'; groupId: string; memberId: string };
+
+/**
+ * A Postgres unique-violation error code (`23505`). The partial unique index
+ * `(group_id, user_id) WHERE user_id IS NOT NULL` (task 3.1) backstops a race on
+ * the OPEN-invite path: two concurrent accepts by the same user would both pass
+ * the membership pre-check, then one insert wins and the other trips this — we
+ * map that to a friendly `already_member` rather than a 500.
+ */
+function isUniqueViolation(e: unknown): boolean {
+	return (
+		typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === '23505'
+	);
+}
+
+/**
+ * Accept an invite for an authenticated user (PLAN §6.2 step 3 + Rules).
+ *
+ * Returns a DISCRIMINATED result (NOT exceptions) for every EXPECTED outcome so
+ * the route can branch deterministically:
+ *   - `invalid`        — token not found / revoked / expired (or dead group).
+ *   - `already_member` — the user already has a member link in this group
+ *                        (one-member-per-user-per-group → friendly no-op).
+ *   - `slot_taken`     — a member-targeted invite whose slot is already claimed
+ *                        (`user_id` not null) or no longer an eligible slot
+ *                        (deactivated / missing).
+ *   - `accepted`       — assigned to the targeted member, OR created+linked a new
+ *                        open member.
+ *
+ * One transaction, re-validated inside it:
+ *  1. Re-resolve the invite (not-found/revoked/expired → `invalid`).
+ *  2. One-per-user-per-group: existing member link for `userId` → `already_member`.
+ *  3. TARGETED (`member_id` set): a CONDITIONAL update claims the slot atomically
+ *     — `SET user_id = :userId WHERE id = :memberId AND group_id = :groupId AND
+ *     user_id IS NULL AND deactivated_at IS NULL`. Inspect the affected-row count:
+ *     0 → `slot_taken` (someone claimed it first / it was deactivated); else
+ *     `accepted`. This avoids a read-then-write race — the WHERE is the lock — and
+ *     never overwrites the slot's existing `display_name`.
+ *  4. OPEN (`member_id` null): insert a new member `{ groupId, userId, displayName:
+ *     userName }`. A concurrent double-accept is backstopped by the partial unique
+ *     index (→ `already_member`).
+ *
+ * Accepting does NOT revoke/expire the invite — an open link stays reusable until
+ * it expires or is revoked. Never logs the token.
+ */
+export async function acceptInvite({
+	userId,
+	userName,
+	token
+}: {
+	userId: string;
+	userName: string;
+	token: string;
+}): Promise<AcceptResult> {
+	return db.transaction(async (tx) => {
+		// (1) Re-validate inside the tx — the link may have expired/been revoked
+		// between the preview and this POST.
+		const invite = await resolveValidInvite(token, tx);
+		if (!invite) {
+			return { status: 'invalid' };
+		}
+
+		// (2) One member per user per group (PLAN §6.2 Rules): if the user already
+		// links a member here, the accept is a friendly no-op.
+		const [existing] = await tx
+			.select({ id: members.id })
+			.from(members)
+			.where(and(eq(members.groupId, invite.groupId), eq(members.userId, userId)))
+			.limit(1);
+		if (existing) {
+			return { status: 'already_member', groupId: invite.groupId };
+		}
+
+		// (3) Member-targeted invite: atomically claim the EMPTY, ACTIVE slot. The
+		// WHERE doubles as the lock — `user_id IS NULL` means a second accept can't
+		// re-claim it. `returning` gives us the affected-row count.
+		if (invite.memberId != null) {
+			const claimed = await tx
+				.update(members)
+				.set({ userId })
+				.where(
+					and(
+						eq(members.id, invite.memberId),
+						eq(members.groupId, invite.groupId),
+						isNull(members.userId),
+						isNull(members.deactivatedAt)
+					)
+				)
+				.returning({ id: members.id });
+
+			if (claimed.length === 0) {
+				// Already claimed, deactivated, or vanished → effectively single-use.
+				return { status: 'slot_taken' };
+			}
+
+			// TODO(6.1): append audit_log row (action='accept', entity_type='member',
+			// entity_id=invite.memberId) in this same transaction. Never log the token.
+			return { status: 'accepted', groupId: invite.groupId, memberId: claimed[0].id };
+		}
+
+		// (4) Open invite: create a new member linked to this user, display name
+		// defaulting to the accepting user's name (editable later — PLAN §6.2).
+		try {
+			const [created] = await tx
+				.insert(members)
+				.values({ groupId: invite.groupId, userId, displayName: userName })
+				.returning({ id: members.id });
+
+			// TODO(6.1): append audit_log row (action='add', entity_type='member',
+			// entity_id=created.id; note invite acceptance) in this same transaction.
+			// Never log the token.
+			return { status: 'accepted', groupId: invite.groupId, memberId: created.id };
+		} catch (e) {
+			// Race backstop: the partial unique index `(group_id, user_id)` rejects a
+			// concurrent second link for the same user → friendly `already_member`.
+			if (isUniqueViolation(e)) {
+				return { status: 'already_member', groupId: invite.groupId };
+			}
+			throw e;
+		}
 	});
 }

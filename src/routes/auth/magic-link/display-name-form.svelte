@@ -11,7 +11,10 @@
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
 
-	let { data }: { data: SuperValidated<DisplayNameInput> } = $props();
+	let {
+		data,
+		redirectTo = null
+	}: { data: SuperValidated<DisplayNameInput>; redirectTo?: string | null } = $props();
 
 	// Seed from the initial validated form; superForm syncs later updates
 	// internally (the warning is a known false positive for this pattern).
@@ -39,6 +42,10 @@
 		{/if}
 
 		<form method="POST" use:enhance class="space-y-4">
+			<!-- Carry the sanitized final destination (task 3.7) through name capture. -->
+			{#if redirectTo}
+				<input type="hidden" name="redirectTo" value={redirectTo} />
+			{/if}
 			<Form.Field {form} name="name">
 				<Form.Control>
 					{#snippet children({ props })}

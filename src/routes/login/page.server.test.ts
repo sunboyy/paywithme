@@ -45,6 +45,27 @@ describe('/login default action', () => {
 		expect((result as { form: { message?: { type: string } } }).form.message?.type).toBe('sent');
 	});
 
+	it('threads a sanitized redirectTo into the magic-link callbackURL when present', async () => {
+		await actions.default(makeEvent({ email: 'a@b.com', redirectTo: '/invite/tok-abc' }));
+
+		expect(signInMagicLink).toHaveBeenCalledTimes(1);
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe(
+			'/auth/magic-link?redirectTo=' + encodeURIComponent('/invite/tok-abc')
+		);
+	});
+
+	it('drops an UNSAFE redirectTo (open redirect) and keeps the bare callbackURL', async () => {
+		await actions.default(makeEvent({ email: 'a@b.com', redirectTo: '//evil.com' }));
+
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe('/auth/magic-link');
+	});
+
+	it('uses the bare callbackURL when no redirectTo is present (unchanged behavior)', async () => {
+		await actions.default(makeEvent({ email: 'a@b.com' }));
+
+		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe('/auth/magic-link');
+	});
+
 	it('ignores a stray name field in the POST body (login is email-only)', async () => {
 		// Even if a name is posted, the login schema strips it and the API call
 		// must stay email-only.
