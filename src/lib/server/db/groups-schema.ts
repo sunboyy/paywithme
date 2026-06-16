@@ -25,9 +25,9 @@ import { user } from './auth-schema';
 //     `onDelete: 'cascade'`: groups are SOFT-deleted in v1 (`deleted_at`), so a
 //     real row delete only happens in non-v1 cleanup, where dropping the group's
 //     members/invites with it is correct.
-//   - `invites.member_id` → members.id is NULLABLE (open invite = no target) and
-//     uses `onDelete: 'set null'`: removing a targeted member slot turns its
-//     invite back into a harmless dangling reference rather than deleting it.
+//   - invites are MEMBER-AGNOSTIC (PLAN §6.2): a link grants entry to the group,
+//     not to a pre-chosen slot, so there is no `invites.member_id` FK at all — the
+//     invitee picks link-existing vs create-new at accept time.
 
 export const groups = pgTable('groups', {
 	// In-app generated UUID (text PK), consistent with the text `user.id` FKs.
@@ -90,9 +90,8 @@ export const invites = pgTable(
 		// Unique opaque lookup token (the URL secret). Unique also provides the
 		// find-by-token index the accept flow uses.
 		token: text('token').notNull().unique(),
-		// Nullable target slot (§6.2): a member-targeted link points at an unlinked
-		// member; an open link leaves this null and creates a new member on accept.
-		memberId: text('member_id').references(() => members.id, { onDelete: 'set null' }),
+		// MEMBER-AGNOSTIC (§6.2): the link carries NO target member — the invitee
+		// chooses at accept time to claim an unlinked slot or create a new member.
 		// Required 7-day expiry (§6.2); enforcement of the window is a later concern.
 		expiresAt: timestamp('expires_at').notNull(),
 		// Soft-revoke (§6.2): nullable; non-null means the link is no longer valid.

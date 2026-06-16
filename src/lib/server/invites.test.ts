@@ -1,22 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Unit tests for the invite service (PLAN §6.2, §12).
+// Unit tests for the invite service (PLAN §6.2 — member-agnostic links, §12).
 //
 // STRATEGY (mirrors `members.test.ts`): there is NO real DB here — real CRUD
-// round-trips are deferred to the task 3.9 integration tests. We mock
-// `$lib/server/db` with a small fluent query-builder stub so we can assert the
-// *meaningful* service guarantees:
+// round-trips are deferred to the integration tests. We mock `$lib/server/db`
+// with a small fluent query-builder stub so we can assert the *meaningful*
+// service guarantees:
 //   - `createInvite` generates a URL-safe, long token + a ~7-day expiry and
-//     inserts an OPEN invite (`member_id` null) under access.
-//   - a member-targeted `createInvite` validates the slot is in-group, active,
-//     and UNLINKED — rejecting linked / deactivated / not-in-group with
-//     `InviteTargetError`.
+//     inserts a MEMBER-AGNOSTIC invite (no `member_id`) under access.
 //   - access-denied throws `GroupAccessError` for create/list/revoke (and
 //     inserts/updates nothing).
 //   - `revokeInvite` stamps `revoked_at`, and rejects an invite not in the group
 //     with `InviteNotFoundError`.
 //   - `listActiveInvites` applies the active-only WHERE (revoked IS NULL AND
 //     expires_at > now) and returns only the rows the mock yields, newest-first.
+//   - `getInviteAcceptInfo` lists unlinked-active claimable members (and invalid).
+//   - `acceptInvite` honours the invitee's selection (new vs existing) with the
+//     right outcomes (accepted / slot_taken / already_member / invalid).
 
 // --- Fluent DB mock -------------------------------------------------------
 const {
@@ -27,6 +27,7 @@ const {
 	updateReturningQueue,
 	insertReturningQueue,
 	insertThrow,
+	updateThrow,
 	makeDb
 } = vi.hoisted(() => {
 	// A queue of row-sets the SELECT chains resolve to, in call order.
@@ -41,8 +42,11 @@ const {
 	const updateReturningQueue: unknown[][] = [];
 	const insertReturningQueue: unknown[][] = [];
 	// When set, the NEXT insert `.values()` throws this (e.g. a Postgres unique
-	// violation `{ code: '23505' }`) to exercise the open-invite race backstop.
+	// violation `{ code: '23505' }`) to exercise the new-member race backstop.
 	const insertThrow: { error: unknown } = { error: undefined };
+	// When set, the NEXT update `.returning()` rejects with this — exercises the
+	// existing-claim race backstop (the user concurrently linked another slot).
+	const updateThrow: { error: unknown } = { error: undefined };
 
 	function nextSelectRows(): unknown[] {
 		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
@@ -98,12 +102,18 @@ const {
 			return chain;
 		};
 		chain.where = () => chain;
-		chain.returning = () =>
-			Promise.resolve(
+		chain.returning = () => {
+			if (updateThrow.error !== undefined) {
+				const err = updateThrow.error;
+				updateThrow.error = undefined;
+				return Promise.reject(err);
+			}
+			return Promise.resolve(
 				updateReturningQueue.length > 0
 					? (updateReturningQueue.shift() as unknown[])
 					: [{ id: 'invite-1' }]
 			);
+		};
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 		return chain;
 	}
@@ -127,6 +137,7 @@ const {
 		updateReturningQueue,
 		insertReturningQueue,
 		insertThrow,
+		updateThrow,
 		makeDb: () => db
 	};
 });
@@ -138,11 +149,11 @@ import {
 	listActiveInvites,
 	revokeInvite,
 	getInvitePreview,
+	getInviteAcceptInfo,
 	acceptInvite,
 	inviteExpiresAt,
 	INVITE_TTL_DAYS,
-	InviteNotFoundError,
-	InviteTargetError
+	InviteNotFoundError
 } from './invites';
 import { GroupAccessError } from './groups';
 
@@ -163,6 +174,7 @@ beforeEach(() => {
 	updateReturningQueue.length = 0;
 	insertReturningQueue.length = 0;
 	insertThrow.error = undefined;
+	updateThrow.error = undefined;
 });
 
 describe('INVITE_TTL_DAYS / inviteExpiresAt (PLAN §6.2 — 7-day expiry)', () => {
@@ -177,9 +189,9 @@ describe('INVITE_TTL_DAYS / inviteExpiresAt (PLAN §6.2 — 7-day expiry)', () =
 	});
 });
 
-describe('createInvite (PLAN §6.2 — open invite, token + 7-day expiry)', () => {
-	it('inserts an OPEN invite (member_id null) with a URL-safe token + ~7-day expiry under access', async () => {
-		queueSelects(ACCESS_OK); // access check passes; no target lookup for open
+describe('createInvite (PLAN §6.2 — member-agnostic link, token + 7-day expiry)', () => {
+	it('inserts a MEMBER-AGNOSTIC invite (no member_id) with a URL-safe token + ~7-day expiry under access', async () => {
+		queueSelects(ACCESS_OK); // access check passes
 		const before = Date.now();
 		const invite = await createInvite({ userId: 'u1', groupId: 'g1' });
 		const after = Date.now();
@@ -188,8 +200,8 @@ describe('createInvite (PLAN §6.2 — open invite, token + 7-day expiry)', () =
 		const values = insertCalls[0].values as Record<string, unknown>;
 		expect(values.groupId).toBe('g1');
 		expect(values.createdBy).toBe('u1');
-		// Open invite → null target slot.
-		expect(values.memberId).toBeNull();
+		// Member-agnostic → the insert never carries a target member.
+		expect(values).not.toHaveProperty('memberId');
 
 		// Token: present, non-empty, URL-safe (base64url alphabet), and long
 		// (32 random bytes → 43 base64url chars).
@@ -205,9 +217,9 @@ describe('createInvite (PLAN §6.2 — open invite, token + 7-day expiry)', () =
 		expect(expiresAt.getTime()).toBeGreaterThanOrEqual(before + sevenDays - 1000);
 		expect(expiresAt.getTime()).toBeLessThanOrEqual(after + sevenDays + 1000);
 
-		// Returned shape carries the token + expiry + (null) member id.
+		// Returned shape carries the token + expiry (no member id at all).
 		expect(invite.token).toBe(token);
-		expect(invite.memberId).toBeNull();
+		expect(invite).not.toHaveProperty('memberId');
 		expect(invite.expiresAt).toBeInstanceOf(Date);
 	});
 
@@ -217,42 +229,6 @@ describe('createInvite (PLAN §6.2 — open invite, token + 7-day expiry)', () =
 		queueSelects(ACCESS_OK);
 		const b = await createInvite({ userId: 'u1', groupId: 'g1' });
 		expect(a.token).not.toBe(b.token);
-	});
-
-	it('creates a MEMBER-TARGETED invite when the slot is in-group, active, and UNLINKED', async () => {
-		// access OK, then the target-eligibility lookup finds an unlinked active slot.
-		queueSelects(ACCESS_OK, [{ id: 'm1', userId: null, deactivatedAt: null }]);
-		const invite = await createInvite({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
-
-		expect(insertCalls).toHaveLength(1);
-		expect((insertCalls[0].values as Record<string, unknown>).memberId).toBe('m1');
-		expect(invite.memberId).toBe('m1');
-	});
-
-	it('rejects (InviteTargetError) when the target member is not in the group', async () => {
-		queueSelects(ACCESS_OK, []); // access OK, target lookup finds nothing
-		await expect(
-			createInvite({ userId: 'u1', groupId: 'g1', memberId: 'nope' })
-		).rejects.toBeInstanceOf(InviteTargetError);
-		expect(insertCalls).toHaveLength(0);
-	});
-
-	it('rejects (InviteTargetError) when the target member is already LINKED', async () => {
-		queueSelects(ACCESS_OK, [{ id: 'm1', userId: 'user-9', deactivatedAt: null }]);
-		await expect(
-			createInvite({ userId: 'u1', groupId: 'g1', memberId: 'm1' })
-		).rejects.toBeInstanceOf(InviteTargetError);
-		expect(insertCalls).toHaveLength(0);
-	});
-
-	it('rejects (InviteTargetError) when the target member is DEACTIVATED', async () => {
-		queueSelects(ACCESS_OK, [
-			{ id: 'm1', userId: null, deactivatedAt: new Date('2026-02-01T00:00:00.000Z') }
-		]);
-		await expect(
-			createInvite({ userId: 'u1', groupId: 'g1', memberId: 'm1' })
-		).rejects.toBeInstanceOf(InviteTargetError);
-		expect(insertCalls).toHaveLength(0);
 	});
 
 	it('throws GroupAccessError and inserts nothing when access is denied', async () => {
@@ -277,7 +253,7 @@ describe('listActiveInvites (PLAN §6.2 — active only, newest first)', () => {
 		const createdAt = new Date('2026-06-16T00:00:00.000Z');
 		// access OK, then the (already active-filtered) invite rows. Revoked/expired
 		// rows are excluded by the WHERE, so the mock only yields the active one.
-		queueSelects(ACCESS_OK, [{ id: 'i1', token: 'tok-abc', memberId: null, expiresAt, createdAt }]);
+		queueSelects(ACCESS_OK, [{ id: 'i1', token: 'tok-abc', expiresAt, createdAt }]);
 
 		const result = await listActiveInvites({ userId: 'u1', groupId: 'g1' });
 
@@ -285,7 +261,6 @@ describe('listActiveInvites (PLAN §6.2 — active only, newest first)', () => {
 			{
 				id: 'i1',
 				token: 'tok-abc',
-				memberId: null,
 				expiresAt: expiresAt.toISOString(),
 				createdAt: createdAt.toISOString()
 			}
@@ -328,13 +303,13 @@ describe('revokeInvite (PLAN §6.2 — stamp revoked_at, cross-group guard)', ()
 // --- ACCEPT side (task 3.7, PLAN §6.2) ------------------------------------
 
 /** A still-valid resolved-invite row (the resolve SELECT yields this). */
-function validInviteRow(memberId: string | null) {
-	return { id: 'i1', groupId: 'g1', memberId, groupName: 'Trip to Tokyo' };
+function validInviteRow() {
+	return { id: 'i1', groupId: 'g1', groupName: 'Trip to Tokyo' };
 }
 
 describe('getInvitePreview (PLAN §6.2 — safe, auth-free landing preview)', () => {
 	it('returns { status: valid, groupName } for a live invite (only the group name leaks)', async () => {
-		queueSelects([validInviteRow(null)]);
+		queueSelects([validInviteRow()]);
 		const preview = await getInvitePreview('tok-abc');
 		expect(preview).toEqual({ status: 'valid', groupName: 'Trip to Tokyo' });
 	});
@@ -353,13 +328,61 @@ describe('getInvitePreview (PLAN §6.2 — safe, auth-free landing preview)', ()
 	});
 });
 
-describe('acceptInvite (PLAN §6.2 — discriminated outcomes)', () => {
-	it('OPEN invite: creates a new member linked to the user (userId set, displayName = userName)', async () => {
-		// (1) resolve → valid OPEN invite; (2) membership check → none.
-		queueSelects([validInviteRow(null)], []);
+describe('getInviteAcceptInfo (PLAN §6.2 — logged-in accept view, claimable slots)', () => {
+	it('returns { status: valid, groupId, groupName, claimableMembers } listing unlinked-active slots', async () => {
+		// (1) resolve → valid invite; (2) the claimable-members SELECT yields the
+		// group's unlinked, active slots (the WHERE filters linked/deactivated out).
+		queueSelects(
+			[validInviteRow()],
+			[
+				{ id: 'm1', displayName: 'Alex' },
+				{ id: 'm2', displayName: 'Bobby' }
+			]
+		);
+
+		const info = await getInviteAcceptInfo('tok-abc');
+
+		expect(info).toEqual({
+			status: 'valid',
+			groupId: 'g1',
+			groupName: 'Trip to Tokyo',
+			claimableMembers: [
+				{ id: 'm1', displayName: 'Alex' },
+				{ id: 'm2', displayName: 'Bobby' }
+			]
+		});
+	});
+
+	it('returns an empty claimableMembers list when no unlinked-active slots exist', async () => {
+		queueSelects([validInviteRow()], []);
+		const info = await getInviteAcceptInfo('tok-abc');
+		expect(info).toEqual({
+			status: 'valid',
+			groupId: 'g1',
+			groupName: 'Trip to Tokyo',
+			claimableMembers: []
+		});
+	});
+
+	it('returns { status: invalid } for a dead/not-found/revoked/expired token', async () => {
+		queueSelects([]); // resolve SELECT finds no live invite
+		const info = await getInviteAcceptInfo('dead');
+		expect(info).toEqual({ status: 'invalid' });
+	});
+});
+
+describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcomes)', () => {
+	it("mode 'new': creates a new member linked to the user (userId set, displayName = userName)", async () => {
+		// (1) resolve → valid invite; (2) membership check → none.
+		queueSelects([validInviteRow()], []);
 		insertReturningQueue.push([{ id: 'new-member-1' }]);
 
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
 
 		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-1' });
 		// The new member is linked to the accepting user with their name as default.
@@ -368,17 +391,22 @@ describe('acceptInvite (PLAN §6.2 — discriminated outcomes)', () => {
 		expect(values.groupId).toBe('g1');
 		expect(values.userId).toBe('u9');
 		expect(values.displayName).toBe('Dana');
-		// Open invite does NOT touch members via UPDATE.
+		// 'new' does NOT touch members via UPDATE.
 		expect(updateCalls).toHaveLength(0);
 	});
 
-	it('TARGETED invite: conditionally claims the empty slot (accepted, no displayName overwrite)', async () => {
-		// (1) resolve → valid TARGETED invite (memberId m5); (2) membership → none.
-		queueSelects([validInviteRow('m5')], []);
+	it("mode 'existing': conditionally claims the empty slot (accepted, no displayName overwrite)", async () => {
+		// (1) resolve → valid invite; (2) membership → none.
+		queueSelects([validInviteRow()], []);
 		// The conditional UPDATE affects exactly one row → claim succeeds.
 		updateReturningQueue.push([{ id: 'm5' }]);
 
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'existing', memberId: 'm5' }
+		});
 
 		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'm5' });
 		// Claim is an UPDATE that ONLY sets user_id — never the display_name.
@@ -386,26 +414,54 @@ describe('acceptInvite (PLAN §6.2 — discriminated outcomes)', () => {
 		const set = updateCalls[0].set as Record<string, unknown>;
 		expect(set.userId).toBe('u9');
 		expect(set).not.toHaveProperty('displayName');
-		// Targeted accept creates NO new member.
+		// Existing-claim creates NO new member.
 		expect(insertCalls).toHaveLength(0);
 	});
 
-	it('TARGETED invite already claimed: 0 rows updated → slot_taken', async () => {
-		queueSelects([validInviteRow('m5')], []);
-		// The conditional UPDATE matches nothing (user_id already set / deactivated).
+	it("mode 'existing' already claimed/deactivated/cross-group: 0 rows updated → slot_taken", async () => {
+		queueSelects([validInviteRow()], []);
+		// The conditional UPDATE matches nothing (user_id already set / deactivated /
+		// not in this group — the WHERE doubles as the lock + cross-group guard).
 		updateReturningQueue.push([]);
 
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'existing', memberId: 'm5' }
+		});
 
 		expect(result).toEqual({ status: 'slot_taken' });
 		expect(insertCalls).toHaveLength(0);
 	});
 
+	it("mode 'existing' race: a unique-violation on the claim is backstopped → already_member", async () => {
+		queueSelects([validInviteRow()], []);
+		// The user concurrently became a member via another slot; the partial unique
+		// index `(group_id, user_id)` rejects this claim → friendly already_member.
+		updateThrow.error = { code: '23505' };
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'existing', memberId: 'm5' }
+		});
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+		expect(insertCalls).toHaveLength(0);
+	});
+
 	it('existing membership: one-per-user-per-group → already_member (no mutation)', async () => {
 		// (1) resolve → valid; (2) membership check FINDS an existing linked member.
-		queueSelects([validInviteRow(null)], [{ id: 'existing-member' }]);
+		queueSelects([validInviteRow()], [{ id: 'existing-member' }]);
 
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
 
 		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
 		expect(insertCalls).toHaveLength(0);
@@ -414,30 +470,40 @@ describe('acceptInvite (PLAN §6.2 — discriminated outcomes)', () => {
 
 	it('not-found / revoked / expired token: resolve yields nothing → invalid (no mutation)', async () => {
 		queueSelects([]); // resolve SELECT finds no live invite
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'dead' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'dead',
+			selection: { mode: 'new' }
+		});
 
 		expect(result).toEqual({ status: 'invalid' });
 		expect(insertCalls).toHaveLength(0);
 		expect(updateCalls).toHaveLength(0);
 	});
 
-	it('OPEN invite race: a unique-violation on insert is backstopped → already_member', async () => {
-		// (1) resolve → valid OPEN; (2) membership → none (lost the race). The insert
-		// then trips the partial unique index `(group_id, user_id)`.
-		queueSelects([validInviteRow(null)], []);
+	it("mode 'new' race: a unique-violation on insert is backstopped → already_member", async () => {
+		// (1) resolve → valid; (2) membership → none (lost the race). The insert then
+		// trips the partial unique index `(group_id, user_id)`.
+		queueSelects([validInviteRow()], []);
 		insertThrow.error = { code: '23505' }; // Postgres unique_violation
 
-		const result = await acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' });
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
 
 		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
 	});
 
-	it('OPEN invite: a NON-unique insert error still propagates (not swallowed)', async () => {
-		queueSelects([validInviteRow(null)], []);
+	it("mode 'new': a NON-unique insert error still propagates (not swallowed)", async () => {
+		queueSelects([validInviteRow()], []);
 		insertThrow.error = new Error('connection reset');
 
-		await expect(acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok' })).rejects.toThrow(
-			'connection reset'
-		);
+		await expect(
+			acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok', selection: { mode: 'new' } })
+		).rejects.toThrow('connection reset');
 	});
 });

@@ -364,25 +364,31 @@ real account holder. v1 uses **invite links only**:
 The invite link is **reusable with a 7-day expiry**: one link can be shared with
 several people and accepted multiple times until it expires (or is revoked). A
 group may have **multiple active links at once**, each managed via a **revocation
-UI** (see §10).
+UI** (see §10). An invite link is **member-agnostic** — it grants entry to the
+group, not to a pre-chosen slot; **the invitee decides how to join at accept time**.
 
 Flow:
 
 1. A group member generates an **invite link** (token) for the group. It expires
-   **7 days** after creation (default). The link may optionally target a specific
-   **unlinked member** (the slot to fill), or be open (creates a new member on
-   accept). Multiple links can be active simultaneously.
+   **7 days** after creation (default). The link is **open / member-agnostic** —
+   it does **not** target a particular member. Multiple links can be active
+   simultaneously.
 2. The invitee opens the link. **Accepting always requires a registered,
    logged-in user** — there is no anonymous/guest accept. If not logged in, they
    must register or log in via passkey first, then continue the accept.
-3. If the token is **valid and unexpired**, on accepting the user is **assigned
-   to the member**: set `members.user_id = currentUser`. If the link was **open**,
-   a **new member is created and linked**, with its `display_name` defaulting to
-   the accepting **user's display name** (editable afterwards in member
-   management).
+3. If the token is **valid and unexpired**, the invitee is **prompted to choose
+   how to join the group**:
+   - **Link an existing member** — claim one of the group's **unlinked, active**
+     member slots (e.g. a placeholder someone added ahead of time): set
+     `members.user_id = currentUser` on the chosen slot, keeping its existing
+     `display_name`. A slot can be claimed only while still unlinked — a repeat
+     or concurrent claim of the same slot is rejected (effectively single-use
+     per slot).
+   - **Join as a new member** — create a **new member** linked to the user, with
+     `display_name` defaulting to the accepting **user's display name** (editable
+     afterwards in member management).
 4. The link stays valid for further accepts until it expires or is revoked
-   (reusable). A **member-targeted** link, however, is effectively single-use:
-   once that slot is claimed it can't be claimed again.
+   (reusable) — each accept is independent and member-agnostic.
 
 Rules:
 
@@ -867,8 +873,9 @@ groups           (id, name, settlement_currency, created_by, created_at,
                   -- currency code → exponent/symbol resolved via a currency constant (§7.5)
 members          (id, group_id, display_name, user_id?,  -- nullable, → user.id
                   deactivated_at?)   -- soft-deactivate; stays in ledger (§6.3)
-invites          (id, group_id, token, member_id?,       -- member_id targets a slot
-                  expires_at, revoked_at?, created_by, created_at)  -- reusable + expiry
+invites          (id, group_id, token,                   -- member-agnostic link
+                  expires_at, revoked_at?, created_by, created_at)  -- reusable + 7-day
+                  -- expiry; invitee picks link-existing vs create-new at accept (§6.2)
 
 categories       (id, name, icon, applies_to)         -- spending|transfer (seeded, fixed)
 
@@ -956,7 +963,8 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 /groups/[id]/settle       Debt summary + suggested settlements + settle action
 /groups/[id]/activity     Audit log: who did what & when (newest first) (§12.1)
 /settings                 Manage passkeys (add/remove additional devices); email
-/invite/[token]           Accept an invite link (assign member, grant access)
+/invite/[token]           Accept an invite link (link an existing member or
+                          create a new one; grant access)
 ```
 
 UI building blocks (shadcn-svelte): Button, Card, Dialog, Drawer/Sheet (mobile

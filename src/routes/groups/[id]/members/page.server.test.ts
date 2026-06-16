@@ -25,8 +25,7 @@ const {
 	revokeInvite,
 	GroupAccessError,
 	MemberNotFoundError,
-	InviteNotFoundError,
-	InviteTargetError
+	InviteNotFoundError
 } = vi.hoisted(() => {
 	class GroupAccessError extends Error {
 		readonly code = 'group_access' as const;
@@ -36,9 +35,6 @@ const {
 	}
 	class InviteNotFoundError extends Error {
 		readonly code = 'invite_not_found' as const;
-	}
-	class InviteTargetError extends Error {
-		readonly code = 'invite_target' as const;
 	}
 	return {
 		getGroupForUser: vi.fn(),
@@ -52,8 +48,7 @@ const {
 		revokeInvite: vi.fn(),
 		GroupAccessError,
 		MemberNotFoundError,
-		InviteNotFoundError,
-		InviteTargetError
+		InviteNotFoundError
 	};
 });
 
@@ -70,8 +65,7 @@ vi.mock('$lib/server/invites', () => ({
 	createInvite,
 	listActiveInvites,
 	revokeInvite,
-	InviteNotFoundError,
-	InviteTargetError
+	InviteNotFoundError
 }));
 
 import { load, actions } from './+page.server';
@@ -187,7 +181,6 @@ describe('/groups/[id]/members load', () => {
 			{
 				id: 'i1',
 				token: 'tok',
-				memberId: null,
 				expiresAt: '2026-07-01T00:00:00.000Z',
 				createdAt: '2026-06-16T00:00:00.000Z'
 			}
@@ -397,7 +390,7 @@ describe('/groups/[id]/members ?/reactivate action', () => {
 describe('/groups/[id]/members ?/createInvite action', () => {
 	it('redirects anonymous to /login and never calls the service', async () => {
 		try {
-			await actions.createInvite(makeActionEvent({ memberId: '' }, null));
+			await actions.createInvite(makeActionEvent({}, null));
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
@@ -409,43 +402,26 @@ describe('/groups/[id]/members ?/createInvite action', () => {
 		expect(createInvite).not.toHaveBeenCalled();
 	});
 
-	it('calls createInvite once with an OPEN target (null) when no member chosen', async () => {
-		createInvite.mockResolvedValueOnce({ id: 'i1', token: 't', memberId: null });
-		const result = await actions.createInvite(makeActionEvent({ memberId: '' }, AUTH_USER));
+	it('calls createInvite once with a MEMBER-AGNOSTIC link (no memberId)', async () => {
+		createInvite.mockResolvedValueOnce({ id: 'i1', token: 't' });
+		const result = await actions.createInvite(makeActionEvent({}, AUTH_USER));
 
 		expect(createInvite).toHaveBeenCalledTimes(1);
-		// Empty target normalizes to a null (open) invite.
-		expect(createInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', memberId: null });
+		// Member-agnostic: only userId + groupId, never a target member.
+		expect(createInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
 		const msg = (result as { form: { message?: { type: string } } }).form.message;
 		expect(msg?.type).toBe('success');
-	});
-
-	it('calls createInvite with the chosen target member id', async () => {
-		createInvite.mockResolvedValueOnce({ id: 'i1', token: 't', memberId: 'm5' });
-		await actions.createInvite(makeActionEvent({ memberId: 'm5' }, AUTH_USER));
-		expect(createInvite).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', memberId: 'm5' });
 	});
 
 	it('maps a GroupAccessError to error(404)', async () => {
 		createInvite.mockRejectedValueOnce(new GroupAccessError());
 		try {
-			await actions.createInvite(makeActionEvent({ memberId: '' }, AUTH_USER));
+			await actions.createInvite(makeActionEvent({}, AUTH_USER));
 			expect.unreachable('expected a 404');
 		} catch (e) {
 			expect(isHttpError(e)).toBe(true);
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
-	});
-
-	it('surfaces an InviteTargetError as a friendly 400 message (no throw)', async () => {
-		createInvite.mockRejectedValueOnce(new InviteTargetError('That member is already linked.'));
-		const result = (await actions.createInvite(makeActionEvent({ memberId: 'm5' }, AUTH_USER))) as {
-			status: number;
-			data: { form: { message?: { type: string; text: string } } };
-		};
-		expect(result.status).toBe(400);
-		expect(result.data.form.message?.type).toBe('error');
-		expect(result.data.form.message?.text).toContain('already linked');
 	});
 });
 

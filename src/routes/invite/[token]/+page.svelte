@@ -1,27 +1,25 @@
 <script lang="ts">
 	// `/invite/[token]` accept flow UI (task 3.7; PLAN §6.2, §10 mobile-first).
 	//
-	// Renders one of four states from `load` (+ the action's failure result):
+	// Renders one of three states from `load`:
 	//   - need_auth : anonymous visitor — show the invite context + sign-in /
 	//                 create-account links carrying `?redirectTo` (or the invalid
 	//                 message when the link is already dead).
-	//   - ready     : logged-in + valid — an explicit Accept button that POSTs to
-	//                 `?/accept` (a REAL form action, works without JS).
+	//   - ready     : logged-in + valid — the member-agnostic CHOICE form
+	//                 (`AcceptChoiceForm`): join as a NEW member, or LINK an
+	//                 existing unlinked slot.
 	//   - invalid   : dead link — clear copy + a link back to /groups.
-	//   - slot_taken: targeted slot already claimed — clear copy + /groups link.
 	//
-	// shadcn components come from `$lib/components/ui/**` (CLI-generated) only.
-	import { enhance } from '$app/forms';
+	// shadcn components (Card/Button) come from `$lib/components/ui/**`
+	// (CLI-generated) only.
 	import { resolve } from '$app/paths';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import type { ActionData, PageData } from './$types';
+	import AcceptChoiceForm from './AcceptChoiceForm.svelte';
+	import type { PageData } from './$types';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
 
-	// The action's failure (`fail(...)`) carries the invalid/slot_taken state; it
-	// takes precedence over the `load` state so a failed POST shows the right copy.
-	const view = $derived(form?.state ?? data.state);
 	const registerHref = $derived(
 		data.state === 'need_auth' && data.redirectTo
 			? '/register?redirectTo=' + encodeURIComponent(data.redirectTo)
@@ -39,8 +37,8 @@
 </svelte:head>
 
 <Card.Root>
-	{#if view === 'need_auth'}
-		{#if data.state === 'need_auth' && data.valid}
+	{#if data.state === 'need_auth'}
+		{#if data.valid}
 			<Card.Header>
 				<Card.Title class="text-2xl">You've been invited</Card.Title>
 				<Card.Description>
@@ -65,26 +63,18 @@
 				</p>
 			</Card.Content>
 		{/if}
-	{:else if view === 'ready'}
+	{:else if data.state === 'ready'}
 		<Card.Header>
-			<Card.Title class="text-2xl">
-				Join {data.state === 'ready' ? data.groupName : ''}
-			</Card.Title>
-			<Card.Description>Accept this invitation to join the group.</Card.Description>
-		</Card.Header>
-		<Card.Content>
-			<!-- Real form action — works without JS; `enhance` upgrades it. -->
-			<form method="POST" action="?/accept" use:enhance>
-				<Button type="submit" class="w-full">Accept invitation</Button>
-			</form>
-		</Card.Content>
-	{:else if view === 'slot_taken'}
-		<Card.Header>
-			<Card.Title class="text-2xl">Invitation already used</Card.Title>
+			<Card.Title class="text-2xl">Join {data.groupName}</Card.Title>
+			<Card.Description>Choose how you'd like to join this group.</Card.Description>
 		</Card.Header>
 		<Card.Content class="space-y-4">
-			<p class="text-muted-foreground text-sm">This invitation has already been used.</p>
-			<Button href={resolve('/groups')} variant="outline" class="w-full">Go to your groups</Button>
+			<AcceptChoiceForm
+				groupName={data.groupName}
+				userName={data.userName}
+				claimableMembers={data.claimableMembers}
+				acceptForm={data.acceptForm}
+			/>
 		</Card.Content>
 	{:else}
 		<Card.Header>

@@ -18,7 +18,6 @@
 	import { createInviteSchema } from '$lib/schemas/invite';
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
-	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -54,15 +53,14 @@
 	} = reactivateForm;
 
 	// --- Invite links (PLAN §6.2) -----------------------------------------
-	// Create invite (open, or targeting an unlinked active member). Its own
-	// superForm so its message surfaces on its own control.
+	// Create a MEMBER-AGNOSTIC invite link (no target — the invitee chooses on
+	// accept). Its own superForm so its message surfaces on its own control.
 	// svelte-ignore state_referenced_locally
 	const createInviteForm = superForm(data.createInviteForm, {
 		validators: zod4Client(createInviteSchema),
 		resetForm: true
 	});
 	const {
-		form: createInviteData,
 		message: createInviteMessage,
 		submitting: creatingInvite,
 		enhance: createInviteEnhance
@@ -88,27 +86,9 @@
 			null
 	);
 
-	// Only UNLINKED, ACTIVE members are eligible invite targets (PLAN §6.2 — a
-	// member-targeted link fills an empty slot). The "Open invite" option is the
-	// empty value '' → normalized to an open invite server-side.
-	const targetableMembers = $derived(
-		data.members.filter((m) => !m.isLinked && m.deactivatedAt == null)
-	);
-	const selectedTargetLabel = $derived.by(() => {
-		const id = $createInviteData.memberId;
-		if (!id) return 'Open invite (new member)';
-		return targetableMembers.find((m) => m.id === id)?.displayName ?? 'Open invite (new member)';
-	});
-
 	// Absolute invite URL for a token (PLAN §6.2 — the no-JS-copyable link text).
 	function inviteUrl(token: string): string {
 		return `${data.origin}/invite/${token}`;
-	}
-
-	// Look up the target member's display name for a member-targeted invite.
-	function targetName(memberId: string | null): string | null {
-		if (!memberId) return null;
-		return data.members.find((m) => m.id === memberId)?.displayName ?? null;
 	}
 
 	// Absolute + relative expiry text (PLAN §6.2 — show the expiry).
@@ -281,8 +261,8 @@
 			<Card.Title>Invite links</Card.Title>
 			<Card.Description>
 				Share a link so people can join this group. Links are reusable and expire after 7 days; you
-				can have several active at once. Target an empty member slot, or leave it open to create a
-				new member on accept.
+				can have several active at once. When someone accepts, they choose whether to link to an
+				existing member or join as a new one.
 			</Card.Description>
 		</Card.Header>
 
@@ -293,14 +273,8 @@
 				<ul class="divide-border divide-y" aria-label="Active invite links">
 					{#each data.invites as invite (invite.id)}
 						{@const expiry = expiryLabel(invite.expiresAt)}
-						{@const target = targetName(invite.memberId)}
 						<li class="space-y-2 py-3">
 							<div class="flex flex-wrap items-center gap-2">
-								{#if target}
-									<Badge variant="outline">For {target}</Badge>
-								{:else}
-									<Badge variant="secondary">Open</Badge>
-								{/if}
 								<span class="text-muted-foreground text-xs" title={expiry.absolute}>
 									Expires {expiry.relative}
 								</span>
@@ -339,32 +313,9 @@
 
 			<Separator />
 
-			<!-- Create an invite (optional target member; open if none chosen). -->
-			<form method="POST" action="?/createInvite" use:createInviteEnhance class="space-y-3">
-				<Form.Field form={createInviteForm} name="memberId">
-					<Form.Control>
-						{#snippet children({ props })}
-							<Form.Label>Target member (optional)</Form.Label>
-							<Select.Root type="single" bind:value={$createInviteData.memberId} name={props.name}>
-								<Select.Trigger {...props} class="w-full sm:max-w-xs">
-									{selectedTargetLabel}
-								</Select.Trigger>
-								<Select.Content>
-									<Select.Item value="" label="Open invite (new member)">
-										Open invite (new member)
-									</Select.Item>
-									{#each targetableMembers as member (member.id)}
-										<Select.Item value={member.id} label={member.displayName}>
-											{member.displayName}
-										</Select.Item>
-									{/each}
-								</Select.Content>
-							</Select.Root>
-						{/snippet}
-					</Form.Control>
-					<Form.FieldErrors />
-				</Form.Field>
-
+			<!-- Create a MEMBER-AGNOSTIC invite link (PLAN §6.2): a plain button, a
+			     REAL form action (works without JS); the invitee chooses how to join. -->
+			<form method="POST" action="?/createInvite" use:createInviteEnhance>
 				<Button type="submit" disabled={$creatingInvite}>
 					{$creatingInvite ? 'Creating…' : 'Create invite link'}
 				</Button>

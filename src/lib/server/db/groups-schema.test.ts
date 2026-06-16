@@ -141,7 +141,6 @@ describe('invites drizzle table', () => {
 			'expiresAt',
 			'groupId',
 			'id',
-			'memberId',
 			'revokedAt',
 			'token'
 		]);
@@ -160,9 +159,8 @@ describe('invites drizzle table', () => {
 		expect(c.token.notNull).toBe(true);
 		expect(c.token.isUnique).toBe(true);
 
-		// member_id targets a slot: nullable (open invite has none).
-		expect(c.memberId.name).toBe('member_id');
-		expect(c.memberId.notNull).toBe(false);
+		// MEMBER-AGNOSTIC (§6.2): there is no `member_id` column on invites at all.
+		expect(c).not.toHaveProperty('memberId');
 
 		// expiry required (the 7-day window).
 		expect(c.expiresAt.name).toBe('expires_at');

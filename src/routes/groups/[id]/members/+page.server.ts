@@ -13,9 +13,8 @@
 //
 // ERROR MAPPING (consistent with the 3.3/3.5 error model): `GroupAccessError`
 // (no access / soft-deleted group), `MemberNotFoundError` (member not in group),
-// and `InviteNotFoundError` (invite not in group) all map to `error(404)`; an
-// ineligible invite target (`InviteTargetError`) surfaces as a friendly message;
-// any other failure is a generic message (never leaking the raw cause — §12).
+// and `InviteNotFoundError` (invite not in group) all map to `error(404)`; any
+// other failure is a generic message (never leaking the raw cause — §12).
 
 import { error, fail } from '@sveltejs/kit';
 import { message, superValidate } from 'sveltekit-superforms';
@@ -38,7 +37,6 @@ import {
 	listActiveInvites,
 	revokeInvite,
 	InviteNotFoundError,
-	InviteTargetError,
 	type ActiveInvite
 } from '$lib/server/invites';
 import type { Actions, PageServerLoad } from './$types';
@@ -234,20 +232,11 @@ export const actions: Actions = {
 		}
 
 		try {
-			await createInvite({
-				userId: user.id,
-				groupId: params.id,
-				// Empty/absent target → open invite (normalized to undefined in the schema).
-				memberId: form.data.memberId ?? null
-			});
+			// Member-agnostic link (PLAN §6.2): no target — the invitee chooses on accept.
+			await createInvite({ userId: user.id, groupId: params.id });
 		} catch (e) {
 			if (isNotFoundError(e)) {
 				error(404, 'Group not found');
-			}
-			// An ineligible target slot is a user-correctable input problem, not a
-			// server fault — surface its (safe) message rather than a generic 500.
-			if (e instanceof InviteTargetError) {
-				return message(form, { type: 'error', text: e.message }, { status: 400 });
 			}
 			return message(
 				form,

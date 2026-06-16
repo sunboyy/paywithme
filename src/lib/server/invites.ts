@@ -14,15 +14,17 @@
 // `assertGroupAccess` (the task-3.3 primitive). Mutations that target a specific
 // invite / member ALSO verify it belongs to `groupId` (never act cross-group).
 //
+// MEMBER-AGNOSTIC LINKS (PLAN §6.2): an invite link grants entry to the GROUP,
+// not to a pre-chosen member slot. It carries no `member_id`. The invitee decides
+// HOW to join at accept time — either CLAIM an existing unlinked, active member
+// slot (keeping its display_name) or JOIN AS A NEW member (display_name = their
+// own name). One member per user per group is still enforced.
+//
 // ERROR MODEL (consistent with the 3.3/3.5 services) and HTTP MAPPING intent:
 //   - `GroupAccessError` (reused from `./groups`)  → 404: no access / group not
 //     found / soft-deleted — deliberately conflated so we never leak existence.
 //   - `InviteNotFoundError` (defined here)         → 404: the target invite does
 //     not exist in this group. Same not-found outcome, distinct `code`.
-//   - `InviteTargetError` (defined here)           → 400/409: the targeted member
-//     is not an eligible slot (not in the group, deactivated, or already linked).
-//     A member-targeted invite only makes sense for an EMPTY, ACTIVE slot
-//     (PLAN §6.2). The route layer maps this to a friendly 400/409.
 //
 // TOKEN SECURITY: the token is the URL secret that grants group access on accept,
 // so it must be cryptographically strong and UNGUESSABLE — we use Node `crypto`
@@ -82,21 +84,6 @@ export class InviteNotFoundError extends Error {
 	}
 }
 
-/**
- * The targeted member is not an eligible slot for a member-targeted invite. A
- * member-targeted link only makes sense for an EMPTY, ACTIVE slot in this group
- * (PLAN §6.2): it must belong to the group, be NOT deactivated, and be UNLINKED
- * (`user_id IS NULL`). The route layer maps `code === 'invite_target'` to a
- * friendly **400** (bad target) / **409** (slot already claimed).
- */
-export class InviteTargetError extends Error {
-	readonly code = 'invite_target' as const;
-	constructor(message = 'That member can’t be invited to this slot') {
-		super(message);
-		this.name = 'InviteTargetError';
-	}
-}
-
 /** Assert access or throw `GroupAccessError` (→ 404). */
 async function assertGroupAccess(
 	userId: string,
@@ -115,7 +102,6 @@ export type Invite = typeof invites.$inferSelect;
 export type CreatedInvite = {
 	id: string;
 	token: string;
-	memberId: string | null;
 	expiresAt: Date;
 	createdAt: Date;
 };
@@ -124,83 +110,35 @@ export type CreatedInvite = {
 export type ActiveInvite = {
 	id: string;
 	token: string;
-	memberId: string | null;
 	expiresAt: string;
 	createdAt: string;
 };
 
 /**
- * Validate that `memberId` is an eligible target slot for a member-targeted
- * invite (PLAN §6.2): belongs to `groupId`, is NOT deactivated, and is UNLINKED
- * (`user_id IS NULL`). Throws `InviteTargetError` otherwise. Runs on the passed
- * executor so it shares the mutation's transaction.
- */
-async function assertEligibleTargetMember(
-	groupId: string,
-	memberId: string,
-	executor: DbExecutor
-): Promise<void> {
-	const [row] = await executor
-		.select({
-			id: members.id,
-			userId: members.userId,
-			deactivatedAt: members.deactivatedAt
-		})
-		.from(members)
-		.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
-		.limit(1);
-
-	// Not in this group (or hard-deleted) → not an eligible target.
-	if (!row) {
-		throw new InviteTargetError('That member is not part of this group.');
-	}
-	// Already linked to a user → the slot is filled; nothing to invite into.
-	if (row.userId != null) {
-		throw new InviteTargetError('That member is already linked to a user.');
-	}
-	// Deactivated → hidden from new activity; not a valid invite target (§6.3).
-	if (row.deactivatedAt != null) {
-		throw new InviteTargetError('That member is inactive.');
-	}
-}
-
-/**
- * Create an invite link for a group (PLAN §6.2). Access-checked. The link is
- * REUSABLE with a 7-day expiry; a group may have MULTIPLE active links at once.
- *
- * `memberId` (optional / `null`) targets a specific UNLINKED member slot to fill;
- * omitted/null = an OPEN invite (accept creates a new member in 3.7). When a
- * target is given it's validated as eligible (in-group, active, unlinked) — else
- * `InviteTargetError`.
+ * Create a MEMBER-AGNOSTIC invite link for a group (PLAN §6.2). Access-checked.
+ * The link is REUSABLE with a 7-day expiry; a group may have MULTIPLE active links
+ * at once. It carries NO target member — the invitee decides at accept time
+ * whether to claim an existing slot or join as a new member.
  *
  * Generates an unguessable token (`randomBytes(32).base64url`), sets
  * `expiresAt = now + INVITE_TTL_DAYS days`, and inserts inside a transaction.
- * Returns the created invite (incl. token + expiresAt + memberId). NEVER logs the
- * token.
+ * Returns the created invite (incl. token + expiresAt). NEVER logs the token.
  */
 export async function createInvite({
 	userId,
-	groupId,
-	memberId = null
+	groupId
 }: {
 	userId: string;
 	groupId: string;
-	memberId?: string | null;
 }): Promise<CreatedInvite> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
-
-		// A member-targeted invite only makes sense for an empty, active slot.
-		if (memberId != null) {
-			await assertEligibleTargetMember(groupId, memberId, tx);
-		}
 
 		const [invite] = await tx
 			.insert(invites)
 			.values({
 				groupId,
 				token: generateInviteToken(),
-				memberId, // null = open invite
 				expiresAt: inviteExpiresAt(),
 				createdBy: userId
 			})
@@ -211,7 +149,6 @@ export async function createInvite({
 		return {
 			id: invite.id,
 			token: invite.token,
-			memberId: invite.memberId ?? null,
 			expiresAt: invite.expiresAt,
 			createdAt: invite.createdAt
 		};
@@ -239,7 +176,6 @@ export async function listActiveInvites({
 		.select({
 			id: invites.id,
 			token: invites.token,
-			memberId: invites.memberId,
 			expiresAt: invites.expiresAt,
 			createdAt: invites.createdAt
 		})
@@ -256,7 +192,6 @@ export async function listActiveInvites({
 	return rows.map((r) => ({
 		id: r.id,
 		token: r.token,
-		memberId: r.memberId ?? null,
 		expiresAt: r.expiresAt.toISOString(),
 		createdAt: r.createdAt.toISOString()
 	}));
@@ -316,7 +251,6 @@ export async function revokeInvite({
 type ResolvedInvite = {
 	id: string;
 	groupId: string;
-	memberId: string | null;
 	groupName: string;
 };
 
@@ -337,7 +271,6 @@ async function resolveValidInvite(
 		.select({
 			id: invites.id,
 			groupId: invites.groupId,
-			memberId: invites.memberId,
 			groupName: groups.name
 		})
 		.from(invites)
@@ -378,6 +311,58 @@ export async function getInvitePreview(token: string): Promise<InvitePreview> {
 	return { status: 'valid', groupName: invite.groupName };
 }
 
+/**
+ * The LOGGED-IN accept view (PLAN §6.2 step 3): everything the accept page needs
+ * to let the invitee CHOOSE how to join — the group name plus the list of
+ * CLAIMABLE member slots (unlinked + active). Unlike `getInvitePreview` (the
+ * auth-free landing), this exposes the claimable member display names, which is
+ * appropriate only for a logged-in token-holder about to join.
+ */
+export type InviteAcceptInfo =
+	| {
+			status: 'valid';
+			groupId: string;
+			groupName: string;
+			claimableMembers: { id: string; displayName: string }[];
+	  }
+	| { status: 'invalid' };
+
+/**
+ * Resolve the accept-time info for a LOGGED-IN invitee (PLAN §6.2 step 3).
+ *
+ * No auth check here — the route only calls this for a logged-in user, and the
+ * token itself is the capability that authorizes seeing the group's claimable
+ * slots. Invalid/not-found/revoked/expired (or dead group) → `{ status:
+ * 'invalid' }` (conflated, never throws). Otherwise lists the group's UNLINKED,
+ * ACTIVE members (`user_id IS NULL AND deactivated_at IS NULL`) — the slots an
+ * invitee may claim — ordered by display name.
+ */
+export async function getInviteAcceptInfo(token: string): Promise<InviteAcceptInfo> {
+	const invite = await resolveValidInvite(token, db);
+	if (!invite) {
+		return { status: 'invalid' };
+	}
+
+	const claimable = await db
+		.select({ id: members.id, displayName: members.displayName })
+		.from(members)
+		.where(
+			and(
+				eq(members.groupId, invite.groupId),
+				isNull(members.userId),
+				isNull(members.deactivatedAt)
+			)
+		)
+		.orderBy(members.displayName);
+
+	return {
+		status: 'valid',
+		groupId: invite.groupId,
+		groupName: invite.groupName,
+		claimableMembers: claimable
+	};
+}
+
 /** Discriminated outcome of an accept attempt (PLAN §6.2). */
 export type AcceptResult =
 	| { status: 'invalid' }
@@ -399,43 +384,52 @@ function isUniqueViolation(e: unknown): boolean {
 }
 
 /**
- * Accept an invite for an authenticated user (PLAN §6.2 step 3 + Rules).
+ * The invitee's CHOICE at accept time (PLAN §6.2 step 3):
+ *   - `new`      — join as a brand-new member named after the accepting user.
+ *   - `existing` — claim one of the group's unlinked, active member slots.
+ */
+export type AcceptSelection = { mode: 'new' } | { mode: 'existing'; memberId: string };
+
+/**
+ * Accept a MEMBER-AGNOSTIC invite for an authenticated user (PLAN §6.2 step 3 +
+ * Rules). The invitee's `selection` decides HOW they join.
  *
  * Returns a DISCRIMINATED result (NOT exceptions) for every EXPECTED outcome so
  * the route can branch deterministically:
  *   - `invalid`        — token not found / revoked / expired (or dead group).
  *   - `already_member` — the user already has a member link in this group
  *                        (one-member-per-user-per-group → friendly no-op).
- *   - `slot_taken`     — a member-targeted invite whose slot is already claimed
- *                        (`user_id` not null) or no longer an eligible slot
- *                        (deactivated / missing).
- *   - `accepted`       — assigned to the targeted member, OR created+linked a new
- *                        open member.
+ *   - `slot_taken`     — `existing` claim of a slot that is already linked,
+ *                        deactivated, or not in this group (single-use per slot).
+ *   - `accepted`       — claimed an existing slot, OR created+linked a new member.
  *
  * One transaction, re-validated inside it:
  *  1. Re-resolve the invite (not-found/revoked/expired → `invalid`).
  *  2. One-per-user-per-group: existing member link for `userId` → `already_member`.
- *  3. TARGETED (`member_id` set): a CONDITIONAL update claims the slot atomically
- *     — `SET user_id = :userId WHERE id = :memberId AND group_id = :groupId AND
- *     user_id IS NULL AND deactivated_at IS NULL`. Inspect the affected-row count:
- *     0 → `slot_taken` (someone claimed it first / it was deactivated); else
- *     `accepted`. This avoids a read-then-write race — the WHERE is the lock — and
- *     never overwrites the slot's existing `display_name`.
- *  4. OPEN (`member_id` null): insert a new member `{ groupId, userId, displayName:
- *     userName }`. A concurrent double-accept is backstopped by the partial unique
- *     index (→ `already_member`).
+ *  3. `existing`: a CONDITIONAL update claims the slot atomically —
+ *     `SET user_id = :userId WHERE id = :memberId AND group_id = :groupId AND
+ *     user_id IS NULL AND deactivated_at IS NULL`. 0 rows → `slot_taken` (already
+ *     claimed / deactivated / cross-group — the WHERE doubles as the lock AND the
+ *     cross-group guard); else `accepted`. The slot's existing `display_name` is
+ *     NEVER overwritten. Wrapped in the unique-violation catch in case the user
+ *     concurrently became a member via another slot (→ `already_member`).
+ *  4. `new`: insert a new member `{ groupId, userId, displayName: userName }`. A
+ *     concurrent double-accept is backstopped by the partial unique index
+ *     (→ `already_member`).
  *
- * Accepting does NOT revoke/expire the invite — an open link stays reusable until
- * it expires or is revoked. Never logs the token.
+ * Accepting does NOT revoke/expire the invite — the link stays reusable until it
+ * expires or is revoked. Never logs the token.
  */
 export async function acceptInvite({
 	userId,
 	userName,
-	token
+	token,
+	selection
 }: {
 	userId: string;
 	userName: string;
 	token: string;
+	selection: AcceptSelection;
 }): Promise<AcceptResult> {
 	return db.transaction(async (tx) => {
 		// (1) Re-validate inside the tx — the link may have expired/been revoked
@@ -456,35 +450,44 @@ export async function acceptInvite({
 			return { status: 'already_member', groupId: invite.groupId };
 		}
 
-		// (3) Member-targeted invite: atomically claim the EMPTY, ACTIVE slot. The
-		// WHERE doubles as the lock — `user_id IS NULL` means a second accept can't
-		// re-claim it. `returning` gives us the affected-row count.
-		if (invite.memberId != null) {
-			const claimed = await tx
-				.update(members)
-				.set({ userId })
-				.where(
-					and(
-						eq(members.id, invite.memberId),
-						eq(members.groupId, invite.groupId),
-						isNull(members.userId),
-						isNull(members.deactivatedAt)
+		// (3) Claim an EXISTING slot: atomically link the EMPTY, ACTIVE slot. The
+		// WHERE doubles as the lock (`user_id IS NULL` blocks a second claim) AND the
+		// cross-group guard (`group_id = :groupId`). `returning` gives the row count.
+		if (selection.mode === 'existing') {
+			try {
+				const claimed = await tx
+					.update(members)
+					.set({ userId })
+					.where(
+						and(
+							eq(members.id, selection.memberId),
+							eq(members.groupId, invite.groupId),
+							isNull(members.userId),
+							isNull(members.deactivatedAt)
+						)
 					)
-				)
-				.returning({ id: members.id });
+					.returning({ id: members.id });
 
-			if (claimed.length === 0) {
-				// Already claimed, deactivated, or vanished → effectively single-use.
-				return { status: 'slot_taken' };
+				if (claimed.length === 0) {
+					// Already claimed, deactivated, cross-group, or vanished → single-use.
+					return { status: 'slot_taken' };
+				}
+
+				// TODO(6.1): append audit_log row (action='accept', entity_type='member',
+				// entity_id=selection.memberId) in this same transaction. Never log the token.
+				return { status: 'accepted', groupId: invite.groupId, memberId: claimed[0].id };
+			} catch (e) {
+				// Race backstop: the partial unique index `(group_id, user_id)` rejects a
+				// concurrent link for the same user (e.g. another slot) → already_member.
+				if (isUniqueViolation(e)) {
+					return { status: 'already_member', groupId: invite.groupId };
+				}
+				throw e;
 			}
-
-			// TODO(6.1): append audit_log row (action='accept', entity_type='member',
-			// entity_id=invite.memberId) in this same transaction. Never log the token.
-			return { status: 'accepted', groupId: invite.groupId, memberId: claimed[0].id };
 		}
 
-		// (4) Open invite: create a new member linked to this user, display name
-		// defaulting to the accepting user's name (editable later — PLAN §6.2).
+		// (4) Join as a NEW member: create a member linked to this user, display
+		// name defaulting to the accepting user's name (editable later — PLAN §6.2).
 		try {
 			const [created] = await tx
 				.insert(members)

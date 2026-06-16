@@ -1,12 +1,14 @@
-// Real-DB integration tests — INVITE / ACCEPT (PLAN §6.2).
+// Real-DB integration tests — INVITE / ACCEPT (PLAN §6.2 — member-agnostic links).
 //
 // Exercises the ACTUAL Drizzle queries of the invite service against a LOCAL
 // Postgres, proving the accept-flow guarantees the mocked unit tests couldn't:
-//   - open invite → accept creates a new linked member; B gains access.
+//   - member-agnostic invite → accept(mode 'new') creates a new linked member;
+//     B gains access.
 //   - re-accept by the same user → `already_member` (the one-per-user-per-group
 //     pre-check AND the partial-unique backstop hold — no 500 / no dup row).
-//   - member-targeted invite is SINGLE-USE: the first accept claims the slot
-//     (preserving its display_name); a second accept by another user → `slot_taken`.
+//   - accept(mode 'existing') claims an UNLINKED slot (preserving its
+//     display_name); a second 'existing' claim of the same slot by another user →
+//     `slot_taken` (single-use per slot).
 //   - revoked / expired invites preview `invalid` and accept `invalid`.
 //   - listActiveInvites excludes revoked + expired links.
 
@@ -16,6 +18,7 @@ import { createGroup, userHasGroupAccess } from '$lib/server/groups';
 import { addMember } from '$lib/server/members';
 import {
 	createInvite,
+	getInviteAcceptInfo,
 	getInvitePreview,
 	acceptInvite,
 	revokeInvite,
@@ -47,24 +50,27 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		await cleanupSuiteRows();
 	});
 
-	it('open invite: preview valid → accept(B) links a new member → re-accept = already_member', async () => {
+	it("member-agnostic invite: preview valid → accept(B, 'new') links a new member → re-accept = already_member", async () => {
 		const invite = await createInvite({ userId: userA.id, groupId });
 
 		const preview = await getInvitePreview(invite.token);
 		expect(preview.status).toBe('valid');
 		if (preview.status === 'valid') expect(preview.groupName).toBe('Invites');
 
-		// First accept: a NEW linked member for B, who then has access.
+		// First accept (join as a NEW member): a NEW linked member for B, who then
+		// has access.
 		const first = await acceptInvite({
 			userId: userB.id,
 			userName: userB.name,
-			token: invite.token
+			token: invite.token,
+			selection: { mode: 'new' }
 		});
 		expect(first.status).toBe('accepted');
 		if (first.status === 'accepted') {
 			const [row] = await db.select().from(members).where(eq(members.id, first.memberId));
 			expect(row.userId).toBe(userB.id);
 			expect(row.groupId).toBe(groupId);
+			expect(row.displayName).toBe(userB.name);
 		}
 		expect(await userHasGroupAccess(userB.id, groupId)).toBe(true);
 
@@ -73,7 +79,8 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		const second = await acceptInvite({
 			userId: userB.id,
 			userName: userB.name,
-			token: invite.token
+			token: invite.token,
+			selection: { mode: 'new' }
 		});
 		expect(second.status).toBe('already_member');
 
@@ -81,16 +88,25 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		expect(bMembers).toHaveLength(1);
 	});
 
-	it('member-targeted invite is single-use: claims the slot (name preserved), second accept = slot_taken', async () => {
+	it("accept(mode 'existing') claims an unlinked slot (name preserved); a second 'existing' claim = slot_taken", async () => {
 		const slot = await addMember({ userId: userA.id, groupId, displayName: 'Reserved Name' });
-		const invite = await createInvite({ userId: userA.id, groupId, memberId: slot.id });
 
-		// C claims the targeted slot: accepted, member now linked to C, display_name
-		// PRESERVED (the conditional UPDATE never overwrites it).
+		const invite = await createInvite({ userId: userA.id, groupId });
+
+		// The accept-info view lists the unlinked, active slot as claimable.
+		const info = await getInviteAcceptInfo(invite.token);
+		expect(info.status).toBe('valid');
+		if (info.status === 'valid') {
+			expect(info.claimableMembers.map((m) => m.id)).toContain(slot.id);
+		}
+
+		// C claims the slot: accepted, member now linked to C, display_name PRESERVED
+		// (the conditional UPDATE never overwrites it).
 		const accept = await acceptInvite({
 			userId: userC.id,
 			userName: userC.name,
-			token: invite.token
+			token: invite.token,
+			selection: { mode: 'existing', memberId: slot.id }
 		});
 		expect(accept.status).toBe('accepted');
 		if (accept.status === 'accepted') expect(accept.memberId).toBe(slot.id);
@@ -99,17 +115,70 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		expect(claimed.userId).toBe(userC.id);
 		expect(claimed.displayName).toBe('Reserved Name');
 
-		// A SECOND accept by another user finds the slot filled → slot_taken (single-use).
+		// A SECOND 'existing' claim of the SAME slot by another user → slot_taken.
 		const second = await acceptInvite({
 			userId: userB.id,
 			userName: userB.name,
-			token: invite.token
+			token: invite.token,
+			selection: { mode: 'existing', memberId: slot.id }
 		});
 		expect(second.status).toBe('slot_taken');
 
 		// B did not get a member in this group.
 		const bMembers = await db.select().from(members).where(eq(members.userId, userB.id));
 		expect(bMembers.filter((m) => m.groupId === groupId)).toHaveLength(0);
+
+		// The now-linked slot no longer appears as claimable.
+		const after = await getInviteAcceptInfo(invite.token);
+		if (after.status === 'valid') {
+			expect(after.claimableMembers.map((m) => m.id)).not.toContain(slot.id);
+		}
+	});
+
+	it("cross-group guard: accept(mode 'existing') with a foreign group's member id → slot_taken (member NOT hijacked, no membership leaked)", async () => {
+		// G1: the group whose OPEN invite token U holds.
+		const invite = await createInvite({ userId: userA.id, groupId });
+
+		// G2: a SEPARATE group (created by B) containing an UNLINKED, ACTIVE member
+		// `mForeign`. U is NOT a member of G2 and was never told its member ids.
+		const g2 = await createGroup({
+			userId: userB.id,
+			userName: userB.name,
+			name: 'Foreign Group',
+			settlementCurrency: 'USD'
+		});
+		const mForeign = await addMember({
+			userId: userB.id,
+			groupId: g2.id,
+			displayName: 'Foreign Slot'
+		});
+		expect(mForeign.groupId).toBe(g2.id);
+		expect(mForeign.userId).toBeNull();
+
+		// A FRESH user U (not in G1 or G2) accepts G1's invite but passes the FOREIGN
+		// member id from G2. The conditional UPDATE's `group_id = invite.groupId`
+		// clause matches 0 rows, so this is rejected — U cannot claim a slot in
+		// another group via a G1 token.
+		const userU = await createTestUser('u');
+		const result = await acceptInvite({
+			userId: userU.id,
+			userName: userU.name,
+			token: invite.token,
+			selection: { mode: 'existing', memberId: mForeign.id }
+		});
+		expect(result.status).toBe('slot_taken');
+
+		// `mForeign` is UNTOUCHED — still unlinked (not hijacked into U's account).
+		const [foreignAfter] = await db.select().from(members).where(eq(members.id, mForeign.id));
+		expect(foreignAfter.userId).toBeNull();
+		expect(foreignAfter.groupId).toBe(g2.id);
+
+		// U gained NO member row anywhere — not in G1 (the rejected accept created
+		// nothing) and not in G2 (never had access).
+		const uMembers = await db.select().from(members).where(eq(members.userId, userU.id));
+		expect(uMembers).toHaveLength(0);
+		expect(await userHasGroupAccess(userU.id, groupId)).toBe(false);
+		expect(await userHasGroupAccess(userU.id, g2.id)).toBe(false);
 	});
 
 	it('revoked invite: preview invalid, accept invalid', async () => {
@@ -120,7 +189,8 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		const accept = await acceptInvite({
 			userId: userB.id,
 			userName: userB.name,
-			token: invite.token
+			token: invite.token,
+			selection: { mode: 'new' }
 		});
 		expect(accept.status).toBe('invalid');
 	});
@@ -134,7 +204,6 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 			.values({
 				groupId,
 				token,
-				memberId: null,
 				expiresAt: new Date(Date.now() - 60_000), // 1 minute in the past
 				createdBy: userA.id
 			})
@@ -142,7 +211,12 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		expect(row.token).toBe(token);
 
 		expect((await getInvitePreview(token)).status).toBe('invalid');
-		const accept = await acceptInvite({ userId: userB.id, userName: userB.name, token });
+		const accept = await acceptInvite({
+			userId: userB.id,
+			userName: userB.name,
+			token,
+			selection: { mode: 'new' }
+		});
 		expect(accept.status).toBe('invalid');
 	});
 
@@ -156,7 +230,6 @@ describeIntegration('integration: invite / accept (PLAN §6.2)', () => {
 		await db.insert(invites).values({
 			groupId,
 			token: expiredToken,
-			memberId: null,
 			expiresAt: new Date(Date.now() - 60_000),
 			createdBy: userA.id
 		});
