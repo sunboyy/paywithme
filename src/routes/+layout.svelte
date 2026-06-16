@@ -35,12 +35,13 @@
 				<!-- Auth-aware header actions. -->
 				<div class="flex min-w-0 items-center gap-2">
 					{#if data.user}
-						<span
-							class="text-muted-foreground max-w-[40vw] truncate text-sm"
-							title={data.user.email}
+						<a
+							href={resolve('/settings')}
+							class="text-muted-foreground max-w-[40vw] truncate text-sm hover:underline"
+							title="Account settings"
 						>
 							{data.user.name || data.user.email}
-						</span>
+						</a>
 						<form method="POST" action="/logout" use:enhance>
 							<Button type="submit" variant="ghost" size="sm">Log out</Button>
 						</form>
