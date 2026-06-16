@@ -51,13 +51,15 @@ local (add one with `git remote add origin <url>` to back up).
    **done-with-blocks** (some `blocked`), listing every `blocked` task with its
    reason (`NEEDS-INPUT:` or reviewer notes). A `blocked` task is reported, not
    waited on — it does not prevent the boundary stop.
-4. **Implement.** Spawn the **`implementer`** (Opus) with the task spec and
-   relevant `PLAN.md` sections. It writes code **and** tests.
+4. **Implement.** Spawn the **`implementer`** (Opus) with the task spec and the
+   **text of the `PLAN.md` sections the task cites** — not the whole file (see
+   _Context scoping_). It writes code **and** tests.
 5. **Fast gate.** Run `scripts/gate.sh` (lint + prettier + typecheck + unit). If
    red, hand failures back to the implementer (draws from the shared 3-round
    budget, step 7); do not review until green.
 6. **Review.** Mark the task `in-review`. Spawn the **`reviewer`** (Sonnet) with
-   the task spec and the full diff **including new files** — use
+   the task spec, the **same cited `PLAN.md` sections** passed in step 4 (see
+   _Context scoping_), and the full diff **including new files** — use
    `git add -A && git diff --staged` (a bare `git diff` omits the untracked files
    that scaffolding tasks create). It returns **APPROVE** or findings.
 7. **Iterate.** On findings or a red gate, send them back to the implementer
@@ -71,6 +73,20 @@ local (add one with `git remote add origin <url>` to back up).
 
 The orchestrator never writes feature code — it only edits `TASKS.md`, runs the
 gate/git, and delegates to the two subagents.
+
+## Context scoping (token discipline)
+
+`PLAN.md` is the canonical spec but large; loading all of it into every subagent
+each task is the build's biggest avoidable token cost. So the orchestrator passes
+a subagent **only the `PLAN.md` sections the task cites** (by `§` number), as
+text — slice them straight from `PLAN.md` at their `##`/`###` headers. Pass the
+**same** slice to the implementer (step 4) and reviewer (step 6) so both judge
+against identical spec text.
+
+The on-disk spec stays authoritative: if a provided section points elsewhere
+(`see §X`), the subagent opens `PLAN.md` and reads **just that section** — never
+the whole file. `CLAUDE.md` conventions are always in context, so they're never
+re-pasted.
 
 ## Task lifecycle
 
