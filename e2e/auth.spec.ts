@@ -92,9 +92,10 @@ test.describe('auth e2e — magic link + passkey + recovery', () => {
 		// id to assert a credential actually got created.
 		const authenticatorId = await addVirtualAuthenticator(page);
 
-		// Enrol from the onboarding nudge. On success it routes to `/`.
+		// Enrol from the onboarding nudge. On success it routes to `/`, which (task
+		// 3.4, PLAN §10) redirects a logged-in user to `/groups` (the dashboard).
 		await page.getByRole('button', { name: 'Add a passkey' }).click();
-		await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(appBaseURL)}/?$`));
+		await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(appBaseURL)}/groups/?$`));
 
 		// The virtual authenticator now holds exactly one discoverable credential.
 		const credsAfterEnrol = await getCredentials(page, authenticatorId);
@@ -118,11 +119,13 @@ test.describe('auth e2e — magic link + passkey + recovery', () => {
 		await page.goto('/login');
 		await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
 
-		// The client lands on `/` after a successful assertion. No reload: the login
-		// handler's `goto(..., { invalidateAll: true })` re-runs the root layout load
-		// so the auth-aware chrome reflects the server-resolved session from the SPA
-		// navigation alone. This asserts the regression fix holds without a refresh.
-		await page.waitForURL(new RegExp(`^${escapeRegExp(appBaseURL)}/?$`));
+		// The client navigates to `/` after a successful assertion, which (task 3.4,
+		// PLAN §10) redirects a logged-in user to `/groups` (the dashboard). No reload:
+		// the login handler's `goto(..., { invalidateAll: true })` re-runs the root
+		// layout load so the auth-aware chrome reflects the server-resolved session
+		// from the SPA navigation alone. This asserts the regression fix holds without
+		// a refresh.
+		await page.waitForURL(new RegExp(`^${escapeRegExp(appBaseURL)}/groups/?$`));
 
 		// Back in the app and authenticated via the passkey: the logout control
 		// returns and the header shows the signed-in user.
