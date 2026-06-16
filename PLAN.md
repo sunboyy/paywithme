@@ -969,7 +969,26 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 
 UI building blocks (shadcn-svelte): Button, Card, Dialog, Drawer/Sheet (mobile
 add-transaction), Form + Input + Select, Tabs (spending/transfer), Avatar,
-Badge, Table/list, Toast, Separator. Mobile-first layout.
+Badge, Table/list, Toast, Separator, Alert Dialog (destructive confirmations).
+Mobile-first layout.
+
+**Destructive actions require explicit confirmation.** Any action that destroys,
+hides, or revokes (remove/deactivate a member, soft-delete a group, revoke an
+invite link, delete/restore a transaction) must be guarded by a confirmation
+step — a shadcn **Alert Dialog** naming the specific target ("Remove _Alex_?")
+with a clearly-labelled, visually-distinct (destructive-variant) confirm button
+and a Cancel — so a single mis-tap can't trigger it. Confirmation is a
+JS-progressive-enhancement layer: with JS the dialog gates the submit; **without
+JS the underlying real form action still works** (the server is the source of
+truth and re-validates). The confirmation is a UX guard, not an authz control —
+authorization is still the §12 membership check, and the change is still recorded
+in the audit log (§12.1).
+
+**Self-affecting actions must not strand the user.** When an action removes the
+acting user's OWN access to the area they're on — most notably **removing the
+member linked to yourself** (which revokes your group access per §6.3) — the
+server redirects them somewhere they still belong (e.g. `/groups`) instead of
+re-rendering a now-inaccessible page as a confusing "not found".
 
 **Currency & FX (all transaction types):** a currency picker defaulting to the
 group's settlement currency. When a **different** currency is chosen, an FX field

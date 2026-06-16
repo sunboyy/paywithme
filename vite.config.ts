@@ -51,6 +51,10 @@ export default defineConfig({
 			},
 			{
 				extends: './vite.config.ts',
+				// Resolve Svelte to its CLIENT build so component tests can `mount()`
+				// in jsdom — without the `browser` condition Vitest picks the SSR
+				// build and `mount`/lifecycle fns are unavailable.
+				resolve: { conditions: ['browser'] },
 				test: {
 					name: 'client',
 					environment: 'jsdom',

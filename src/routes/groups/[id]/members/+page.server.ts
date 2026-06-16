@@ -16,12 +16,12 @@
 // and `InviteNotFoundError` (invite not in group) all map to `error(404)`; any
 // other failure is a generic message (never leaking the raw cause — §12).
 
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, redirect } from '@sveltejs/kit';
 import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { addMemberSchema, memberIdSchema, renameMemberSchema } from '$lib/schemas/member';
 import { createInviteSchema, revokeInviteSchema } from '$lib/schemas/invite';
-import { GroupAccessError } from '$lib/server/groups';
+import { GroupAccessError, userHasGroupAccess } from '$lib/server/groups';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import {
 	addMember,
@@ -190,6 +190,16 @@ export const actions: Actions = {
 				{ type: 'error', text: 'Could not remove that member. Please try again.' },
 				{ status: 500 }
 			);
+		}
+
+		// Self-affecting action (PLAN §10): removing the member linked to YOURSELF
+		// revokes your own group access (§6.3). If `load` re-ran it would now 404
+		// ("Group not found") — a confusing dead end — so redirect the user back to
+		// somewhere they still belong. This MUST live OUTSIDE the try/catch above:
+		// `redirect()` works by THROWING, and the surrounding catch would swallow it
+		// (mistaking the navigation for a service failure).
+		if (!(await userHasGroupAccess(user.id, params.id))) {
+			redirect(303, '/groups');
 		}
 
 		return message(form, { type: 'success', text: 'Member removed' });

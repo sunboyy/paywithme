@@ -15,6 +15,7 @@ import { isRedirect, isHttpError } from '@sveltejs/kit';
 // exactly what the mocked services throw.
 const {
 	getGroupForUser,
+	userHasGroupAccess,
 	listMembers,
 	addMember,
 	renameMember,
@@ -38,6 +39,7 @@ const {
 	}
 	return {
 		getGroupForUser: vi.fn(),
+		userHasGroupAccess: vi.fn(),
 		listMembers: vi.fn(),
 		addMember: vi.fn(),
 		renameMember: vi.fn(),
@@ -52,7 +54,7 @@ const {
 	};
 });
 
-vi.mock('$lib/server/groups', () => ({ getGroupForUser, GroupAccessError }));
+vi.mock('$lib/server/groups', () => ({ getGroupForUser, userHasGroupAccess, GroupAccessError }));
 vi.mock('$lib/server/members', () => ({
 	listMembers,
 	addMember,
@@ -100,6 +102,7 @@ const AUTH_USER: User = { id: 'u1', name: 'Alice' };
 
 beforeEach(() => {
 	getGroupForUser.mockReset();
+	userHasGroupAccess.mockReset();
 	listMembers.mockReset();
 	addMember.mockReset();
 	renameMember.mockReset();
@@ -110,6 +113,10 @@ beforeEach(() => {
 	revokeInvite.mockReset();
 	// Default the invite list to empty so member-focused load tests don't 500.
 	listActiveInvites.mockResolvedValue([]);
+	// Default: the acting user STILL has access after a removal (the common,
+	// non-self case), so `removeMember` returns its success message. Self-removal
+	// tests override this to `false` to exercise the §10 redirect.
+	userHasGroupAccess.mockResolvedValue(true);
 });
 
 describe('/groups/[id]/members load', () => {
@@ -331,6 +338,33 @@ describe('/groups/[id]/members ?/removeMember action', () => {
 		removeMember.mockResolvedValueOnce({ action: 'hard_delete' });
 		await actions.removeMember(makeActionEvent({ memberId: 'm1' }, AUTH_USER));
 		expect(removeMember).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
+	});
+
+	it('returns the success message when the acting user STILL has access (non-self removal)', async () => {
+		removeMember.mockResolvedValueOnce({ action: 'hard_delete' });
+		userHasGroupAccess.mockResolvedValueOnce(true);
+		const result = await actions.removeMember(makeActionEvent({ memberId: 'm1' }, AUTH_USER));
+		expect(userHasGroupAccess).toHaveBeenCalledWith('u1', 'g1');
+		const msg = (result as { form: { message?: { type: string } } }).form.message;
+		expect(msg?.type).toBe('success');
+	});
+
+	it('redirects to /groups when the acting user removed their OWN linked member (§10)', async () => {
+		removeMember.mockResolvedValueOnce({ action: 'hard_delete' });
+		// They just revoked their own access (§6.3) — `userHasGroupAccess` now false.
+		userHasGroupAccess.mockResolvedValueOnce(false);
+		try {
+			await actions.removeMember(makeActionEvent({ memberId: 'm-self' }, AUTH_USER));
+			expect.unreachable('expected a redirect to /groups');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.status).toBe(303);
+				expect(e.location).toBe('/groups');
+			}
+		}
+		// The success message is NOT returned (the redirect throws instead).
+		expect(removeMember).toHaveBeenCalledTimes(1);
 	});
 
 	it('maps a MemberNotFoundError to error(404)', async () => {

@@ -22,6 +22,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Separator } from '$lib/components/ui/separator';
+	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -206,19 +207,21 @@
 										</Button>
 									</form>
 								{:else}
-									<!-- Remove: soft-deactivate if they have activity, else hard-delete (§6.3). -->
-									<form method="POST" action="?/removeMember" use:removeEnhance>
-										<input type="hidden" name="memberId" value={member.id} />
-										<Button
-											type="submit"
-											variant="outline"
-											size="sm"
-											disabled={$removing}
-											aria-label="Remove {member.displayName}"
-										>
-											Remove
-										</Button>
-									</form>
+									<!-- Remove: soft-deactivate if they have activity, else hard-delete
+									     (§6.3). Destructive → confirmation gate (PLAN §10). -->
+									<ConfirmSubmit
+										action="?/removeMember"
+										enhance={removeEnhance}
+										hiddenName="memberId"
+										hiddenValue={member.id}
+										triggerLabel="Remove {member.displayName}"
+										title="Remove {member.displayName}?"
+										description={isYou
+											? `${member.displayName} (you) will be removed from this group and you'll lose access — you'll be sent back to your groups.`
+											: `${member.displayName} will be removed. If they have past activity they're deactivated and kept in history; otherwise they're deleted.`}
+										confirmLabel="Remove"
+										disabled={$removing}
+									/>
 								{/if}
 							</div>
 						</li>
@@ -298,13 +301,19 @@
 									Copy link
 								</Button>
 
-								<!-- Revoke: a REAL form action (works without JS). -->
-								<form method="POST" action="?/revokeInvite" use:revokeInviteEnhance>
-									<input type="hidden" name="inviteId" value={invite.id} />
-									<Button type="submit" variant="outline" size="sm" disabled={$revoking}>
-										Revoke
-									</Button>
-								</form>
+								<!-- Revoke: a REAL form action (works without JS). Destructive →
+								     confirmation gate (PLAN §10). -->
+								<ConfirmSubmit
+									action="?/revokeInvite"
+									enhance={revokeInviteEnhance}
+									hiddenName="inviteId"
+									hiddenValue={invite.id}
+									triggerLabel="Revoke"
+									title="Revoke this invite link?"
+									description="The link will stop working immediately — anyone who hasn't joined yet won't be able to use it."
+									confirmLabel="Revoke"
+									disabled={$revoking}
+								/>
 							</div>
 						</li>
 					{/each}
