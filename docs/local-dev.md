@@ -1,9 +1,9 @@
 # Local development
 
-How to get a local Postgres running and prove the migration pipeline works.
+How to run a local Postgres and prove the migration pipeline works.
 
 The app talks to Postgres in every environment. Locally we run a containerized
-Postgres that matches the connection URL already baked into `.env.example`:
+Postgres matching the connection URL baked into `.env.example`:
 
 ```
 postgresql://postgres:postgres@localhost:5432/paywithme
@@ -24,7 +24,7 @@ docker compose up -d          # start in the background
 docker compose ps             # wait until STATUS shows "healthy"
 ```
 
-Stop it when you're done:
+Stop it when done:
 
 ```sh
 docker compose down           # stop; data persists in the named volume
@@ -40,13 +40,13 @@ cp .env.example .env
 ```
 
 The default `DATABASE_URL` / `DATABASE_URL_UNPOOLED` already point at the local
-Postgres above, so for the database you don't need to change anything. (Auth and
-email vars are filled in by later phases.)
+Postgres above, so you need change nothing for the database. (Auth and email vars
+are filled in by later phases.)
 
 - `DATABASE_URL` — pooled URL the app uses at runtime (`src/lib/server/db`).
 - `DATABASE_URL_UNPOOLED` — direct URL drizzle-kit uses for migrations
-  (`drizzle.config.ts`). On a single local Postgres there is no pooler, so both
-  URLs are identical.
+  (`drizzle.config.ts`). A single local Postgres has no pooler, so both URLs are
+  identical.
 
 ## 3. Run the first migration
 
@@ -54,20 +54,19 @@ email vars are filled in by later phases.)
 pnpm db:migrate
 ```
 
-`db:migrate` (drizzle-kit migrate) connects using `DATABASE_URL_UNPOOLED`,
-creates drizzle's `__drizzle_migrations` bookkeeping table on first run, and
-applies any pending migration files in `drizzle/`. With the current empty schema
-there are zero migrations to apply — a successful run proves the dev DB and the
-migration path work end to end.
+`db:migrate` (drizzle-kit migrate) connects via `DATABASE_URL_UNPOOLED`, creates
+drizzle's `__drizzle_migrations` bookkeeping table on first run, and applies any
+pending files in `drizzle/`. The current empty schema has zero migrations to
+apply — a successful run proves the dev DB and migration path work end to end.
 
 Related scripts:
 
 - `pnpm db:generate` — generate a new SQL migration from changes to
   `src/lib/server/db/schema.ts` (writes into `drizzle/`). Schema tables arrive in
-  later tasks, so today this produces nothing.
-- `pnpm db:push` — sync the schema directly to the DB without a migration file.
-  Handy for quick local iteration; against the empty schema it's a no-op that
-  also confirms connectivity.
+  later tasks, so this currently produces nothing.
+- `pnpm db:push` — sync the schema straight to the DB without a migration file.
+  Handy for quick local iteration; against the empty schema it's a no-op that also
+  confirms connectivity.
 - `pnpm db:studio` — open Drizzle Studio to browse the local DB.
 
 ## Alternative: Homebrew Postgres (no Docker)

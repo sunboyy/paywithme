@@ -58,109 +58,95 @@
 
 ### Resolved
 
-1. **Money.** Stored as **integer minor units** to avoid float errors;
-   precision is **per-currency** (see #13), formatted at that currency's decimal
-   places in the UI. (See §7.5.)
-2. **Split model.** Support four modes: **Equal**, **Split by amount** (exact),
-   **Split by share** (weights), and **Itemized** (line items, each with its own
-   amount + beneficiaries + per-item split). Schema stores a resolved per-member
-   amount plus the chosen split mode + inputs. (See §7.2.)
+1. **Money.** **Integer minor units** (no floats); precision **per-currency**
+   (see #13), formatted at that currency's decimal places. (See §7.5.)
+2. **Split model.** Four modes: **Equal**, **by amount** (exact), **by share**
+   (weights), **Itemized** (line items, each with own amount + beneficiaries +
+   per-item split). Schema stores resolved per-member amount + the mode + inputs.
+   (See §7.2.)
 3. **Multiple payers.** Store an explicit `amount_paid` per payer.
-4. **Member ↔ user linking.** **Invite link** only. A member is assigned to the
-   user **upon accepting the invite**. (See §6.2.)
+4. **Member ↔ user linking.** **Invite link** only; a member is assigned to the
+   user **on accepting the invite**. (See §6.2.)
 5. **Permissions.** **No restrictions** in v1 — any group member can
    create/edit/delete any transaction and manage members.
-6. **Account recovery.** **Via email magic link.** Losing all passkeys is not
-   fatal — log in by magic link and re-enrol a passkey. Email access is the root
-   of account access; no recovery codes. Multiple passkeys per account allowed.
-   (See §5.6.)
-7. **Offline.** **No offline creation.** PWA is installable + offline shell only;
-   writes require connectivity.
-8. **Auth library.** Use **better-auth** with its **magic-link plugin** (email,
-   for registration / login / recovery) **+ passkey plugin** in its standard
-   session-required mode (passkey enrolled after first login). No email/password,
-   no social. The passkey-first / `resolveUser` mechanism is **no longer needed**.
-   Email is sent via the **Mailgun HTTP API**. (See §3, §5.)
-9. **Categories.** **Fixed system list** (seeded, not user-editable in v1).
-   Separate sets for Spending vs Transfer, each with a **lucide** icon. The set
-   is **general-purpose** (serves both travel and non-travel groups). (See §7.3.)
-10. **Currency / FX.** Each group has one **settlement currency** (the base for
-    all debt math). A transaction may be recorded in a **different currency** with
-    a **manual exchange rate** entered on that transaction (no FX API). Amounts
-    are converted to the settlement currency for balances/settlement. (See §6.1,
-    §7.5, §7.6.)
-11. **Settlement display.** Show **simplified suggestions** only (minimized
-    transfers), not raw pairwise debts. (See §8.)
-12. **Invite links.** **Reusable** links, **7-day expiry**, **multiple active
-    links per group allowed**, with a **revocation UI**. (See §6.2.)
-13. **Currency precision.** **Per-currency**, not a fixed 2dp. Each currency
-    carries its minor-unit exponent (e.g. JPY/KRW/VND = 0, THB/USD = 2,
-    KWD/BHD = 3); money math and rounding are currency-aware. (See §7.5.)
+6. **Account recovery.** **Via email magic link** — losing all passkeys isn't
+   fatal (log in by link, re-enrol). Email is the root of access; no recovery
+   codes. Multiple passkeys per account. (See §5.6.)
+7. **Offline.** **No offline creation.** Installable + offline shell only; writes
+   require connectivity.
+8. **Auth library.** **better-auth** with **magic-link plugin** (register / login
+   / recovery) **+ passkey plugin** in standard session-required mode (enrolled
+   after first login). No password, no social; no passkey-first / `resolveUser`.
+   Email via the **Mailgun HTTP API**. (See §3, §5.)
+9. **Categories.** **Fixed seeded list** (not user-editable in v1); separate
+   Spending/Transfer sets, each a **lucide** icon; **general-purpose**. (See §7.3.)
+10. **Currency / FX.** One **settlement currency** per group (base for all debt
+    math); a transaction may use a **different currency** with a **manual rate**
+    (no FX API), converted to settlement. (See §6.1, §7.5, §7.6.)
+11. **Settlement display.** **Simplified suggestions** only (minimized transfers),
+    not raw pairwise debts. (See §8.)
+12. **Invite links.** **Reusable**, **7-day expiry**, **multiple active per
+    group**, with a **revocation UI**. (See §6.2.)
+13. **Currency precision.** **Per-currency** exponent, not fixed 2dp (e.g.
+    JPY/KRW/VND = 0, THB/USD = 2, KWD/BHD = 3); math/rounding currency-aware.
+    (See §7.5.)
 14. **Member removal.** **Soft-deactivate**, never hard-delete a member with
-    activity. An inactive member stays in past transactions and balances but is
-    hidden from new-transaction pickers. (See §6.3.)
-15. **Group lifecycle.** A group's **settlement currency is editable only until
-    its first transaction**, then **locked**. Groups are **soft-deleted** (hidden/
-    recoverable), not hard-deleted. (See §6.4.)
-16. **DB driver / runtime.** Vercel **Node** runtime with the **`pg`** driver
-    over Neon's pooled URL; migrations use the non-pooled/direct URL. (See §3.)
-17. **Manual FX.** Rate is **per transaction**, manual only, stored as
-    settlement-currency units per 1 unit of the transaction currency. The
-    settlement-converted total is computed once and stored canonically; balances
-    never re-derive a rate. (See §7.6.)
-18. **Audit log.** No per-action permissions, so an **append-only** audit log
-    records actor + action + entity + server timestamp for every mutation (priority:
-    transactions). Immutable; shown per group, newest first. (See §12.1.)
-
-19. **Supported currencies.** Fixed seeded list of **29 fiat currencies** (top 30
-    by market cap from fiatmarketcap.net, **minus BTC** — non-fiat, non-ISO
-    minor units). Both settlement and entry currency must be from this list. (See
-    §7.5.1.)
-20. **Auth method (revised).** **Email magic link** is the baseline credential:
-    registration collects **display name + email** and logs in via an emailed
-    single-use link; the magic-link click **verifies the email**. A **passkey** is
-    enrolled after first login and is the primary fast login thereafter. Email is
-    required + unique. (Supersedes the earlier passkey-first draft.) (See §5.)
+    activity; inactive members stay in past transactions/balances but drop from
+    new-transaction pickers. (See §6.3.)
+15. **Group lifecycle.** Settlement currency **editable only until the first
+    transaction**, then **locked**; groups **soft-deleted**, not hard-deleted.
+    (See §6.4.)
+16. **DB driver / runtime.** Vercel **Node** runtime, **`pg`** driver over Neon's
+    pooled URL; migrations use the non-pooled/direct URL. (See §3.)
+17. **Manual FX.** Rate **per transaction**, manual, in settlement units per 1
+    transaction unit; the settlement total is computed once and stored
+    canonically (balances never re-derive a rate). (See §7.6.)
+18. **Audit log.** No per-action permissions, so an **append-only**, immutable log
+    records actor + action + entity + server timestamp per mutation (priority:
+    transactions); shown per group, newest first. (See §12.1.)
+19. **Supported currencies.** Fixed seeded **29 fiat currencies** (top 30 by
+    market cap from fiatmarketcap.net, **minus BTC** — non-fiat, non-ISO minor
+    units); both settlement and entry currency must be from this list. (See §7.5.1.)
+20. **Auth method (revised).** **Email magic link** is the baseline: registration
+    collects **display name + email**, logs in via an emailed single-use link that
+    **verifies the email**; a **passkey** enrolled after first login is the primary
+    fast login. Email required + unique. (Supersedes the passkey-first draft.)
+    (See §5.)
 21. **Rounding tie-break.** Largest-remainder ties go to the **lower `member_id`**
-    (ascending), so all split/charge/FX distribution is reproducible. (See §7.2.)
-22. **Open invite accept.** Accepting any invite **requires a logged-in user**
-    (no guest accept); an open link creates a new member named after the
-    accepting user's display name. (See §6.2.)
+    (ascending), so split/charge/FX distribution is reproducible. (See §7.2.)
+22. **Open invite accept.** Accepting **requires a logged-in user** (no guest
+    accept); an open link creates a new member named after the accepting user.
+    (See §6.2.)
 23. **Transaction timestamps.** `created_at` = real-world date, **user-editable /
     backdatable** (sort + display key); `occurred_at` = immutable server insert
     time. (See §7.1.)
 24. **Secrets / local dev.** A committed **`.env.example`** documents every env var
     (Neon pooled + direct URLs; `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`,
-    `MAILGUN_BASE_URL`, `EMAIL_FROM`; `rpID` / `origin` / `trustedOrigins`). For
-    **local dev**, use a **local Postgres** and **log the magic-link URL to the
-    console** instead of sending email. The user supplies **real Neon + Mailgun
-    credentials** at the point they're needed (email testing / deploy). (See §3, §5.)
+    `MAILGUN_BASE_URL`, `EMAIL_FROM`; `rpID` / `origin` / `trustedOrigins`). Local
+    dev uses a **local Postgres** and **logs the magic-link URL to the console**
+    instead of emailing. The user supplies **real Neon + Mailgun credentials** when
+    needed (email testing / deploy). (See §3, §5.)
 25. **Branding / PWA assets.** The **user provides** the real PWA icons (192/512 +
-    maskable) and theme/background colors. The manifest's icon/theme fields are
-    filled last; everything else in §11 is built ahead of them. (See §11.)
-26. **Display-name capture.** better-auth's magic-link plugin does not natively
-    persist a name on signup, so the display name is collected on **`/register`**
-    and written to **`user.name` immediately after the first magic-link
-    verification** (onboarding step). (See §5.3.)
-27. **FX integer math.** §7.6's conversion is implemented as a **single
-    scaled-integer, round-half-up** expression (rate stored as 6-dp micro-units;
-    `amount_settlement_minor = round_half_up(amount_txn_minor × rate_micros ×
-10^exp_settlement / (10^exp_txn × 10^6))`) — no intermediate float. (See §7.6.)
-28. **Responsive, mobile-first UI.** The app is **primarily used on phones**, so
-    every screen is **mobile-first and fully responsive**: built at a small-screen
-    width first, then progressively enhanced for tablet/desktop (fluid layouts,
-    Tailwind breakpoints, touch-friendly hit targets, bottom-reachable primary
-    actions). All forms (transaction entry, itemized + charges, FX) and lists must
-    remain usable one-handed on a phone; no layout requires a desktop viewport.
-    (See §10.)
+    maskable) and theme/background colors; the manifest's icon/theme fields are
+    filled last, everything else in §11 built ahead. (See §11.)
+26. **Display-name capture.** The magic-link plugin doesn't persist a name on
+    signup, so it's collected on **`/register`** and written to **`user.name`
+    right after the first magic-link verification** (onboarding). (See §5.3.)
+27. **FX integer math.** Conversion is a **single scaled-integer, round-half-up**
+    expression (rate as 6-dp micro-units), with no intermediate float — see the
+    formula in §7.6.
+28. **Responsive, mobile-first UI.** **Primarily used on phones**, so every screen
+    is **mobile-first and fully responsive**: small-screen first, enhanced for
+    tablet/desktop (fluid layouts, Tailwind breakpoints, touch targets,
+    bottom-reachable actions). All forms and lists stay usable one-handed; no
+    layout requires a desktop viewport. (See §10.)
 
 ### Still to decide
 
 - Nothing blocking — all major v1 decisions are resolved. Remaining items are
-  fine-tuning during build (exact copy, final category names if you want tweaks,
-  icon swaps, per-currency display symbol polish), plus the deferred user-supplied
-  inputs noted in #24–#25 (real credentials and brand assets), provided when
-  reached.
+  build-time fine-tuning (exact copy, final category names, icon swaps,
+  per-currency symbol polish), plus the deferred user-supplied inputs in #24–#25
+  (real credentials and brand assets), provided when reached.
 
 ---
 
@@ -186,48 +172,26 @@
 | Testing             | Vitest (unit), Playwright (e2e incl. virtual authenticator)                         |
 | Lint/format         | ESLint + Prettier                                                                   |
 
-> **Why these:** SvelteKit gives SSR + PWA + API routes in one app. Drizzle is
-> type-safe and migration-friendly. **better-auth** handles magic-link email auth
+> **Why these:** SvelteKit gives SSR + PWA + API routes in one app; Drizzle is
+> type-safe and migration-friendly; shadcn-svelte matches the styling requirement.
+> **better-auth** handles passwordless auth (magic link for signup/recovery,
+> passkey for fast login — multiple per account) with a SvelteKit handler + Svelte
+> client.
 >
-> - passkeys + sessions (incl. adding multiple passkeys per account) and ships a
->   SvelteKit handler and Svelte client; we run it passwordless (magic link for
->   signup/recovery, passkey for fast login). shadcn-svelte matches your styling
->   requirement.
+> **Note on better-auth:** it owns its auth tables via the Drizzle adapter
+> (`user`, `session`, `account`, `verification`, `passkey`) — `verification` backs
+> the magic-link tokens; our domain tables (groups, members, transactions)
+> reference `user.id`. The passkey plugin runs in **standard session-required
+> mode** (a logged-in user adds a passkey), so no `resolveUser` / passkey-first
+> wiring is needed. Magic-link delivery uses a `sendMagicLink` callback backed by
+> the **Mailgun HTTP API**. (See §5.)
 >
-> **Note on better-auth:** it owns its own auth tables via the Drizzle adapter
-> (`user`, `session`, `account`, `verification`, `passkey`) — the `verification`
-> table backs the magic-link tokens. Our domain tables (groups, members,
-> transactions) reference better-auth's `user.id`. The passkey plugin runs in its
-> **standard session-required mode** (a logged-in user adds a passkey), so no
-> `resolveUser` / passkey-first wiring is needed. Magic-link delivery needs a
-> `sendMagicLink` callback backed by the **Mailgun HTTP API** (API key + domain).
-> (See §5.)
-
-> **Tooling & setup notes:**
->
-> - **Package manager: pnpm** for all installs/scripts (`pnpm install`,
->   `pnpm dev`, `pnpm dlx ...`).
-> - **shadcn-svelte via its CLI.** Initialize with the shadcn-svelte command
->   (`pnpm dlx shadcn-svelte@latest init`) and add each component the same way
->   (`pnpm dlx shadcn-svelte@latest add button card dialog ...`). Do **not**
->   hand-author component files — pull them through the CLI.
-> - **`@lucide/svelte` is typically installed during shadcn-svelte init**, so it
->   may not need a separate install. Verify it's present after init; only add it
->   explicitly if missing.
-> - **Hosting: Vercel** → use `@sveltejs/adapter-vercel`. Vercel is serverless,
->   so the DB is **Neon** (serverless Postgres) reached over the network. Use
->   Neon's pooled connection string for serverless functions; use the
->   non-pooled/direct connection for drizzle-kit migrations. Local dev can run a
->   local Postgres (or a Neon dev branch). Set the Neon `DATABASE_URL`, auth
->   `rpID`/`origin`/`trustedOrigins`, and the Mailgun settings
->   (`MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, `MAILGUN_BASE_URL` for US vs EU region)
->   - a verified `from` address (`EMAIL_FROM`) as env vars in Vercel.
-> - **Runtime & driver (decided):** Vercel **Node** runtime (`adapter-vercel`
->   default), using the **`pg`** (node-postgres) driver with the standard Drizzle
->   `pg` adapter over Neon's **pooled** URL. drizzle-kit migrations use the
->   **non-pooled/direct** URL. (Node runtime keeps better-auth + WebAuthn and a
->   conventional Postgres driver simple; `@neondatabase/serverless` would only be
->   needed for the edge runtime, which we're not using in v1.)
+> **Runtime & driver (decided):** Vercel **Node** runtime (`adapter-vercel`
+> default) with the **`pg`** (node-postgres) driver over Neon's **pooled** URL;
+> drizzle-kit migrations use the **non-pooled/direct** URL. (Node keeps better-auth,
+> WebAuthn, and a conventional Postgres driver simple; `@neondatabase/serverless`
+> is only needed for the unused edge runtime.) Tooling conventions (pnpm,
+> shadcn-svelte CLI) live in `CLAUDE.md`; env vars in decision #24 / `.env.example`.
 
 ---
 
@@ -263,22 +227,22 @@ Principles:
 
 - Auth is handled by **better-auth** with two **passwordless** methods:
   - **Email magic link** (better-auth **magic-link plugin**) — the **baseline
-    credential**, used for **registration**, as an always-available login method,
-    and as the **account-recovery** path.
+    credential** for **registration**, as an always-available login, and as the
+    **account-recovery** path.
   - **Passkey** (WebAuthn / FIDO2, better-auth **passkey plugin**) — enrolled
     **after the first login** as the fast, primary day-to-day login on a device.
-- **No email/password** module and **no social login**. The email address is
-  **verified implicitly** by clicking the magic link.
-- because the passkey is added by an already-authenticated user, the passkey
-  plugin runs in its **standard, session-required mode** — we do **not** need the
-  passkey-first `requireSession:false` / `resolveUser` / signed-context mechanism
-  at all. (This removes the main auth risk from earlier drafts.)
+- **No email/password** module and **no social login**. The email is **verified
+  implicitly** by clicking the magic link.
+- Because the passkey is added by an already-authenticated user, the plugin runs
+  in **standard, session-required mode** — no passkey-first `requireSession:false`
+  / `resolveUser` / signed-context mechanism (removing the main auth risk from
+  earlier drafts).
 - better-auth manages users, sessions, magic-link verification tokens, and passkey
   credentials in its own tables (`user`, `session`, `account`, `verification`,
   `passkey`).
 - A SvelteKit catch-all route mounts the better-auth handler
   (`/api/auth/[...all]/+server.ts`); the Svelte client (`createAuthClient` +
-  `magicLinkClient` + `passkeyClient`) drives the flows in the browser.
+  `magicLinkClient` + `passkeyClient`) drives the browser flows.
 
 ### 5.2 Setup
 
@@ -288,16 +252,14 @@ magicLink({ sendMagicLink }), passkey({ rpID, rpName: "Pay with me", origin }) ]
 - `emailAndPassword` is **not** enabled; no social providers.
 - **Email delivery (new dependency):** the magic-link plugin's
   `sendMagicLink({ email, url })` callback sends the link via the **Mailgun HTTP
-  API** (`POST https://<base>/v3/<domain>/messages`, HTTP basic auth `api:<key>`).
-  Use the **`mailgun.js`** SDK or a plain `fetch` — no SMTP, so there's no
-  per-invocation handshake on serverless. Config via env vars: `MAILGUN_API_KEY`,
-  `MAILGUN_DOMAIN`, `MAILGUN_BASE_URL` (`https://api.mailgun.net` for US or
-  `https://api.eu.mailgun.net` for EU), and `EMAIL_FROM` (a verified Mailgun
-  sender on that domain). Wrap it in one small `lib/server` email helper so it's
-  swappable. (See §3, §12.)
-- Email is **required and unique** per account (stored on `user.email`); it is the
-  identifier the magic-link flow matches on and is never exposed across groups
-  (§12).
+  API** (`POST https://<base>/v3/<domain>/messages`, basic auth `api:<key>`) using
+  **`mailgun.js`** or plain `fetch` — no SMTP, so no per-invocation handshake.
+  Config via env vars: `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, `MAILGUN_BASE_URL`
+  (`https://api.mailgun.net` US / `https://api.eu.mailgun.net` EU), and
+  `EMAIL_FROM` (a verified sender on that domain). Wrap in one small `lib/server`
+  email helper so it's swappable. (See §3, §12.)
+- Email is **required and unique** per account (`user.email`); it's the identifier
+  the magic-link flow matches on and is never exposed across groups (§12).
 
 ### 5.3 Registration / first login (magic link)
 
@@ -312,28 +274,23 @@ magicLink({ sendMagicLink }), passkey({ rpID, rpName: "Pay with me", origin }) ]
 
 ### 5.4 Passkey enrolment (after login)
 
-- While authenticated, the client calls `authClient.passkey.addPasskey()`; the
-  browser creates the credential and better-auth stores it against the user.
-- Offered right after the first login (onboarding nudge) and anytime from
-  `/settings`. **Multiple passkeys per account** are supported (add a second
-  device).
+- While authenticated, `authClient.passkey.addPasskey()` creates the credential
+  and better-auth stores it against the user.
+- Offered right after first login (onboarding nudge) and anytime from `/settings`.
+  **Multiple passkeys per account** supported (add a second device).
 
 ### 5.5 Login flow (returning users)
 
-- **Primary:** `authClient.signIn.passkey()` — supports **discoverable /
-  usernameless** credentials and conditional UI / autofill; the fast path on an
-  enrolled device.
-- **Fallback / new device / lost passkey:** email magic link (§5.3), always
-  available. Both methods set the same better-auth session cookie.
+- **Primary:** `authClient.signIn.passkey()` — **discoverable / usernameless**
+  credentials with conditional UI / autofill; the fast path on an enrolled device.
+- **Fallback / new device / lost passkey:** email magic link (§5.3). Both set the
+  same better-auth session cookie.
 
 ### 5.6 Recovery — via email magic link
 
-- **Recovery exists in v1** (changed from the earlier passkey-only draft). Losing
-  every passkey is **not** fatal: the user logs in with an email magic link and
-  re-enrols a passkey on the new device.
-- This depends on continued access to the **email account** — that email is the
-  root of account access. No secondary recovery (no recovery codes) in v1.
-- Still recommend enrolling **multiple passkeys** for day-to-day convenience.
+- Losing every passkey is **not** fatal: log in with an email magic link and
+  re-enrol a passkey. This relies on continued **email account** access — the root
+  of account access. No secondary recovery (no recovery codes) in v1.
 
 ### 5.7 Session management
 
@@ -347,87 +304,80 @@ magicLink({ sendMagicLink }), passkey({ rpID, rpName: "Pay with me", origin }) ]
 
 ### 6.1 Model
 
-- **Group**: id, name, **settlement currency** (required; the base currency all
-  balances and settlements are expressed in), created_by, timestamps.
+- **Group**: id, name, **settlement currency** (required; the base for all
+  balances and settlements), created_by, timestamps.
 - **Member**: belongs to a group; has a display name; **optionally** linked to a
-  `user_id` (nullable, references better-auth `user.id`). This lets you add
-  people who don't have accounts.
-- **Access**: a user can access multiple groups. Access is granted when the user
-  is linked to at least one member in that group (no separate membership table —
-  the `members.user_id` link is the source of truth).
+  `user_id` (nullable, → better-auth `user.id`), so you can add people without
+  accounts.
+- **Access**: granted when the user is linked to at least one member in a group
+  (no separate membership table — `members.user_id` is the source of truth); a
+  user can access multiple groups.
 
 ### 6.2 Member ↔ User linking (Invite link)
 
-A member is a _participant slot_ in a group's ledger. It may or may not map to a
-real account holder. v1 uses **invite links only**:
-
-The invite link is **reusable with a 7-day expiry**: one link can be shared with
-several people and accepted multiple times until it expires (or is revoked). A
-group may have **multiple active links at once**, each managed via a **revocation
-UI** (see §10). An invite link is **member-agnostic** — it grants entry to the
-group, not to a pre-chosen slot; **the invitee decides how to join at accept time**.
+A member is a _participant slot_ in a group's ledger, which may or may not map to
+a real account holder. v1 uses **invite links only**: a link is **reusable with a
+7-day expiry** (shareable with several people, accepted multiple times until it
+expires or is revoked), **multiple active per group** (managed via a **revocation
+UI**, see §10), and **member-agnostic** — it grants entry to the group, not a
+pre-chosen slot, so **the invitee decides how to join at accept time**.
 
 Flow:
 
-1. A group member generates an **invite link** (token) for the group. It expires
-   **7 days** after creation (default). The link is **open / member-agnostic** —
-   it does **not** target a particular member. Multiple links can be active
-   simultaneously.
+1. A group member generates an **invite link** (token), expiring **7 days** after
+   creation (default). Multiple links can be active at once.
 2. The invitee opens the link. **Accepting always requires a registered,
-   logged-in user** — there is no anonymous/guest accept. If not logged in, they
-   must register or log in via passkey first, then continue the accept.
+   logged-in user** — no anonymous/guest accept. If not logged in, they must
+   register or log in via passkey first, then continue the accept.
 3. If the token is **valid and unexpired**, the invitee is **prompted to choose
    how to join the group**:
    - **Link an existing member** — claim one of the group's **unlinked, active**
-     member slots (e.g. a placeholder someone added ahead of time): set
-     `members.user_id = currentUser` on the chosen slot, keeping its existing
-     `display_name`. A slot can be claimed only while still unlinked — a repeat
-     or concurrent claim of the same slot is rejected (effectively single-use
+     slots (e.g. a placeholder added ahead of time): set
+     `members.user_id = currentUser`, keeping its `display_name`. Claimable only
+     while still unlinked — a repeat or concurrent claim is rejected (single-use
      per slot).
    - **Join as a new member** — create a **new member** linked to the user, with
-     `display_name` defaulting to the accepting **user's display name** (editable
-     afterwards in member management).
-4. The link stays valid for further accepts until it expires or is revoked
-   (reusable) — each accept is independent and member-agnostic.
+     `display_name` defaulting to the accepting **user's name** (editable later).
+4. The link stays valid for further accepts until it expires or is revoked — each
+   accept is independent and member-agnostic.
 
 Rules:
 
 - Unlinked members still appear in transactions and debt math.
-- A user can be linked to members across many groups (multi-group access).
-- A user must not be linked to **more than one member in the same group** —
-  enforce on accept (if they're already a member of the group, the accept is a
-  no-op / friendly message).
-- Accepting a group invite grants that user access to the group.
-- Expired (>7 days) or revoked links show a clear error and cannot be accepted.
-- A member-managing screen lists active links with create / copy / **revoke**
-  actions, plus their expiry and (optionally) a usage count.
+- A user can be linked to members across many groups (multi-group access), but
+  **not more than one member in the same group** — enforced on accept (if already
+  a member, the accept is a no-op / friendly message).
+- Accepting grants that user access to the group.
+- Expired (>7 days) or revoked links show a clear error and can't be accepted.
+- The member-management screen lists active links with create / copy / **revoke**,
+  plus expiry and (optionally) a usage count.
 
 ### 6.3 Member lifecycle (removal)
 
 - A member is **soft-deactivated**, not hard-deleted, once they have any activity
-  (a payer/share row in any transaction). Use a `members.deactivated_at` flag.
+  (a payer/share row in any transaction), via a `members.deactivated_at` flag.
 - A deactivated member **stays in past transactions and in balance/debt math** —
-  the ledger is never rewritten. They simply disappear from pickers when creating
-  or editing transactions, and are visually marked "inactive" in member lists.
+  the ledger is never rewritten. They simply drop out of pickers when creating or
+  editing transactions, and are marked "inactive" in member lists.
 - A member with **zero activity** may be hard-deleted (cleanup of a mistyped slot).
 - Deactivating does **not** clear outstanding balances; the suggested-settlement
   view still shows what they owe / are owed until settled. (Reactivation is a
   simple flag flip; nice-to-have.)
 - If the member was linked to a user, deactivation removes that user's access to
-  the group (they no longer have an active member link).
+  the group (no active member link remains).
 
 ### 6.4 Group lifecycle (currency lock, deletion)
 
 - The **settlement currency** is editable only while the group has **no
   transactions**. After the first transaction it is **locked** — changing it would
   invalidate every stored settlement-currency total and per-transaction rate
-  (we can't re-derive historical rates). Surface this in the edit UI. (Per-
+  (historical rates can't be re-derived). Surface this in the edit UI. (Per-
   transaction _entry_ currency is always free; only the group's settlement
   currency locks.)
 - **Group rename** is always allowed.
 - **Deletion is a soft-delete** (`groups.deleted_at`): the group is hidden from
-  every member's list and its routes return not-found, but the data is retained
-  and recoverable. No hard-delete in v1.
+  every member's list and its routes return not-found, but data is retained and
+  recoverable. No hard-delete in v1.
 
 ---
 
@@ -444,22 +394,20 @@ Rules:
     **User-editable** and may be backdated (e.g. recording yesterday's dinner
     today); defaults to now on first entry. This is the date shown and sorted on
     in transaction lists.
-  - `occurred_at` — the **server timestamp set to now** when the row is created;
+  - `occurred_at` — the **server timestamp set to now** at row creation;
     **immutable** (never edited, never backdated).
   - `updated_at` — server timestamp, bumped on every edit.
-  - _(Note: this assigns `created_at` to the editable real-world date and
-    `occurred_at` to the immutable insert time — the reverse of the usual
-    convention. Naming is intentional per the product decision; keep it consistent
-    across schema, queries, and UI.)_
+  - _(Note: `created_at` = editable real-world date, `occurred_at` = immutable
+    insert time — the reverse of the usual convention. Intentional; keep it
+    consistent across schema, queries, and UI.)_
 - **Currency & FX (see §7.6):**
   - `currency` — the transaction's entry currency (defaults to the group's
-    settlement currency). May differ from the group's settlement currency.
+    settlement currency; may differ from it).
   - `exchange_rate` — manual rate, settlement-currency units per **1** unit of
     `currency`. Implicitly `1` (and hidden in the UI) when `currency` ==
     settlement currency.
-  - `amount_total_settlement` — `amount_total` converted to the settlement
-    currency (minor units), computed once and stored as the canonical value the
-    debt engine reads.
+  - `amount_total_settlement` — `amount_total` converted to settlement minor
+    units, computed once and stored as the canonical value the debt engine reads.
 - For itemized: `amount_total = items_subtotal + Σ charges` (see §7.2.1–7.2.3),
   all in the **transaction currency**; conversion to settlement happens after
   resolution (§7.6).
@@ -483,23 +431,21 @@ The transaction records the **split mode** used to derive the shares:
   `amount_owed = raw_amount`. Validate `Σ raw_amount == amount_total`.
 - **share** — user enters integer/decimal **weights** (`share_weight`) per
   beneficiary. `amount_owed = amount_total × weight / Σ weights`.
-- **itemized** — see §7.2.1. The transaction is broken into line items; each
-  item is split independently, then per-member amounts are aggregated across all
-  items into `transaction_share.amount_owed`.
+- **itemized** — see §7.2.1. Broken into line items split independently, then
+  per-member amounts aggregated into `transaction_share.amount_owed`.
 
-In all modes we persist the **resolved `amount_owed`** at the transaction level
-(source of truth for debt math) _and_ the inputs (`split_mode`,
-`share_weight`/`raw_amount`, and for itemized the item rows) so the transaction
-can be re-edited faithfully.
+All modes persist the **resolved `amount_owed`** at the transaction level (source
+of truth for debt math) _and_ the inputs (`split_mode`,
+`share_weight`/`raw_amount`, and for itemized the item rows) for faithful
+re-editing.
 
-**Rounding:** distribute remainders deterministically (largest-remainder method)
-so the resolved shares sum exactly to the total in minor units. **Tie-break:**
-when two members have equal remainders, the leftover minor unit goes to the
-member with the **lower `member_id`** (ascending `member_id`), so distribution is
-fully reproducible and unit-testable. For itemized, round **within each item**
-first, then aggregate (so each item's shares sum to that item's amount, and the
-items sum to `amount_total`). The same ascending-`member_id` tie-break applies to
-charge/discount allocation (§7.2.3) and FX share distribution (§7.6).
+**Rounding:** distribute remainders deterministically (largest-remainder) so
+resolved shares sum exactly to the total in minor units. **Tie-break:** equal
+remainders give the leftover minor unit to the **lower `member_id`** (ascending),
+so distribution is fully reproducible and unit-testable. For itemized, round
+**within each item** first, then aggregate (each item's shares sum to its amount,
+items sum to `amount_total`). The same tie-break applies to charge/discount
+allocation (§7.2.3) and FX share distribution (§7.6).
 
 #### 7.2.1 Itemized splitting
 
@@ -514,12 +460,11 @@ share_weight?, raw_amount?)` — who shares _this item_ and how it's split
 
 #### 7.2.2 Charges & discounts: service charge, VAT, discount
 
-Real bills add **service charge** and **VAT** _on top of_ the item prices
-("exclusive"), and sometimes a **discount** (a coupon, promo, or bill-level
-reduction). All of these **vary per spending** (different restaurants, some 0%,
-discount only sometimes) — there is **no group default**; they're entered fresh
-each time. Model them as per-transaction "charge" rows (a discount is just a
-negative-effect charge):
+Real bills add **service charge** and **VAT** _on top of_ item prices
+("exclusive"), and sometimes a **discount** (coupon/promo/bill-level reduction).
+All **vary per spending** with **no group default** — entered fresh each time.
+Model them as per-transaction "charge" rows (a discount is a negative-effect
+charge):
 
 - **transaction_charge**: `(transaction_id, kind, mode, value, base, sort_order)`
   - `kind`: `service` | `vat` | `discount` (extensible later: `tip`)
@@ -558,25 +503,24 @@ amount_total = items_subtotal + service + vat − discount
 2. Compute each charge/discount total in `sort_order` per §7.2.2 (a discount is
    a negative effect).
 3. **Allocate each charge/discount** to members in proportion to their subtotal
-   share, using largest-remainder rounding so the allocations sum exactly to that
-   charge/discount total. A discount is allocated the same way (negative), so
-   everyone's share of the bill is reduced proportionally to what they consumed.
-4. Each member's owed (**in the transaction currency**) = subtotal share +
-   allocated charges − allocated discounts. These sum exactly to `amount_total`.
-5. Payers remain at the transaction level (who paid the overall bill, net of
-   discount), unchanged — also in the transaction currency.
-6. **Currency conversion (§7.6):** if the transaction currency differs from the
-   group's settlement currency, convert each member's owed and each payer's paid
-   into the settlement currency (control sum = the rounded settlement total, with
-   largest-remainder so they still tie out). The resulting **settlement-currency**
-   amounts are what land in `transaction_share.amount_owed` /
-   `transaction_payer.amount_paid_settlement` — the canonical values §8 reads.
-   When the two currencies match, this step is a no-op (rate 1).
+   share (largest-remainder rounding so allocations sum exactly to that total); a
+   discount the same way (negative), reducing each share proportionally to
+   consumption.
+4. Each member's owed (**transaction currency**) = subtotal share + allocated
+   charges − allocated discounts. These sum exactly to `amount_total`.
+5. Payers remain at the transaction level (who paid, net of discount), also in the
+   transaction currency.
+6. **Currency conversion (§7.6):** if the transaction currency differs from
+   settlement, convert each member's owed and each payer's paid (control sum = the
+   rounded settlement total, largest-remainder so they tie out) → the
+   **settlement-currency** values in `transaction_share.amount_owed` /
+   `transaction_payer.amount_paid_settlement` that §8 reads. A no-op when the
+   currencies match (rate 1).
 
-Why this shape: the debt engine (§8) keeps reading only the aggregated
-`transaction_share` rows (always in the settlement currency), so balance/
-settlement math is **unchanged** by itemization, charges, discounts, **or FX** —
-they're purely an input/detail layer that derives the settlement-currency shares.
+Why this shape: the debt engine (§8) reads only the aggregated `transaction_share`
+rows (always in the settlement currency), so balance/settlement math is
+**unchanged** by itemization, charges, discounts, **or FX** — they're purely an
+input/detail layer that derives the settlement-currency shares.
 
 Notes/edge cases:
 
@@ -635,14 +579,13 @@ debt is just a normal transfer transaction (`split_mode = amount` typically).
 - The transaction form shows only the categories whose `applies_to` matches the
   selected transaction type.
 
-**Category meanings** (to keep the overlapping ones distinct, since v1 is a flat
-list with no sub-categories — applies whether or not the group is travel-focused):
+**Category meanings** (to keep the overlapping ones distinct in a flat list):
 
-- **Travel** = trip-specific costs: accommodation (hotels/Airbnb), flights and
-  long-distance tickets, tours/activities, baggage, travel insurance.
-- **Transportation** = everyday local movement: bus/metro/taxi/ride-share, fuel,
-  parking, tolls — including local rides _while_ on a trip.
-- **Food & Drink** = all meals, including meals during a trip.
+- **Travel** = trip-specific costs: accommodation, flights/long-distance tickets,
+  tours/activities, baggage, travel insurance.
+- **Transportation** = everyday local movement (bus/metro/taxi/ride-share, fuel,
+  parking, tolls), including local rides _while_ on a trip.
+- **Food & Drink** = all meals, including during a trip.
 
 ### 7.4 Validation rules
 
@@ -669,37 +612,33 @@ sum(amount_owed [settlement]) == amount_total_settlement`.
 
 ### 7.5 Money representation
 
-- Stored everywhere as **integer minor units** — **no floating point** in money
-  math. All arithmetic (splits, balances, settlements) is done in minor units.
+- Stored everywhere as **integer minor units** — **no floating point**. All
+  arithmetic (splits, balances, settlements) is done in minor units.
 - **Precision is per-currency, not a fixed 2dp.** Each currency has a minor-unit
-  **exponent**: JPY/KRW/VND = 0, THB/USD/EUR = 2, KWD/BHD/TND = 3. The scale
-  factor is `10^exponent` (×1 / ×100 / ×1000), not a hardcoded ×100.
+  **exponent** (JPY/KRW/VND = 0, THB/USD/EUR = 2, KWD/BHD/TND = 3); scale factor
+  `10^exponent`, not a hardcoded ×100.
   - Keep a small **currency table/constant** mapping code → { exponent, symbol,
-    display format }, seeded with the **supported currency list** below (§7.5.1).
-    Exponents follow ISO 4217 minor units.
-  - Each amount is interpreted with **its own** currency's exponent: a
-    transaction's entry amounts use the transaction currency's exponent; balances/
-    settlements use the group settlement currency's exponent. The settlement
-    currency locks after the first transaction (§6.4), so the settlement exponent
-    never changes under existing data.
-- A `lib/money` helper is **currency-aware**: parse (string→minor, using the
-  currency's exponent), format (minor→display string at the right dp + symbol),
-  and largest-remainder distribution for splits (remainder is in that currency's
-  smallest unit). All split/charge/discount rounding (§7.2.3) uses this.
-- **Two currencies are in play** (see §7.6): a transaction is entered and split
-  in its **transaction currency** (using that currency's exponent), then the
-  resolved per-member amounts are converted to the group's **settlement
-  currency** (using _its_ exponent) for all balance/debt math. The money helper
-  is told which currency it's operating in for every parse/format/round.
+    display format }, seeded from §7.5.1. Exponents follow ISO 4217 minor units.
+  - Each amount uses **its own** currency's exponent: entry amounts the
+    transaction currency's, balances/settlements the group settlement currency's.
+    The settlement currency locks after the first transaction (§6.4), so its
+    exponent never changes under existing data.
+- A `lib/money` helper is **currency-aware**: parse (string→minor), format
+  (minor→display at the right dp + symbol), and largest-remainder split
+  distribution (remainder in the currency's smallest unit). All split/charge/
+  discount rounding (§7.2.3) uses this.
+- **Two currencies are in play** (see §7.6): entry/split use the **transaction
+  currency**'s exponent, then resolved amounts convert to the group's
+  **settlement currency** (its exponent) for balance/debt math. The money helper
+  is told which currency it operates in for every parse/format/round.
 
 #### 7.5.1 Supported currencies (v1)
 
-**Fixed, seeded list of 29 fiat currencies** (the top 30 by market cap from
-fiatmarketcap.net, **excluding BTC** — it is not a fiat currency and its
-8-decimal, non-ISO-4217 minor units don't fit the exponent model). Both the
-group **settlement currency** and a transaction's **entry currency** must be one
-of these. Seeded via migration into the currency constant/table; the `exponent`
-column drives all minor-unit math (§7.5).
+**Fixed, seeded list of 29 fiat currencies** (top 30 by market cap from
+fiatmarketcap.net, **excluding BTC** — non-fiat, and its 8-decimal non-ISO-4217
+minor units don't fit the exponent model). Both the group **settlement currency**
+and a transaction's **entry currency** must be one of these. Seeded via migration;
+the `exponent` column drives all minor-unit math (§7.5).
 
 | #   | Code | Currency           | Exponent | Symbol |
 | --- | ---- | ------------------ | -------- | ------ |
@@ -765,8 +704,8 @@ amount_settlement_minor =
 (`round` = round-half-up; implemented via integer arithmetic so it's exact.)
 
 **Where conversion happens.** Splitting/itemization/charges all run **in the
-transaction currency** (§7.2–§7.2.3) and produce each member's owed + each
-payer's paid in transaction-currency minor units. Then a single conversion step:
+transaction currency** (§7.2–§7.2.3), producing each member's owed + each payer's
+paid in transaction-currency minor units. Then a single conversion step:
 
 1. Compute the **canonical settlement total**:
    `amount_total_settlement = convert(amount_total)` (one rounded value).
@@ -776,24 +715,19 @@ payer's paid in transaction-currency minor units. Then a single conversion step:
    `amount_total_settlement` exactly.
 3. Do the same for payers → `transaction_payer.amount_paid_settlement`.
 
-Converting once at the total (then distributing) — rather than converting each
-share independently — guarantees paid and owed both tie to the same settlement
-total, so group balances always sum to 0.
+Converting once at the total then distributing (rather than converting each share
+independently) ties paid and owed to the same settlement total, so group balances
+always sum to 0. §8 reads **only** these settlement-currency amounts — never rates
+or foreign amounts — so balances and simplified settlements are unchanged.
 
-**What the debt engine sees.** §8 reads **only** the settlement-currency
-`amount_owed` / `amount_paid_settlement`. It never sees rates or foreign amounts,
-so balances and simplified settlements are unchanged.
-
-**UX (entry).** On a transaction the user picks the currency (defaults to the
-group's). If it differs, an FX field appears. To reduce friction, allow entering
-**either** the rate **or** the settlement-equivalent total — the other is derived
-(`rate = settlement_total / txn_total`), and the form shows the live converted
-total (e.g. "¥200 → ฿970"). The stored canonical is the rate + computed
-`amount_total_settlement`.
+**UX (entry).** See §10 — pick the currency (defaults to the group's); if it
+differs, enter **either** the rate **or** the settlement-equivalent total (the
+other derived as `rate = settlement_total / txn_total`), with a live converted
+total shown. Stored canonical = rate + computed `amount_total_settlement`.
 
 **Display.** Transaction lists/detail show the **original** amount + currency
 (e.g. ¥200) with the settlement equivalent (฿970) as secondary text. Balances,
-"who should pay", and settlement suggestions are shown **only** in the settlement
+"who should pay", and settlement suggestions show **only** the settlement
 currency.
 
 **Settle action.** Suggested settlements are computed in the settlement currency,
@@ -828,28 +762,27 @@ balance(member) = Σ amount_paid_settlement(member)  −  Σ amount_owed(member)
 
 ### 8.2 "Who should pay" (most debt)
 
-Sort members by balance ascending; the most negative is the member who should
-pay first. Surface this prominently per your note.
+Sort members by balance ascending; the most negative should pay first. Surface
+this prominently.
 
 ### 8.3 Suggested settlements (simplified — minimize transfers)
 
 v1 shows **simplified suggestions only** (a minimized set of transfers), not raw
-pairwise per-transaction debts. Use a greedy debt-simplification algorithm:
+pairwise debts. Greedy debt-simplification:
 
 1. Split members into creditors (balance > 0) and debtors (balance < 0).
-2. Repeatedly match the largest debtor with the largest creditor; create a
-   suggested transfer of `min(|debtor|, creditor)`; reduce both.
+2. Repeatedly match the largest debtor with the largest creditor; suggest a
+   transfer of `min(|debtor|, creditor)`; reduce both.
 3. Continue until all balances ~0.
 
-This yields a minimal set of "X pays Y amount Z" suggestions, which is what the
-settle screen displays.
+This yields a minimal set of "X pays Y amount Z" suggestions for the settle screen.
 
 ### 8.4 Settle action
 
-- From a suggested settlement, prefill a **Transfer** transaction (payer =
-  debtor member, recipient = creditor member, amount, category = "Debt settlement").
-- On save it's a normal transaction, so balances recompute naturally and the
-  suggestion list shrinks.
+- From a suggested settlement, prefill a **Transfer** transaction (payer = debtor,
+  recipient = creditor, amount, category = "Debt settlement").
+- On save it's a normal transaction, so balances recompute and the suggestion list
+  shrinks.
 
 ---
 
@@ -923,16 +856,13 @@ Notes:
 - `transaction_shares.amount_owed` and `transaction_payers.amount_paid_settlement`
   are always in the **settlement** currency — the only amounts §8 reads.
 - `transaction_shares` always holds the **resolved, aggregated** per-member owed
-  (source of truth for §8). For itemized, it's derived from
-  `transaction_item_shares` + `transaction_charges`; the item/charge tables are
-  the editable inputs.
-- Unique constraint to enforce "one member per user per group":
+  (source of truth for §8); for itemized it's derived from
+  `transaction_item_shares` + `transaction_charges` (the editable inputs).
+- "One member per user per group" enforced by
   `unique(members.group_id, members.user_id)` (where `user_id` not null).
-
-- `audit_log` is **append-only** (no update/delete), written in the same DB
-  transaction as the mutation; `actor_user_id` → `user.id`; `summary` is
-  denormalized so entries stay readable even if the entity later changes or is
-  hard-deleted (§12.1).
+- `audit_log` is **append-only**, written in the same DB transaction as the
+  mutation; `summary` is denormalized so entries stay readable even if the entity
+  later changes or is hard-deleted (§12.1).
 
 Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 `transactions(group_id, occurred_at)`, `transaction_payers(transaction_id)`,
@@ -980,9 +910,9 @@ with a clearly-labelled, visually-distinct (destructive-variant) confirm button
 and a Cancel — so a single mis-tap can't trigger it. Confirmation is a
 JS-progressive-enhancement layer: with JS the dialog gates the submit; **without
 JS the underlying real form action still works** (the server is the source of
-truth and re-validates). The confirmation is a UX guard, not an authz control —
-authorization is still the §12 membership check, and the change is still recorded
-in the audit log (§12.1).
+truth and re-validates). It's a UX guard, not an authz control — authorization is
+still the §12 membership check, and the change is still recorded in the audit log
+(§12.1).
 
 **Self-affecting actions must not strand the user.** When an action removes the
 acting user's OWN access to the area they're on — most notably **removing the
@@ -991,19 +921,18 @@ server redirects them somewhere they still belong (e.g. `/groups`) instead of
 re-rendering a now-inaccessible page as a confusing "not found".
 
 **Currency & FX (all transaction types):** a currency picker defaulting to the
-group's settlement currency. When a **different** currency is chosen, an FX field
-appears — the user enters the **rate** _or_ the **settlement-equivalent total**
-(the other is derived), and the form shows the live conversion (e.g. "¥200 →
-฿970"). Hidden entirely when the transaction is in the settlement currency. (§7.6)
+group's; choosing a **different** currency reveals an FX field (enter rate _or_
+settlement-equivalent total, the other derived; live conversion shown, e.g. "¥200
+→ ฿970"). Hidden when the transaction is in the settlement currency. (§7.6)
 
 **Itemized transaction form:** a repeatable list of item rows (label, amount,
-beneficiaries + per-item split), plus a charges section for **service charge**,
-**VAT**, and **discount** (each percent or absolute, with order/placement), with
-a **live computed breakdown** (items subtotal → ± discount → + service → + VAT →
-total, and each member's resolved share) so the user sees exactly who owes what
-before saving. Rates/discounts are entered per spending (no saved defaults). All
-item/charge amounts are in the **transaction currency**; the breakdown also shows
-the settlement-converted total when a foreign currency is used.
+beneficiaries + per-item split), plus a charges section (**service charge**,
+**VAT**, **discount** — each percent or absolute, with order/placement) and a
+**live computed breakdown** (items subtotal → ± discount → + service → + VAT →
+total, plus each member's resolved share) so the user sees who owes what before
+saving. Rates/discounts entered per spending (no saved defaults). All item/charge
+amounts are in the **transaction currency**; the breakdown also shows the
+settlement-converted total for a foreign currency.
 
 ---
 
@@ -1018,51 +947,45 @@ the settlement-converted total when a foreign currency is used.
   - Network-first for data; show graceful offline state.
 - "Add to home screen" install prompt handling.
 - **No offline creation in v1.** Writes (transactions, groups, members) require
-  connectivity. The service worker provides an installable app + offline shell
-  and may cache previously loaded data for read-only viewing, but creating/editing
-  while offline is explicitly out of scope. Show a clear "you're offline" state
-  that disables write actions.
+  connectivity. The SW gives an installable app + offline shell and may cache
+  loaded data for read-only viewing, but offline creating/editing is out of scope.
+  Show a clear "you're offline" state that disables write actions.
 
 ### 11.1 PWA & auth sessions
 
-PWA caching plus passkey/cookie sessions has a few specific pitfalls. These are
-SW-config + session-handling rules; none change the data model.
+PWA caching plus passkey/cookie sessions has specific pitfalls — SW-config +
+session-handling rules; none change the data model.
 
-- **Never cache authenticated responses in the service worker.** This is the
-  classic PWA auth leak: a cached SSR page or `/api` response can be served to a
-  different user — or a logged-out user — exposing another person's private data.
-  Workbox config:
+- **Never cache authenticated responses in the service worker.** The classic PWA
+  auth leak: a cached SSR page or `/api` response served to a different (or
+  logged-out) user exposes private data. Workbox config:
   - **Precache only static/build assets** (JS, CSS, icons, fonts).
-  - **NetworkOnly** for navigations and all data / `/api/**` (including
-    `/api/auth/**`) routes — no `StaleWhileRevalidate` on personalized content.
-  - The precached HTML shell must be **auth-agnostic**: it must not embed
-    server-rendered user data. Session-gated data is fetched from the network on
-    load; the SW never serves it from cache.
-- **iOS standalone has a separate cookie/storage jar.** An installed PWA on iOS
-  historically does **not** share cookies with Safari, so a browser login does
-  not carry into the installed app — the user must authenticate _inside_ the
-  installed PWA. The passkey itself lives in the platform keychain and is still
-  available; it's the better-auth **session cookie** that's siloed. Document this
-  so it isn't mistaken for a bug.
-- **Magic links open in the default browser, not the installed PWA.** Tapping the
-  emailed link launches Safari/Chrome, so the session cookie lands in the
-  _browser's_ jar — on iOS that is **not** the installed PWA's jar (above). So
-  prefer **passkey login inside the installed app**; treat magic link as the
-  browser / new-device / recovery path. Make the magic-link landing page work
-  standalone (don't assume it reopens the PWA), and after verifying, guide the
-  user to enrol a passkey so subsequent logins happen in-app.
+  - **NetworkOnly** for navigations and all data / `/api/**` (incl. `/api/auth/**`)
+    routes — no `StaleWhileRevalidate` on personalized content.
+  - The precached HTML shell must be **auth-agnostic** (no server-rendered user
+    data); session-gated data is always fetched from the network, never the SW.
+- **iOS standalone has a separate cookie/storage jar.** An installed iOS PWA
+  historically doesn't share cookies with Safari, so a browser login doesn't carry
+  into the app — the user must authenticate _inside_ the installed PWA. The passkey
+  lives in the platform keychain and is still available; only the **session
+  cookie** is siloed. Document this so it isn't mistaken for a bug.
+- **Magic links open in the default browser, not the installed PWA.** The link
+  launches Safari/Chrome, so the cookie lands in the _browser's_ jar — on iOS not
+  the PWA's (above). So prefer **passkey login inside the installed app**, treating
+  magic link as the browser / new-device / recovery path. Make the magic-link
+  landing page work standalone, and after verifying, guide the user to enrol a
+  passkey so later logins happen in-app.
 - **Treat auth state as server-driven; handle 401 gracefully.** A PWA can stay
-  open for days and the session cookie will expire under it. The client must
-  never assume "logged in" from cached UI: on any `401`, clear client state and
-  route to login. Session validation happens per request in `hooks.server` /
-  `load`, never from SW cache.
-- **WebAuthn secure context + RP ID.** PWA is HTTPS (fine), but `rpID` must match
-  the production origin (and `localhost` for dev) and must **not** be hardcoded to
-  a Vercel preview URL, or registration/auth in standalone mode breaks. (See §12.)
+  open for days while the cookie expires under it. Never assume "logged in" from
+  cached UI: on any `401`, clear client state and route to login. Session
+  validation happens per request in `hooks.server` / `load`, never from SW cache.
+- **WebAuthn secure context + RP ID.** `rpID` must match the production origin (and
+  `localhost` for dev) and must **not** be hardcoded to a Vercel preview URL, or
+  standalone registration/auth breaks. (See §12.)
 - **Cookie attributes.** better-auth defaults (httpOnly, Secure, `SameSite=Lax`)
   are correct; everything is same-origin, so don't loosen to `SameSite=None`.
-- **SW update vs. stale client code.** On deploy a stale SW can keep serving old
-  JS that calls changed auth endpoints. Use a prompt-to-reload (or controlled
+- **SW update vs. stale client code.** On deploy a stale SW can keep serving old JS
+  that calls changed auth endpoints. Use prompt-to-reload (or controlled
   `skipWaiting`) so auth flows don't break across versions.
 
 ---
@@ -1070,9 +993,8 @@ SW-config + session-handling rules; none change the data model.
 ## 12. Security & Privacy
 
 - Cookies/sessions handled by better-auth (HTTP-only, Secure, SameSite).
-- **PWA session/caching rules: see §11.1** — the service worker must never cache
-  authenticated responses, and the client must treat auth state as server-driven
-  (handle `401` by clearing state and re-authenticating).
+- **PWA session/caching rules: see §11.1** (never cache authenticated responses;
+  treat auth state as server-driven, handling `401` by re-authenticating).
 - CSRF protection on form actions (SvelteKit built-in + origin checks).
 - Rate-limit auth endpoints (better-auth has built-in rate limiting; configure).
   In particular **rate-limit magic-link requests per email/IP** to prevent email
@@ -1083,18 +1005,18 @@ SW-config + session-handling rules; none change the data model.
   expiry; keep it short, e.g. ~5–15 min). The link must be HTTPS to the canonical
   origin (not a preview URL). Keep the `MAILGUN_API_KEY` server-side only.
 - Authorization is **group-membership based only** (no per-action roles in v1):
-  any user with access to a group can create/edit/delete that group's
-  transactions and members. The single enforced check is that the requesting
-  user has access to the group (via a linked member). Enforce in `lib/server`.
+  any user with access to a group can create/edit/delete that group's transactions
+  and members. The single enforced check is that the requesting user has access to
+  the group (via a linked member). Enforce in `lib/server`.
 - Don't leak member emails to other groups.
-- **Accountability via audit log (see §12.1):** because anyone can mutate
-  anything, every create/edit/delete is recorded with _who_ and _when_.
+- **Accountability via audit log (§12.1):** every create/edit/delete records
+  _who_ and _when_.
 
 ### 12.1 Audit log
 
-Since there are no per-action permissions, the audit log is the safety
-mechanism: it makes every change **attributable** and **reviewable**, even though
-it doesn't prevent the change.
+With no per-action permissions, the audit log is the safety mechanism: it makes
+every change **attributable** and **reviewable**, even though it doesn't prevent
+the change.
 
 **What's recorded.** One append-only entry per mutating action:
 
@@ -1106,65 +1028,60 @@ it doesn't prevent the change.
 
 **Entry fields** (see `audit_log` in §9):
 
-- `actor_user_id` — the authenticated better-auth user who performed it (durable
-  key; for display, resolve to their member's name in that group, falling back to
-  the user's name).
+- `actor_user_id` — the authenticated user who performed it (durable key; for
+  display, resolve to their member's name in that group, else the user's name).
 - `action`, `entity_type`, `entity_id`, `group_id`.
 - `occurred_at` — **server** time (UTC), the sort key.
 - `summary` — short human-readable line ("Edited '_Dinner_' — amount ฿800 →
   ฿950").
-- `metadata` (JSON, optional) — changed fields / before-after snapshot for edits;
-  enough to render the line even if the underlying row is later changed or
-  hard-deleted (denormalize a label so old entries stay readable).
+- `metadata` (JSON, optional) — changed fields / before-after snapshot, enough to
+  render the line even if the underlying row later changes or is hard-deleted
+  (denormalize a label so old entries stay readable).
 
 **Integrity.**
 
-- **Append-only and immutable** — entries are never edited or deleted, including
-  when the underlying transaction is soft-deleted (the trail must outlive it).
+- **Append-only and immutable** — never edited or deleted, even when the
+  underlying transaction is soft-deleted (the trail must outlive it).
 - Written **server-side in the same DB transaction** as the mutation, in
-  `lib/server`, so the log can't drift from what actually happened (no client-
-  supplied audit data).
+  `lib/server`, so it can't drift from what happened (no client-supplied data).
 
 **Visibility (UI).**
 
-- `/groups/[id]/activity` — group activity feed, **sorted by `occurred_at`
-  descending**, showing actor, action, entity summary, and relative + absolute
-  time. Optional filters by entity type or member.
-- Transaction detail page shows that transaction's own history (entries filtered
-  to its `entity_id`).
-- Visible to **any group member** (consistent with the access model); never
-  exposes other groups. Times rendered in the viewer's locale/timezone.
+- `/groups/[id]/activity` — group feed **sorted by `occurred_at` descending**,
+  showing actor, action, entity summary, and relative + absolute time. Optional
+  filters by entity type or member.
+- Transaction detail shows that transaction's own history (entries filtered to its
+  `entity_id`).
+- Visible to **any group member**; never exposes other groups. Times rendered in
+  the viewer's locale/timezone.
 
 ---
 
 ## 13. Testing Strategy
 
-- **Unit (Vitest):** debt balance + settlement-minimization algorithm
-  (critical — edge cases: rounding, single member, all settled, circular debts).
-  Money helpers (**per-currency exponent**: parse/format/round for 0-, 2-, and
-  3-decimal currencies; remainder distribution in the currency's smallest unit).
-  Validation schemas. **Split resolution for all four modes**, including
-  **itemized + service/VAT/discount** — assert per-item rounding, proportional
-  charge/discount allocation, discount-before-tax vs after-tax ordering, and that
-  `Σ resolved shares == amount_total` exactly (incl. awkward rounding like 3-way
-  splits, percentage charges, 100%-off discounts, and a 0-decimal currency like
-  JPY).
-- **FX conversion (Vitest):** rate math via integer/bignum (no float drift);
+- **Unit (Vitest):** debt balance + settlement-minimization algorithm (critical —
+  edge cases: rounding, single member, all settled, circular debts). Money helpers
+  (**per-currency exponent**: parse/format/round for 0-, 2-, 3-decimal currencies;
+  remainder in the smallest unit). Validation schemas. **Split resolution for all
+  four modes**, incl. **itemized + service/VAT/discount** — assert per-item
+  rounding, proportional charge/discount allocation, discount-before- vs after-tax
+  ordering, and `Σ resolved shares == amount_total` exactly (incl. 3-way splits,
+  percentage charges, 100%-off discounts, a 0-decimal currency like JPY).
+- **FX conversion (Vitest):** integer/bignum rate math (no float drift);
   convert-total-then-distribute ties paid and owed to the same
-  `amount_total_settlement`; cross-exponent pairs (e.g. CNY→THB, JPY→USD,
-  USD→KWD); rate-vs-settlement-total entry derive each other; rate-1 no-op;
-  group balances still sum to 0 across mixed-currency transactions.
-- **Integration:** transaction create/edit with payer/share invariants,
-  including itemized transactions with charges + discounts (round-trip edit
-  fidelity). **Audit log:** each create/edit/delete/restore writes exactly one
-  entry in the same DB transaction, with correct actor/action/entity; entries are
-  never mutated and survive a soft-deleted transaction.
-- **E2E (Playwright):** **magic-link registration/login** (intercept the sent
-  email / capture the link in a test mailbox, follow it, assert session) and
-  **passkey** enrol + login via the virtual authenticator API; recovery path
-  (magic-link login then re-enrol a passkey); create group → add tx → settle →
-  balances zero out; activity feed shows the actions newest-first with the right
-  actor.
+  `amount_total_settlement`; cross-exponent pairs (CNY→THB, JPY→USD, USD→KWD);
+  rate-vs-settlement-total entry derive each other; rate-1 no-op; balances still
+  sum to 0 across mixed-currency transactions.
+- **Integration:** transaction create/edit with payer/share invariants, incl.
+  itemized with charges + discounts (round-trip edit fidelity). **Audit log:**
+  each create/edit/delete/restore writes exactly one entry in the same DB
+  transaction with correct actor/action/entity; entries are never mutated and
+  survive a soft-deleted transaction.
+- **E2E (Playwright):** **magic-link registration/login** (capture the link in a
+  test mailbox, follow it, assert session) and **passkey** enrol + login via the
+  virtual authenticator API; recovery path (magic-link login then re-enrol);
+  create group → add tx → settle → balances zero out; activity feed shows actions
+  newest-first with the right actor.
 
 ---
 

@@ -9,8 +9,8 @@ from `TASKS.md`. Implement it fully and correctly, including tests.
 
 ## Authoritative sources
 
-- `PLAN.md` — the product spec. The task references the relevant section(s); obey
-  them exactly, including any deliberate naming the plan pins down.
+- `PLAN.md` — the product spec. The task cites the relevant section(s); obey them
+  exactly, including any deliberate naming the plan pins down.
 - `CLAUDE.md` — build conventions and the _Project conventions_ section. Follow
   them.
 
@@ -18,18 +18,17 @@ from `TASKS.md`. Implement it fully and correctly, including tests.
 
 1. Read the task and the `PLAN.md` sections it cites. If resuming an
    `in-progress` task, read the current working tree first and **continue from
-   it** — do not restart from scratch or discard partial work.
-2. Implement the task. Keep changes scoped to this task; don't pull future tasks
-   forward.
+   it** — never restart from scratch or discard partial work.
+2. Implement the task. Keep changes scoped to it; don't pull future tasks forward.
 3. **Write tests with the code** in the same task: unit tests for logic and
-   validation (cover the edge cases the plan's testing section calls out),
+   validation (covering the edge cases the plan's testing section calls out),
    integration/e2e tests where the task is a flow.
 4. Run the fast gate yourself: `bash scripts/gate.sh`. Fix lint, formatting, type,
    and unit-test failures until green.
 5. If the task (or part of it) needs a real secret/asset the human must supply
    (see the _Blocked / NEEDS-INPUT register_ in `TASKS.md`): build the
    **local-dev path**, leave a `// TODO NEEDS-INPUT:` note, and report that part
-   as blocked. Never hard-code secrets; document env vars in `.env.example`.
+   blocked. Never hard-code secrets; document env vars in `.env.example`.
 
 ## Rules
 
