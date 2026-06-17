@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShares, resolveItemizedShares, type ResolveSharesInput } from './resolve';
+import {
+	resolveShares,
+	resolveItemizedShares,
+	resolveItemizedWithCharges,
+	type ResolveSharesInput
+} from './resolve';
 import {
 	buildTransactionSchema,
+	applyCharges,
 	type TransactionInput,
-	type ItemInput
+	type ItemInput,
+	type ChargeInput
 } from '$lib/schemas/transaction';
 
 // Unit tests for the non-itemized split resolver (PLAN §7.2 — task 4.5).
@@ -567,5 +574,331 @@ describe('resolveItemizedShares — per-item rounding + aggregation', () => {
 			}
 			expect(sumOwed(result.shares)).toBe(subtotal);
 		}
+	});
+});
+
+// ── Itemized + charges/discounts resolution (PLAN §7.2.2 / §7.2.3 — task 4.9). ──
+//
+// Proves: each charge's allocation sums EXACTLY to that charge's signed total; the
+// final per-member owed sums EXACTLY to amount_total; the two §7.2.2 discount
+// placements end-to-end (per-member final shares); a 0-subtotal-share member owes
+// 0 of every charge / gets 0 discount; a 100%-off bill → all final shares 0; mixed
+// percent + absolute charges; the ascending-member_id tie-break inside a charge
+// allocation (explicit expected assignment); JPY (0-dp) + THB (2-dp); and that the
+// empty-charges path equals the 4.8 `resolveItemizedShares` result exactly.
+
+/**
+ * Parse an itemized SPENDING WITH CHARGES payload through the real schema and
+ * return its normalized `{ items, charges }` — so the charges-resolver tests run on
+ * genuinely §7.4-valid input (amount_total == items_subtotal + Σ signed charges).
+ */
+function validItemized(items: ItemInput[], charges: ChargeInput[]) {
+	const subtotal = items.reduce((acc, it) => acc + it.amount, 0);
+	const amountTotal = applyCharges(subtotal, charges).amountTotal;
+	const payload = baseSpending({
+		splitMode: 'itemized',
+		amountTotal,
+		amountTotalSettlement: amountTotal,
+		payers: [{ memberId: 'm1', amountPaid: amountTotal }],
+		beneficiaries: [],
+		items,
+		charges
+	});
+	const parsed = thbSchema.safeParse(payload);
+	if (!parsed.success) {
+		throw new Error(`charges fixture is not schema-valid: ${JSON.stringify(parsed.error.issues)}`);
+	}
+	const tx = parsed.data as TransactionInput;
+	return { items: tx.items, charges: tx.charges };
+}
+
+/** Map resolved shares → { memberId: amountOwed } for compact assertions. */
+function byMember(shares: { memberId: string; amountOwed: number }[]): Record<string, number> {
+	return Object.fromEntries(shares.map((s) => [s.memberId, s.amountOwed]));
+}
+
+describe('resolveItemizedWithCharges — empty charges equals 4.8', () => {
+	it('with no charges, final shares + items match resolveItemizedShares exactly', () => {
+		const items: ItemInput[] = [
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		];
+		const base = resolveItemizedShares(items);
+		const withCharges = resolveItemizedWithCharges(items, []);
+		expect(withCharges.shares).toEqual(base.shares);
+		expect(withCharges.subtotalShares).toEqual(base.shares);
+		expect(withCharges.items).toEqual(base.items);
+		expect(withCharges.charges).toEqual([]);
+		expect(withCharges.amountTotal).toBe(110);
+		// Default arg: omitting `charges` behaves like passing [].
+		expect(resolveItemizedWithCharges(items).shares).toEqual(base.shares);
+	});
+});
+
+describe('resolveItemizedWithCharges — proportional allocation invariants', () => {
+	it('each charge allocation sums EXACTLY to that charge total; final owed sums to amount_total', () => {
+		// Subtotal 10000 split m1:6000 / m2:3000 / m3:1000 (one item, amount split), then
+		// 10% service + 7% VAT (running_total) + a flat 500 discount.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Feast',
+					amount: 10000,
+					splitMode: 'amount',
+					beneficiaries: [
+						{ memberId: 'm1', rawAmount: 6000 },
+						{ memberId: 'm2', rawAmount: 3000 },
+						{ memberId: 'm3', rawAmount: 1000 }
+					]
+				}
+			],
+			[
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 },
+				{ kind: 'discount', mode: 'absolute', value: 500, base: 'running_total', sortOrder: 2 }
+			]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+
+		// Each charge's allocation sums exactly to its signed total.
+		for (const c of result.charges) {
+			expect(sumOwed(c.allocations)).toBe(c.total);
+		}
+		// Final per-member owed sums exactly to amount_total.
+		expect(sumOwed(result.shares)).toBe(result.amountTotal);
+		// And the totals match applyCharges.
+		expect(result.amountTotal).toBe(applyCharges(10000, charges).amountTotal);
+	});
+});
+
+describe('resolveItemizedWithCharges — §7.2.2 worked placements (end-to-end per member)', () => {
+	it('discount BEFORE tax: subtotal 10000 (m1:6000/m2:4000), 10% off → 10% service → 7% VAT', () => {
+		// Charges on the subtotal: discount −1000, service +900, vat +693 → total 10593.
+		// Allocate each in proportion to subtotal share 6000:4000 (= 3:2).
+		//   discount −1000 → m1 −600, m2 −400.
+		//   service  +900  → m1 +540, m2 +360.
+		//   vat      +693  → 6000/10000×693 = 415.8 → 416 (m1); 4000/10000×693 = 277.2 → 277 (m2).
+		//                    (largest remainder: .8 > .2 → extra unit to m1.) sums to 693.
+		// final m1 = 6000 −600 +540 +416 = 6356; m2 = 4000 −400 +360 +277 = 4237. Σ = 10593.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Food',
+					amount: 10000,
+					splitMode: 'amount',
+					beneficiaries: [
+						{ memberId: 'm1', rawAmount: 6000 },
+						{ memberId: 'm2', rawAmount: 4000 }
+					]
+				}
+			],
+			[
+				{ kind: 'discount', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'running_total', sortOrder: 1 },
+				{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 2 }
+			]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		expect(result.amountTotal).toBe(10593);
+		expect(byMember(result.shares)).toEqual({ m1: 6356, m2: 4237 });
+		expect(sumOwed(result.shares)).toBe(10593);
+		// Per-charge allocations explicit (each sums to its total).
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: -600, m2: -400 });
+		expect(byMember(result.charges[1].allocations)).toEqual({ m1: 540, m2: 360 });
+		expect(byMember(result.charges[2].allocations)).toEqual({ m1: 416, m2: 277 });
+	});
+
+	it('discount AFTER tax: subtotal 10000 (m1:6000/m2:4000), 10% service → 7% VAT → flat 1000 coupon', () => {
+		// service +1000, vat +770, discount −1000 (absolute) → total 10770.
+		//   service +1000 → m1 +600, m2 +400.
+		//   vat     +770  → m1 462, m2 308.
+		//   discount −1000 → m1 −600, m2 −400.
+		// final m1 = 6000 +600 +462 −600 = 6462; m2 = 4000 +400 +308 −400 = 4308. Σ = 10770.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Food',
+					amount: 10000,
+					splitMode: 'amount',
+					beneficiaries: [
+						{ memberId: 'm1', rawAmount: 6000 },
+						{ memberId: 'm2', rawAmount: 4000 }
+					]
+				}
+			],
+			[
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 },
+				{ kind: 'discount', mode: 'absolute', value: 1000, base: 'running_total', sortOrder: 2 }
+			]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		expect(result.amountTotal).toBe(10770);
+		expect(byMember(result.shares)).toEqual({ m1: 6462, m2: 4308 });
+		expect(sumOwed(result.shares)).toBe(10770);
+		expect(byMember(result.charges[2].allocations)).toEqual({ m1: -600, m2: -400 });
+	});
+});
+
+describe('resolveItemizedWithCharges — edge cases (§7.2.3 notes)', () => {
+	it('a member with subtotal share 0 owes 0 of every charge and gets 0 discount', () => {
+		// Two items: m1+m2 share item A (subtotal 8000 → 4000/4000), m3 is in NO item, so
+		// m3 must be absent from the result entirely. A 10% service + 10% discount.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Shared',
+					amount: 8000,
+					splitMode: 'equal',
+					beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+				}
+			],
+			[
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'discount', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 1 }
+			]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		// m3 not in any item → not present in subtotal shares or final shares.
+		expect(result.shares.map((s) => s.memberId)).toEqual(['m1', 'm2']);
+		// service +800 → 400/400; discount −800 → −400/−400. Net zero charge effect.
+		expect(byMember(result.shares)).toEqual({ m1: 4000, m2: 4000 });
+		expect(sumOwed(result.shares)).toBe(8000);
+		expect(result.amountTotal).toBe(8000);
+	});
+
+	it('a 0-subtotal-share member explicitly in a share item still owes nothing of charges', () => {
+		// m2 has share weight 0 in the item → subtotal share 0. A 10% service must
+		// allocate entirely to m1 (the only non-zero subtotal share).
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Food',
+					amount: 1000,
+					splitMode: 'share',
+					beneficiaries: [
+						{ memberId: 'm1', shareWeight: 1 },
+						{ memberId: 'm2', shareWeight: 0 }
+					]
+				}
+			],
+			[{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 }]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		// subtotal: m1 1000, m2 0. service +100 → all to m1.
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: 100, m2: 0 });
+		expect(byMember(result.shares)).toEqual({ m1: 1100, m2: 0 });
+		expect(sumOwed(result.shares)).toBe(1100);
+	});
+
+	it('100%-off bill resolves ALL final shares to 0', () => {
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Free meal',
+					amount: 9000,
+					splitMode: 'equal',
+					beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+				}
+			],
+			[{ kind: 'discount', mode: 'percent', value: 10000, base: 'items_subtotal', sortOrder: 0 }]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		expect(result.amountTotal).toBe(0);
+		expect(result.shares.every((s) => s.amountOwed === 0)).toBe(true);
+		expect(sumOwed(result.shares)).toBe(0);
+		// The discount allocation cancels each member's subtotal share exactly.
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: -3000, m2: -3000, m3: -3000 });
+	});
+
+	it('mixes a percent and an absolute charge, both allocated by subtotal share', () => {
+		// subtotal 10000 (m1:7000/m2:3000); 10% VAT (percent) + 300 absolute service.
+		//   vat +1000 → m1 700, m2 300.
+		//   service +300 (absolute, allocated proportionally) → m1 210, m2 90.
+		// total = 11300; m1 = 7000+700+210 = 7910; m2 = 3000+300+90 = 3390. Σ = 11300.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Food',
+					amount: 10000,
+					splitMode: 'amount',
+					beneficiaries: [
+						{ memberId: 'm1', rawAmount: 7000 },
+						{ memberId: 'm2', rawAmount: 3000 }
+					]
+				}
+			],
+			[
+				{ kind: 'vat', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'service', mode: 'absolute', value: 300, base: 'items_subtotal', sortOrder: 1 }
+			]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		expect(result.amountTotal).toBe(11300);
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: 700, m2: 300 });
+		expect(byMember(result.charges[1].allocations)).toEqual({ m1: 210, m2: 90 });
+		expect(byMember(result.shares)).toEqual({ m1: 7910, m2: 3390 });
+		expect(sumOwed(result.shares)).toBe(11300);
+	});
+
+	it('proves the ascending-member_id tie-break in a charge allocation (explicit assignment)', () => {
+		// Equal subtotal shares (m3/m1/m2 each 1000, listed lowest-id-NOT-first), a 1%
+		// service on 3000 → +30 split equally → 10 each, no remainder. Use a charge whose
+		// total forces a single leftover unit: an absolute 1 on equal weights → exactly
+		// one minor unit, which must go to the LOWEST member id (m1), not by position.
+		const { items, charges } = validItemized(
+			[
+				{
+					label: 'Even',
+					amount: 3000,
+					splitMode: 'equal',
+					beneficiaries: [{ memberId: 'm3' }, { memberId: 'm1' }, { memberId: 'm2' }]
+				}
+			],
+			[{ kind: 'service', mode: 'absolute', value: 1, base: 'items_subtotal', sortOrder: 0 }]
+		);
+		const result = resolveItemizedWithCharges(items, charges);
+		// +1 absolute over equal subtotal shares → leftover unit to lowest id m1.
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: 1, m2: 0, m3: 0 });
+		// Subtotal each 1000; only m1 gets the +1.
+		expect(byMember(result.shares)).toEqual({ m1: 1001, m2: 1000, m3: 1000 });
+		expect(sumOwed(result.shares)).toBe(3001);
+	});
+
+	it('resolves a JPY (0-dp) itemized + charges bill, summing exactly to amount_total', () => {
+		// Schema-free direct call (JPY-denominated minor units; resolver is currency-
+		// agnostic — it operates in minor units). subtotal 1000 (m1:600/m2:400) + 8% VAT.
+		const items: ItemInput[] = [
+			{
+				label: 'Ramen set',
+				amount: 1000,
+				splitMode: 'amount',
+				beneficiaries: [
+					{ memberId: 'm1', rawAmount: 600 },
+					{ memberId: 'm2', rawAmount: 400 }
+				]
+			}
+		];
+		const charges: ChargeInput[] = [
+			{ kind: 'vat', mode: 'percent', value: 800, base: 'items_subtotal', sortOrder: 0 }
+		];
+		const result = resolveItemizedWithCharges(items, charges);
+		// vat +80 → m1 48, m2 32. total 1080; m1 648, m2 432.
+		expect(result.amountTotal).toBe(1080);
+		expect(byMember(result.shares)).toEqual({ m1: 648, m2: 432 });
+		expect(sumOwed(result.shares)).toBe(1080);
 	});
 });

@@ -466,6 +466,55 @@ describe('applyCharges — §7.2.2 worked examples (integer round-half-up)', () 
 	});
 });
 
+describe('applyCharges — per-charge signed effects (task 4.9, additive return field)', () => {
+	const SUBTOTAL = 10000; // ฿100.00
+
+	it('returns each charge SIGNED effect in sort_order for discount-BEFORE-tax', () => {
+		// discount −1000, service +900, vat +693 (= the worked example above). The
+		// per-charge effects must match those running-total deltas, in application order.
+		const charges: ChargeInput[] = [
+			{ kind: 'discount', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+			{ kind: 'service', mode: 'percent', value: 1000, base: 'running_total', sortOrder: 1 },
+			{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 2 }
+		];
+		const { amountTotal, perCharge } = applyCharges(SUBTOTAL, charges);
+		expect(perCharge.map((p) => p.signedEffect)).toEqual([-1000, 900, 693]);
+		// Σ signed effects + subtotal == amountTotal (the additive-field invariant).
+		expect(perCharge.reduce((acc, p) => acc + p.signedEffect, SUBTOTAL)).toBe(amountTotal);
+		expect(amountTotal).toBe(10593);
+		// Each effect echoes its originating charge (for persistence/labelling).
+		expect(perCharge.map((p) => p.charge.kind)).toEqual(['discount', 'service', 'vat']);
+	});
+
+	it('returns each charge SIGNED effect in sort_order for discount-AFTER-tax (absolute coupon)', () => {
+		// service +1000, vat +770, discount −1000 (absolute, on running_total).
+		const charges: ChargeInput[] = [
+			{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+			{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 },
+			{ kind: 'discount', mode: 'absolute', value: 1000, base: 'running_total', sortOrder: 2 }
+		];
+		const { amountTotal, perCharge } = applyCharges(SUBTOTAL, charges);
+		expect(perCharge.map((p) => p.signedEffect)).toEqual([1000, 770, -1000]);
+		expect(perCharge.reduce((acc, p) => acc + p.signedEffect, SUBTOTAL)).toBe(amountTotal);
+		expect(amountTotal).toBe(10770);
+	});
+
+	it('orders perCharge by sort_order regardless of array order', () => {
+		const charges: ChargeInput[] = [
+			{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 },
+			{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 }
+		];
+		const { perCharge } = applyCharges(SUBTOTAL, charges);
+		expect(perCharge.map((p) => p.charge.sortOrder)).toEqual([0, 1]);
+	});
+
+	it('empty charges → empty perCharge and amountTotal == subtotal', () => {
+		const { amountTotal, perCharge } = applyCharges(SUBTOTAL, []);
+		expect(perCharge).toEqual([]);
+		expect(amountTotal).toBe(SUBTOTAL);
+	});
+});
+
 describe('convertToSettlement — §7.6 conversion (integer round-half-up)', () => {
 	it('same exponent (CNY→THB, rate 4.85): ¥200.00 → ฿970.00', () => {
 		expect(convertToSettlement(20000, 'CNY', 'THB', '4.85')).toBe(97000);

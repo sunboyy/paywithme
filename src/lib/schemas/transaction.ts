@@ -205,15 +205,45 @@ function divRoundHalfUp(numerator: bigint, denominator: bigint): number {
 }
 
 /**
+ * One charge's RESOLVED effect after the §7.2.2 fold — the signed minor-unit
+ * amount it contributed to the running total, in the order it was applied. This
+ * is what the resolver (task 4.9) ALLOCATES across members in proportion to their
+ * subtotal share. `applyCharges` returns one of these per input charge, in
+ * `sort_order` (the application order), so the resolver and the breakdown UI read
+ * the exact per-charge totals the fold produced.
+ */
+export interface ResolvedChargeEffect {
+	/** The originating charge (echoed so the caller can persist / label it). */
+	readonly charge: ChargeInput;
+	/**
+	 * This charge's SIGNED effect on the running total, in transaction-currency
+	 * minor units: `+magnitude` for additive kinds (service/vat/tip), `−magnitude`
+	 * for a discount. Summing every `signedEffect` and adding `items_subtotal`
+	 * yields `amountTotal`.
+	 */
+	readonly signedEffect: number;
+}
+
+/**
  * Result of folding the ordered charges over an items subtotal (PLAN §7.2.2):
- * the computed `amount_total` and whether any single discount's MAGNITUDE
- * exceeded the base it applied to (a §7.4 violation surfaced to the caller).
+ * the computed `amount_total`, whether any single discount's MAGNITUDE exceeded
+ * the base it applied to (a §7.4 violation surfaced to the caller), and the
+ * per-charge resolved signed effects (in application order) — the latter added
+ * for task 4.9's proportional allocation. The first two fields are unchanged, so
+ * existing callers that destructure `{ amountTotal, discountExceedsBase }` keep
+ * working (the new field is purely additive).
  */
 interface ChargeFoldResult {
 	/** `items_subtotal + Σ signed charge effects`, in transaction-currency minor units. */
 	readonly amountTotal: number;
 	/** A discount magnitude exceeded the base it was computed against (§7.4). */
 	readonly discountExceedsBase: boolean;
+	/**
+	 * Each charge's signed effect, in `sort_order` (application order). `Σ
+	 * perCharge.signedEffect + items_subtotal === amountTotal`. Task 4.9 allocates
+	 * each `signedEffect` across members by subtotal share.
+	 */
+	readonly perCharge: ResolvedChargeEffect[];
 }
 
 /**
@@ -228,9 +258,11 @@ interface ChargeFoldResult {
  *     to the running total.
  *
  * Also flags whether any discount's magnitude exceeded the base it was computed
- * against (PLAN §7.4: "total discount must not exceed its base"). Pure; shared by
- * the itemized refinement so the validation math is the exact production fold a
- * later resolver (4.5) re-uses.
+ * against (PLAN §7.4: "total discount must not exceed its base"), and returns the
+ * per-charge SIGNED effects in application order ({@link ResolvedChargeEffect}) so
+ * the itemized resolver (task 4.9) can allocate each charge across members by
+ * subtotal share. Pure; shared by the itemized refinement so the validation math
+ * is the exact production fold the resolver re-uses.
  */
 export function applyCharges(
 	itemsSubtotal: number,
@@ -238,6 +270,7 @@ export function applyCharges(
 ): ChargeFoldResult {
 	let running = itemsSubtotal;
 	let discountExceedsBase = false;
+	const perCharge: ResolvedChargeEffect[] = [];
 
 	const ordered = [...charges].sort((a, b) => a.sortOrder - b.sortOrder);
 	for (const charge of ordered) {
@@ -249,18 +282,18 @@ export function applyCharges(
 					divRoundHalfUp(BigInt(base) * BigInt(charge.value), BigInt(MAX_PERCENT_BPS))
 				: charge.value;
 
-		if (!chargeAdds(charge.kind)) {
+		// Sign from kind (§7.2.2): service/vat/tip add, discount subtracts. The
+		// SIGNED effect is recorded per charge so task 4.9 can allocate it.
+		const signedEffect = chargeAdds(charge.kind) ? magnitude : -magnitude;
+		if (!chargeAdds(charge.kind) && magnitude > base) {
 			// Discount: must not exceed the base it applies to (§7.4).
-			if (magnitude > base) {
-				discountExceedsBase = true;
-			}
-			running -= magnitude;
-		} else {
-			running += magnitude;
+			discountExceedsBase = true;
 		}
+		running += signedEffect;
+		perCharge.push({ charge, signedEffect });
 	}
 
-	return { amountTotal: running, discountExceedsBase };
+	return { amountTotal: running, discountExceedsBase, perCharge };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -16,9 +16,9 @@
 //   - each payer's `amount_paid_settlement == amount_paid`,
 //   - each share's settlement `amount_owed` == the txn-currency resolved owed.
 // Task 4.8 ADDS `itemized` split resolution + persistence (transaction_items /
-// transaction_item_shares + aggregated transaction_shares) on top of this.
+// transaction_item_shares + aggregated transaction_shares) on top of this; task
+// 4.9 ADDS charges/discounts (proportional allocation + transaction_charges rows).
 // Deliberately NOT here (later tasks own them, with clean seams left):
-//   - charges / discounts                                          → task 4.9.
 //   - multi-currency / manual FX (currency picker, rate entry)     → task 4.10.
 //   - `updateTransaction` / soft-delete / restore                  → task 4.11.
 //
@@ -50,7 +50,8 @@ import {
 	transactionPayers,
 	transactionShares,
 	transactionItems,
-	transactionItemShares
+	transactionItemShares,
+	transactionCharges
 } from './db/transactions-schema';
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
@@ -58,7 +59,7 @@ import { writeAuditLog } from './audit';
 import { buildTransactionSchema, type TransactionInput } from '$lib/schemas/transaction';
 import {
 	resolveShares,
-	resolveItemizedShares,
+	resolveItemizedWithCharges,
 	type ResolvedShare
 } from '$lib/transactions/resolve';
 import { getCategory } from '$lib/categories';
@@ -159,9 +160,9 @@ export async function createTransaction({
 		}
 		const data = parsed.data;
 
-		// 4.7 is single-currency: itemized/charges/FX are later tasks. Guard the seam
-		// so a payload that smuggles them in is rejected here rather than silently
-		// dropped (4.8/4.9/4.10 will replace these guards with real handling).
+		// Single-currency only: foreign-currency FX is task 4.10. Itemized splits +
+		// charges/discounts are now supported (tasks 4.8/4.9); this guard now only
+		// rejects a foreign `currency` so a smuggled FX payload fails here.
 		assertSingleCurrencyScope(data, currency);
 
 		// Category must exist in the seeded set AND match the type (the schema already
@@ -170,10 +171,12 @@ export async function createTransaction({
 
 		// RE-RESOLVE per-member owed amounts server-side (never trust the client). For
 		// currency==settlement the txn-currency owed IS the settlement owed. Itemized
-		// resolves each item (rounding within the item) and aggregates per member; the
-		// per-item resolutions are persisted too (transaction_item_shares).
+		// resolves each item (rounding within the item), aggregates per member, then
+		// ALLOCATES each charge/discount across members by subtotal share (§7.2.3); the
+		// per-item resolutions AND the charge rows are persisted too. The aggregated
+		// `resolved` shares are the FINAL owed (subtotal ± allocated charges).
 		const isItemized = data.splitMode === 'itemized';
-		const itemized = isItemized ? resolveItemizedShares(data.items) : null;
+		const itemized = isItemized ? resolveItemizedWithCharges(data.items, data.charges) : null;
 		const resolved: ResolvedShare[] = isItemized
 			? itemized!.shares
 			: resolveShares({
@@ -243,8 +246,24 @@ export async function createTransaction({
 				}
 			}
 
-			// 3b) Aggregated per-member transaction_share rows. No top-level inputs for an
-			//     itemized split (per-item inputs live on transaction_item_shares), so the
+			// 3b) transaction_charges rows (§7.2.2): the raw charge inputs
+			//     (kind/mode/value/base/sort_order), preserved so 4.11 edit can re-read
+			//     them. The signed effect + per-member allocation are DERIVED on read via
+			//     the resolver, so only the inputs are stored. Through the same `tx`.
+			for (const charge of data.charges) {
+				await tx.insert(transactionCharges).values({
+					transactionId,
+					kind: charge.kind,
+					mode: charge.mode,
+					value: charge.value,
+					base: charge.base,
+					sortOrder: charge.sortOrder
+				});
+			}
+
+			// 3c) Aggregated per-member transaction_share rows — the FINAL owed (subtotal
+			//     ± allocated charges, §7.2.3). No top-level inputs for an itemized split
+			//     (per-item inputs live on transaction_item_shares), so the
 			//     share_weight / raw_amount are null here.
 			for (const share of resolved) {
 				await tx.insert(transactionShares).values({
@@ -316,18 +335,15 @@ async function loadSettlementCurrency(
 
 /**
  * Guard the supported scope. As of task 4.8 itemized splits + (non-empty) `items`
- * are ALLOWED (resolved + persisted below); `charges` and foreign currency stay
- * REJECTED here (tasks 4.9 / 4.10). The shared schema validates the full payload,
- * so a hand-crafted payload could smuggle a deferred feature past validation;
- * reject those HERE with a clear seam rather than silently persisting them.
+ * are ALLOWED, and as of task 4.9 `charges`/discounts are too (both resolved +
+ * persisted below). Only a FOREIGN currency stays REJECTED here (task 4.10). The
+ * shared schema validates the full payload, so a hand-crafted payload could smuggle
+ * a deferred feature past validation; reject those HERE with a clear seam rather
+ * than silently persisting them.
  */
 function assertSingleCurrencyScope(data: TransactionInput, settlementCurrency: CurrencyCode): void {
 	const issues: z.core.$ZodIssue[] = [];
-	// Itemized split + items are now supported (task 4.8) — no longer rejected.
-	if (data.charges.length > 0) {
-		// Charges / discounts are task 4.9.
-		issues.push(makeIssue(['charges'], 'Charges are not supported yet'));
-	}
+	// Itemized split + items (4.8) and charges/discounts (4.9) are now supported.
 	if (data.currency !== settlementCurrency) {
 		// Multi-currency / manual FX is task 4.10.
 		issues.push(makeIssue(['currency'], 'Foreign-currency transactions are not supported yet'));

@@ -6,15 +6,16 @@
 	// `buildTransactionSchema`) and the submit target; this component renders the
 	// fields and drives the split-mode UI.
 	//
-	// SCOPE (4.7 + 4.8): spending & transfer; split_mode ∈ {equal, amount, share,
+	// SCOPE (4.7–4.9): spending & transfer; split_mode ∈ {equal, amount, share,
 	// itemized}; a type toggle (Tabs) + a category picker (Select). Itemized (4.8)
-	// adds a repeatable item-row UI (Spending only — §7.2.3). Charges (4.9) and the
-	// FX / currency picker (4.10) are LATER tasks — this form leaves clean seams
-	// (it submits empty charges, exchangeRate '1', amountTotalSettlement ==
-	// amountTotal in the group's single currency).
+	// adds a repeatable item-row UI (Spending only — §7.2.3). Charges (4.9) add a
+	// repeatable charge-row section + a live computed breakdown (items subtotal →
+	// ± each charge → total, plus each member's resolved final share). The FX /
+	// currency picker (4.10) is a later task — this form leaves a clean seam
+	// (exchangeRate '1', amountTotalSettlement == amountTotal in the single currency).
 
 	import type { SuperForm } from 'sveltekit-superforms';
-	import type { TransactionInput } from '$lib/schemas/transaction';
+	import type { TransactionInput, ChargeInput } from '$lib/schemas/transaction';
 
 	/** A selectable (active) member for the payer / beneficiary pickers. */
 	export interface FormMember {
@@ -50,13 +51,14 @@
 
 <script lang="ts">
 	import { formatAmount, parseAmount, type CurrencyCode } from '$lib/money';
+	import { applyCharges } from '$lib/schemas/transaction';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Select from '$lib/components/ui/select';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
-	import { resolveItemizedShares } from '$lib/transactions/resolve';
+	import { resolveItemizedWithCharges } from '$lib/transactions/resolve';
 
 	let {
 		form,
@@ -113,11 +115,11 @@
 
 	// Keep the schema's `amountTotal` + single-currency `amountTotalSettlement` in
 	// sync with the total. For non-itemized that's the typed total; for ITEMIZED the
-	// total is DERIVED from the items subtotal (§7.2.1: amount_total == items_subtotal,
-	// no charges in 4.8) — the user never types it. A single payer (the default)
-	// mirrors the total into its `amountPaid` so `Σ amountPaid == amountTotal` holds.
+	// total is DERIVED (§7.2.2: amount_total == items_subtotal + Σ signed charges) —
+	// the user never types it. A single payer (the default) mirrors the total into
+	// its `amountPaid` so `Σ amountPaid == amountTotal` holds.
 	$effect(() => {
-		const total = $formData.splitMode === 'itemized' ? itemsSubtotal : (toMinor(totalInput) ?? 0);
+		const total = $formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
 		$formData.amountTotal = total;
 		// Single-currency (4.7): settlement total == txn total, rate 1.
 		$formData.amountTotalSettlement = total;
@@ -168,6 +170,10 @@
 			}
 			return;
 		}
+		// Charges apply to itemized only (§7.2.3); clear them when leaving itemized so
+		// the non-itemized payload stays valid (charges would otherwise be ignored).
+		$formData.charges = [];
+		chargeValueInputs = [];
 		$formData.beneficiaries = $formData.beneficiaries.map((b) => {
 			if (mode === 'share') return { memberId: b.memberId, shareWeight: b.shareWeight ?? 1 };
 			if (mode === 'amount')
@@ -254,8 +260,120 @@
 	// keyed `"<itemIndex>:<memberId>"`.
 	let itemMemberAmountInputs = $state<Record<string, string>>({});
 
-	/** The items subtotal (Σ item.amount), the itemized `amount_total` (no charges, 4.8). */
+	/** The items subtotal (Σ item.amount). */
 	const itemsSubtotal = $derived($formData.items.reduce((acc, it) => acc + it.amount, 0));
+
+	// ── Charges / discounts (PLAN §7.2.2 — task 4.9, itemized Spending only) ──────
+	// Each charge row: kind (service/vat/discount), mode (percent/absolute), value
+	// (percent entered as % → basis points; absolute parsed via lib/money → minor
+	// units), base (items_subtotal/running_total), and sort_order (application order).
+	// The display strings are kept index-aligned so editing them doesn't clobber the
+	// parsed value mid-keystroke.
+	const CHARGE_KINDS = [
+		{ value: 'service', label: 'Service charge' },
+		{ value: 'vat', label: 'VAT / Tax' },
+		{ value: 'discount', label: 'Discount' }
+	] as const;
+	const CHARGE_MODES = [
+		{ value: 'percent', label: 'Percent (%)' },
+		{ value: 'absolute', label: 'Fixed amount' }
+	] as const;
+	const CHARGE_BASES = [
+		{ value: 'items_subtotal', label: 'Items subtotal' },
+		{ value: 'running_total', label: 'Running total' }
+	] as const;
+
+	// Per-charge display strings, index-aligned to `$formData.charges`. For a percent
+	// charge this is the % string (e.g. "10" for 1000 bps); for absolute it is the
+	// major-unit string (parsed via lib/money). Kept separate from the parsed value.
+	let chargeValueInputs = $state<string[]>(
+		$formData.charges.map((c) =>
+			c.mode === 'percent'
+				? c.value > 0
+					? String(c.value / 100)
+					: ''
+				: c.value > 0
+					? formatAmount(c.value, currencyCode, { symbol: false })
+					: ''
+		)
+	);
+
+	/** The itemized total = items subtotal + Σ signed charges (§7.2.2). Best-effort. */
+	const itemizedTotal = $derived.by(() => {
+		try {
+			return applyCharges(itemsSubtotal, $formData.charges).amountTotal;
+		} catch {
+			return itemsSubtotal;
+		}
+	});
+
+	/** Parse one charge's display string → its stored value (bps for percent, minor for absolute). */
+	function parseChargeValue(mode: ChargeInput['mode'], raw: string): number {
+		const trimmed = raw.trim();
+		if (trimmed === '') return 0;
+		if (mode === 'percent') {
+			// Percent entered as a % number → basis points (10% → 1000). Round to the
+			// nearest integer bps; clamp to the schema's 0–10000 range.
+			const pct = Number(trimmed);
+			if (!Number.isFinite(pct) || pct < 0) return 0;
+			return Math.min(10000, Math.round(pct * 100));
+		}
+		return toMinor(trimmed) ?? 0;
+	}
+
+	/** Append a fresh charge (10% VAT default), next sort_order. */
+	function addCharge() {
+		const sortOrder = $formData.charges.length;
+		$formData.charges = [
+			...$formData.charges,
+			{ kind: 'service', mode: 'percent', value: 0, base: 'items_subtotal', sortOrder }
+		];
+		chargeValueInputs = [...chargeValueInputs, ''];
+	}
+
+	/** Remove the charge at `index`, re-densifying sort_order to keep it contiguous. */
+	function removeCharge(index: number) {
+		$formData.charges = $formData.charges
+			.filter((_, i) => i !== index)
+			.map((c, i) => ({ ...c, sortOrder: i }));
+		chargeValueInputs = chargeValueInputs.filter((_, i) => i !== index);
+	}
+
+	/** Patch one charge in place (immutably). */
+	function patchCharge(index: number, patch: Partial<ChargeInput>) {
+		$formData.charges = $formData.charges.map((c, i) => (i === index ? { ...c, ...patch } : c));
+	}
+
+	function setChargeKind(index: number, kind: ChargeInput['kind']) {
+		patchCharge(index, { kind });
+	}
+
+	function setChargeMode(index: number, mode: ChargeInput['mode']) {
+		// Re-parse the existing display string under the new mode so the stored value
+		// stays consistent (a "10" means 1000 bps as percent, ฿0.10 as absolute).
+		patchCharge(index, { mode, value: parseChargeValue(mode, chargeValueInputs[index] ?? '') });
+	}
+
+	function setChargeBase(index: number, base: ChargeInput['base']) {
+		patchCharge(index, { base });
+	}
+
+	function setChargeValue(index: number, raw: string) {
+		chargeValueInputs[index] = raw;
+		patchCharge(index, { value: parseChargeValue($formData.charges[index].mode, raw) });
+	}
+
+	function chargeKindLabel(kind: string): string {
+		return CHARGE_KINDS.find((k) => k.value === kind)?.label ?? kind;
+	}
+
+	function chargeModeLabel(mode: string): string {
+		return CHARGE_MODES.find((m) => m.value === mode)?.label ?? mode;
+	}
+
+	function chargeBaseLabel(base: string): string {
+		return CHARGE_BASES.find((b) => b.value === base)?.label ?? base;
+	}
 
 	/** Append a fresh empty item (label '', amount 0, equal split, no beneficiaries). */
 	function addItem() {
@@ -353,14 +471,16 @@
 		);
 	}
 
-	// Optional live per-member breakdown for the itemized split (the resolver is
-	// client-importable). Best-effort: only computed when every item is currently
-	// valid (amount>0, ≥1 beneficiary, its own split adds up), else null (the full
-	// breakdown / charges UI is task 4.9).
+	// Live computed breakdown for the itemized split + charges (§7.2.2 / §7.2.3 / §10):
+	// items subtotal → (in sort order) ± each resolved charge → total, PLUS each
+	// member's resolved FINAL share — all client-side via the client-importable
+	// resolver so the user sees who owes what BEFORE saving. Best-effort: only
+	// computed when every item is currently valid (amount>0, ≥1 beneficiary, its own
+	// split adds up), else null.
 	const itemizedBreakdown = $derived.by(() => {
 		if ($formData.splitMode !== 'itemized' || $formData.items.length === 0) return null;
 		try {
-			return resolveItemizedShares($formData.items).shares;
+			return resolveItemizedWithCharges($formData.items, $formData.charges);
 		} catch {
 			return null;
 		}
@@ -457,8 +577,8 @@
 		<Label for="amountTotal">Amount</Label>
 		{#if $formData.splitMode === 'itemized'}
 			<div class="flex items-center justify-between gap-2">
-				<span class="text-muted-foreground text-sm">Items subtotal</span>
-				<span class="font-medium">{formatAmount(itemsSubtotal, currencyCode)}</span>
+				<span class="text-muted-foreground text-sm">Total (items + charges)</span>
+				<span class="font-medium">{formatAmount(itemizedTotal, currencyCode)}</span>
 			</div>
 		{:else}
 			<div class="flex items-center gap-2">
@@ -680,21 +800,149 @@
 			{#if $errors.items?._errors}
 				<p class="text-destructive text-sm">{$errors.items._errors}</p>
 			{/if}
+		</fieldset>
 
-			<!-- Optional live per-member breakdown (the resolver is client-importable).
-			     The full charges breakdown is task 4.9. -->
-			{#if itemizedBreakdown && itemizedBreakdown.length > 0}
-				<div class="space-y-1 border-t pt-3 text-sm">
-					<p class="font-medium">Each person owes</p>
-					{#each itemizedBreakdown as share (share.memberId)}
-						<div class="flex items-center justify-between">
-							<span>{memberName(share.memberId)}</span>
-							<span>{formatAmount(share.amountOwed, currencyCode)}</span>
+		<!-- Charges & discounts (PLAN §7.2.2, task 4.9): a repeatable list of charge
+		     rows. Each charge has a kind (service/VAT/discount), a mode (percent /
+		     fixed), a value (% → basis points, or a fixed amount → minor units), a base
+		     (items subtotal / running total), applied in sort order. -->
+		<fieldset class="space-y-4">
+			<legend class="text-sm font-medium">Charges &amp; discounts</legend>
+			{#each $formData.charges as charge, index (index)}
+				<div class="space-y-3 rounded-md border p-3">
+					<div class="flex items-end gap-2">
+						<div class="flex-1 space-y-1">
+							<Label>Type</Label>
+							<Select.Root
+								type="single"
+								value={charge.kind}
+								onValueChange={(v) => setChargeKind(index, v as ChargeInput['kind'])}
+							>
+								<Select.Trigger class="w-full">{chargeKindLabel(charge.kind)}</Select.Trigger>
+								<Select.Content>
+									{#each CHARGE_KINDS as k (k.value)}
+										<Select.Item value={k.value} label={k.label}>{k.label}</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
 						</div>
-					{/each}
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							onclick={() => removeCharge(index)}
+							aria-label="Remove charge"
+						>
+							Remove
+						</Button>
+					</div>
+
+					<div class="flex items-end gap-2">
+						<div class="w-36 space-y-1">
+							<Label>Mode</Label>
+							<Select.Root
+								type="single"
+								value={charge.mode}
+								onValueChange={(v) => setChargeMode(index, v as ChargeInput['mode'])}
+							>
+								<Select.Trigger class="w-full">{chargeModeLabel(charge.mode)}</Select.Trigger>
+								<Select.Content>
+									{#each CHARGE_MODES as m (m.value)}
+										<Select.Item value={m.value} label={m.label}>{m.label}</Select.Item>
+									{/each}
+								</Select.Content>
+							</Select.Root>
+						</div>
+						<div class="w-28 space-y-1">
+							<Label for="charge-{index}-value">Value</Label>
+							<div class="flex items-center gap-1">
+								<span class="text-muted-foreground text-xs">
+									{charge.mode === 'percent' ? '%' : currency.symbol}
+								</span>
+								<Input
+									id="charge-{index}-value"
+									inputmode="decimal"
+									placeholder={charge.mode === 'percent' ? '10' : '0.00'}
+									value={chargeValueInputs[index] ?? ''}
+									oninput={(e) => setChargeValue(index, e.currentTarget.value)}
+								/>
+							</div>
+						</div>
+					</div>
+
+					<div class="space-y-1">
+						<Label>Applies to</Label>
+						<Select.Root
+							type="single"
+							value={charge.base}
+							onValueChange={(v) => setChargeBase(index, v as ChargeInput['base'])}
+						>
+							<Select.Trigger class="w-full">{chargeBaseLabel(charge.base)}</Select.Trigger>
+							<Select.Content>
+								{#each CHARGE_BASES as b (b.value)}
+									<Select.Item value={b.value} label={b.label}>{b.label}</Select.Item>
+								{/each}
+							</Select.Content>
+						</Select.Root>
+					</div>
 				</div>
+			{/each}
+
+			<Button type="button" variant="outline" size="sm" onclick={addCharge}>
+				Add charge / discount
+			</Button>
+
+			{#if $errors.charges?._errors}
+				<p class="text-destructive text-sm">{$errors.charges._errors}</p>
+			{/if}
+			{#if $errors.amountTotal}
+				<p class="text-destructive text-sm">{$errors.amountTotal}</p>
 			{/if}
 		</fieldset>
+
+		<!-- Live computed breakdown (§7.2.2 / §7.2.3 / §10): items subtotal → ± each
+		     charge in sort order → total, PLUS each member's resolved final share. The
+		     resolver is client-importable, so this previews who owes what before save. -->
+		{#if itemizedBreakdown}
+			<div class="space-y-3 rounded-md border p-3 text-sm">
+				<div class="space-y-1">
+					<p class="font-medium">Breakdown</p>
+					<div class="flex items-center justify-between">
+						<span class="text-muted-foreground">Items subtotal</span>
+						<span>{formatAmount(itemsSubtotal, currencyCode)}</span>
+					</div>
+					{#each itemizedBreakdown.charges as resolved (resolved.charge.sortOrder)}
+						<div class="flex items-center justify-between">
+							<span class="text-muted-foreground">
+								{chargeKindLabel(resolved.charge.kind)}
+							</span>
+							<span>
+								{resolved.total < 0 ? '−' : '+'}{formatAmount(
+									Math.abs(resolved.total),
+									currencyCode
+								)}
+							</span>
+						</div>
+					{/each}
+					<div class="flex items-center justify-between border-t pt-1 font-medium">
+						<span>Total</span>
+						<span>{formatAmount(itemizedBreakdown.amountTotal, currencyCode)}</span>
+					</div>
+				</div>
+
+				{#if itemizedBreakdown.shares.length > 0}
+					<div class="space-y-1 border-t pt-2">
+						<p class="font-medium">Each person owes</p>
+						{#each itemizedBreakdown.shares as share (share.memberId)}
+							<div class="flex items-center justify-between">
+								<span>{memberName(share.memberId)}</span>
+								<span>{formatAmount(share.amountOwed, currencyCode)}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
 	{/if}
 
 	<!-- Serialize the (array) payers + beneficiaries for the no-JS POST. superForm's
@@ -732,6 +980,15 @@
 				/>
 			{/if}
 		{/each}
+	{/each}
+	<!-- Charges (no-JS fallback). superForm `enhance` re-serializes from `$formData`
+	     with JS; these carry the charge rows when JS is off (PLAN §7.2.2). -->
+	{#each $formData.charges as charge, i (i)}
+		<input type="hidden" name="charges[{i}].kind" value={charge.kind} />
+		<input type="hidden" name="charges[{i}].mode" value={charge.mode} />
+		<input type="hidden" name="charges[{i}].value" value={charge.value} />
+		<input type="hidden" name="charges[{i}].base" value={charge.base} />
+		<input type="hidden" name="charges[{i}].sortOrder" value={charge.sortOrder} />
 	{/each}
 
 	<Button type="submit" class="w-full" disabled={$submitting}>

@@ -22,8 +22,11 @@
 // (task 4.8 — `resolveItemizedShares`) in the TRANSACTION CURRENCY only. Itemized
 // resolves EACH item via the SAME per-line equal/amount/share core, rounding
 // WITHIN each item, then aggregates per member across items.
+// AND `itemized` + charges/discounts (task 4.9 — `resolveItemizedWithCharges`):
+// per-member subtotal shares (from the item resolution) plus each charge's signed
+// total (from `applyCharges`) ALLOCATED across members in proportion to their
+// subtotal share via `distribute`, folded into the final per-member owed.
 // Deliberately NOT here:
-//   - charges / discounts allocation                            → task 4.9.
 //   - FX / settlement conversion of the resolved owed amounts   → task 4.10.
 // Input is assumed schema-valid (validation is task 4.4); we assert a couple of
 // invariants defensively but never re-validate.
@@ -34,7 +37,12 @@
 // tie-break and sums EXACTLY to the total — this module never re-implements it.
 
 import { distribute } from '$lib/money';
-import type { TransactionInput, ItemInput } from '$lib/schemas/transaction';
+import {
+	applyCharges,
+	type TransactionInput,
+	type ItemInput,
+	type ChargeInput
+} from '$lib/schemas/transaction';
 
 /**
  * One beneficiary's resolved share (PLAN §7.2 `transaction_share`). `amountOwed`
@@ -222,6 +230,121 @@ export function resolveItemizedShares(items: readonly ItemInput[]): ResolvedItem
 	}));
 
 	return { items: resolvedItems, shares };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Itemized + charges/discounts resolution (PLAN §7.2.2 / §7.2.3 — task 4.9).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One charge's RESOLVED total + its per-member allocation (PLAN §7.2.3 step 3).
+ * The `total` is the charge's signed minor-unit effect from {@link applyCharges}
+ * (negative for a discount); `allocations` are that total split across members in
+ * proportion to their subtotal share (largest-remainder), summing **exactly** to
+ * `total`. Returned for persistence (the `transaction_charges` rows carry the raw
+ * inputs) and the live breakdown UI.
+ */
+export interface ResolvedCharge {
+	/** The originating charge input (kind/mode/value/base/sort_order), for persistence. */
+	readonly charge: ChargeInput;
+	/** This charge's SIGNED total, txn-currency minor units (negative for a discount). */
+	readonly total: number;
+	/** Per-member allocation of `total` (sums exactly to `total`), in member order. */
+	readonly allocations: ResolvedShare[];
+}
+
+/**
+ * The full result of {@link resolveItemizedWithCharges} (PLAN §7.2.3): the
+ * per-item resolutions (unchanged from {@link resolveItemizedShares}, for the
+ * `transaction_item_share` rows), the per-member SUBTOTAL shares (before charges),
+ * the per-charge resolved totals + allocations (for the `transaction_charges` rows
+ * and the breakdown), the FINAL per-member owed (subtotal ± allocated charges —
+ * the aggregated `transaction_share` rows summing **exactly** to `amount_total`),
+ * and the scalar `amount_total`.
+ */
+export interface ResolvedItemizedWithCharges {
+	/** Per-item resolved shares, one entry per input item, in input order. */
+	readonly items: ResolvedItem[];
+	/** Per-member SUBTOTAL share (before any charge), in first-appearance order. */
+	readonly subtotalShares: ResolvedShare[];
+	/** Per-charge resolved total + allocation, in `sort_order` (application order). */
+	readonly charges: ResolvedCharge[];
+	/**
+	 * Per-member FINAL owed = subtotal share + Σ allocated charges − Σ allocated
+	 * discounts, in the same order as `subtotalShares`. Sums **exactly** to
+	 * `amountTotal` (the aggregated `transaction_share` source of truth, §8).
+	 */
+	readonly shares: ResolvedShare[];
+	/** `items_subtotal + Σ signed charge effects` (§7.2.2), txn-currency minor units. */
+	readonly amountTotal: number;
+}
+
+/**
+ * Resolve an ITEMIZED spending WITH charges/discounts (PLAN §7.2.2 / §7.2.3 — the
+ * full itemized path). Builds on {@link resolveItemizedShares}:
+ *
+ *   1. Resolve each item → per-member SUBTOTAL share (the existing item resolution).
+ *   2. Fold the charges via {@link applyCharges} → each charge's SIGNED total (in
+ *      `sort_order`; a discount is negative) and `amount_total`.
+ *   3. ALLOCATE each charge's total across members **in proportion to their subtotal
+ *      share** via `distribute` (largest-remainder + ascending-`member_id`), so each
+ *      charge's allocation sums **exactly** to that charge's total. A member with
+ *      subtotal share 0 carries weight 0 → owes no charge and gets no discount.
+ *   4. FINAL per-member owed = subtotal share + Σ allocated charges (discounts
+ *      negative). These sum **exactly** to `amount_total`.
+ *
+ * When `charges` is empty this equals {@link resolveItemizedShares} exactly (the
+ * final shares ARE the subtotal shares; `amount_total === items_subtotal`). A
+ * 100%-off bill drives every final share to 0.
+ *
+ * Pure + client-importable (NOT `$lib/server`) — the form's live breakdown calls it.
+ *
+ * @throws if `items` is empty (via {@link resolveItemizedShares}).
+ */
+export function resolveItemizedWithCharges(
+	items: readonly ItemInput[],
+	charges: readonly ChargeInput[] = []
+): ResolvedItemizedWithCharges {
+	// 1) Per-item resolution + per-member subtotal shares (the 4.8 behaviour).
+	const itemized = resolveItemizedShares(items);
+	const subtotalShares = itemized.shares;
+	const itemsSubtotal = subtotalShares.reduce((acc, s) => acc + s.amountOwed, 0);
+
+	// 2) Fold the charges → per-charge signed totals (in application order) + total.
+	const { amountTotal, perCharge } = applyCharges(itemsSubtotal, charges);
+
+	// The member set + order for every allocation is the subtotal-share order, so the
+	// final shares line up 1:1 with the subtotal shares. Each member's running owed
+	// starts at its subtotal share; allocated charges fold in below.
+	const finalOwed = new Map<string, number>(subtotalShares.map((s) => [s.memberId, s.amountOwed]));
+
+	// 3) Allocate each charge's signed total in proportion to subtotal share. Weight
+	//    is the member's subtotal share, so a 0-share member is excluded (weight 0 →
+	//    `distribute` gives it 0). `distribute` handles negative totals (discounts)
+	//    with the same largest-remainder + ascending-`member_id` tie-break.
+	const resolvedCharges: ResolvedCharge[] = perCharge.map(({ charge, signedEffect }) => {
+		const allocated = distribute(
+			signedEffect,
+			subtotalShares.map((s) => ({ memberId: s.memberId, weight: s.amountOwed }))
+		);
+		const allocations: ResolvedShare[] = allocated.map((a) => ({
+			memberId: String(a.memberId),
+			amountOwed: a.amount
+		}));
+		// 4) Fold each member's allocated effect into its running owed.
+		for (const a of allocations) {
+			finalOwed.set(a.memberId, (finalOwed.get(a.memberId) ?? 0) + a.amountOwed);
+		}
+		return { charge, total: signedEffect, allocations };
+	});
+
+	// Final shares in subtotal-share order (so the aggregate sums to amount_total).
+	const shares: ResolvedShare[] = subtotalShares.map((s) => ({
+		memberId: s.memberId,
+		amountOwed: finalOwed.get(s.memberId) ?? 0
+	}));
+
+	return { items: itemized.items, subtotalShares, charges: resolvedCharges, shares, amountTotal };
 }
 
 /**
