@@ -73,6 +73,40 @@ function validData() {
 	};
 }
 
+/** A valid ITEMIZED spending payload (task 4.8) — items only, no charges. */
+function validItemizedData() {
+	return {
+		type: 'spending',
+		title: 'Group dinner',
+		categoryId: 'spending-food-drink',
+		amountTotal: 110,
+		currency: 'THB',
+		exchangeRate: '1',
+		amountTotalSettlement: 110,
+		splitMode: 'itemized',
+		payers: [{ memberId: 'm1', amountPaid: 110 }],
+		beneficiaries: [],
+		items: [
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		],
+		charges: []
+	};
+}
+
 /** Program `superValidate` to return a form with the given validity/data. */
 function programForm(opts: { valid: boolean; data?: unknown }) {
 	superValidate.mockResolvedValue({
@@ -154,6 +188,23 @@ describe('/groups/[id]/transactions/new default action', () => {
 		// The settlement currency comes from the TRUSTED group row, not the payload.
 		expect(arg.settlementCurrency).toBe('THB');
 		expect(arg.input.title).toBe('Dinner');
+	});
+
+	it('forwards a valid ITEMIZED payload (items, no top-level beneficiaries) to the service', async () => {
+		programForm({ valid: true, data: validItemizedData() });
+		try {
+			await actions.default(makeActionEvent({ id: 'u1', name: 'Alice' }));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
+		expect(createTransaction).toHaveBeenCalledTimes(1);
+		const arg = createTransaction.mock.calls[0][0];
+		// Settlement currency is the trusted group row; the itemized items pass through.
+		expect(arg.settlementCurrency).toBe('THB');
+		expect(arg.input.splitMode).toBe('itemized');
+		expect(arg.input.items).toHaveLength(2);
+		expect(arg.input.beneficiaries).toHaveLength(0);
 	});
 
 	it('returns a 400 form failure (no 500) when the input is invalid', async () => {

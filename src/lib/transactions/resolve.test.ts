@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShares, type ResolveSharesInput } from './resolve';
-import { buildTransactionSchema, type TransactionInput } from '$lib/schemas/transaction';
+import { resolveShares, resolveItemizedShares, type ResolveSharesInput } from './resolve';
+import {
+	buildTransactionSchema,
+	type TransactionInput,
+	type ItemInput
+} from '$lib/schemas/transaction';
 
 // Unit tests for the non-itemized split resolver (PLAN §7.2 — task 4.5).
 //
@@ -298,6 +302,270 @@ describe('resolveShares — sum-equals-amount_total invariant (property sweep)',
 			const shareBenes = beneficiaries.map((b, k) => ({ ...b, shareWeight: weights[k] }));
 			const share = resolveShares({ splitMode: 'share', amountTotal, beneficiaries: shareBenes });
 			expect(sumOwed(share)).toBe(amountTotal);
+		}
+	});
+});
+
+// ── Itemized resolution (PLAN §7.2.1 / §7.2.3 — task 4.8). ──────────────────────
+//
+// Each item resolves via the SAME per-line equal/amount/share core, rounding
+// WITHIN the item (so each item's shares sum to its amount), then aggregates per
+// member. The whole aggregate sums exactly to items_subtotal (= amount_total, no
+// charges in 4.8). Probed: per-item rounding, cross-item aggregation, a member in
+// some items and not others, mixed per-item modes, the ascending tie-break within
+// an item, 0-dp (JPY) + 2-dp (THB), single item/single beneficiary, and a sweep.
+
+/**
+ * Parse an itemized SPENDING payload through the real schema and return its
+ * normalized `items` — so the itemized resolver tests run on genuinely §7.4-valid
+ * items (≥1 item, item amount>0, ≥1 beneficiary, per-item split valid) and stay
+ * aligned with the 4.4 schema. amount_total must equal Σ item.amount (no charges
+ * in 4.8) for the payload to validate.
+ */
+function validItems(items: ItemInput[]): ItemInput[] {
+	const subtotal = items.reduce((acc, it) => acc + it.amount, 0);
+	const payload = baseSpending({
+		splitMode: 'itemized',
+		amountTotal: subtotal,
+		amountTotalSettlement: subtotal,
+		payers: [{ memberId: 'm1', amountPaid: subtotal }],
+		// itemized: top-level beneficiaries live on items, none at the top.
+		beneficiaries: [],
+		items
+	});
+	const parsed = thbSchema.safeParse(payload);
+	if (!parsed.success) {
+		throw new Error(`itemized fixture is not schema-valid: ${JSON.stringify(parsed.error.issues)}`);
+	}
+	return (parsed.data as TransactionInput).items;
+}
+
+describe('resolveItemizedShares — per-item rounding + aggregation', () => {
+	it('rounds WITHIN each item: every item share-set sums exactly to its amount', () => {
+		// Two items that each don't divide evenly: 100 across 3 (equal) and 10 across
+		// weights 1/2 (share). Each must sum to ITS OWN amount, independently.
+		const items = validItems([
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+
+		expect(sumOwed(result.items[0].shares)).toBe(100);
+		expect(sumOwed(result.items[1].shares)).toBe(10);
+		// Item 0: 34/33/33 (extra to lowest id m1). Item 1: 3/7 (larger remainder m2).
+		expect(result.items[0].shares).toEqual([
+			{ memberId: 'm1', amountOwed: 34 },
+			{ memberId: 'm2', amountOwed: 33 },
+			{ memberId: 'm3', amountOwed: 33 }
+		]);
+		expect(result.items[1].shares).toEqual([
+			{ memberId: 'm1', amountOwed: 3 },
+			{ memberId: 'm2', amountOwed: 7 }
+		]);
+	});
+
+	it('aggregates per member across items; the whole resolution sums to items_subtotal', () => {
+		const items = validItems([
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+
+		// m1: 34 + 3 = 37; m2: 33 + 7 = 40; m3: 33 + 0 = 33. Sum = 110 = subtotal.
+		expect(result.shares).toEqual([
+			{ memberId: 'm1', amountOwed: 37 },
+			{ memberId: 'm2', amountOwed: 40 },
+			{ memberId: 'm3', amountOwed: 33 }
+		]);
+		expect(sumOwed(result.shares)).toBe(110);
+	});
+
+	it('a member in SOME items and not others owes only the items they are in', () => {
+		// m3 only in the first item; m2 only in the second.
+		const items = validItems([
+			{
+				label: 'Shared starter',
+				amount: 90,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm3' }]
+			},
+			{
+				label: 'Steak',
+				amount: 40,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+
+		const byMember = Object.fromEntries(result.shares.map((s) => [s.memberId, s.amountOwed]));
+		// item0: 45/45 to m1/m3; item1: 20/20 to m1/m2.
+		expect(byMember.m1).toBe(65); // in both: 45 + 20
+		expect(byMember.m2).toBe(20); // only item1
+		expect(byMember.m3).toBe(45); // only item0
+		expect(sumOwed(result.shares)).toBe(130);
+	});
+
+	it('mixes per-item split modes (equal / share / amount) and still sums exactly', () => {
+		const items = validItems([
+			{
+				label: 'Equal item',
+				amount: 99,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+			},
+			{
+				label: 'Share item',
+				amount: 100,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 3 },
+					{ memberId: 'm2', shareWeight: 1 }
+				]
+			},
+			{
+				label: 'Amount item',
+				amount: 70,
+				splitMode: 'amount',
+				beneficiaries: [
+					{ memberId: 'm1', rawAmount: 30 },
+					{ memberId: 'm2', rawAmount: 40 }
+				]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+
+		expect(sumOwed(result.items[0].shares)).toBe(99);
+		expect(sumOwed(result.items[1].shares)).toBe(100);
+		expect(sumOwed(result.items[2].shares)).toBe(70);
+		// equal 99/2 → 50/49 (extra to m1); share 3:1 of 100 → 75/25; amount 30/40.
+		const byMember = Object.fromEntries(result.shares.map((s) => [s.memberId, s.amountOwed]));
+		expect(byMember.m1).toBe(50 + 75 + 30);
+		expect(byMember.m2).toBe(49 + 25 + 40);
+		expect(sumOwed(result.shares)).toBe(269);
+	});
+
+	it('proves the ascending member_id tie-break WITHIN an item', () => {
+		// 4 minor units, 3 equal beneficiaries listed lowest-id-NOT-first; the single
+		// leftover unit goes to the lowest id (m1), proving it is by id not position.
+		const items = validItems([
+			{
+				label: 'Tie',
+				amount: 4,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm3' }, { memberId: 'm1' }, { memberId: 'm2' }]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+		expect(result.items[0].shares).toEqual([
+			{ memberId: 'm3', amountOwed: 1 },
+			{ memberId: 'm1', amountOwed: 2 },
+			{ memberId: 'm2', amountOwed: 1 }
+		]);
+	});
+
+	it('resolves a 0-dp currency (JPY) itemized split, summing exactly', () => {
+		// JPY 0-dp: ¥1000 across 3 (equal) → 334/333/333; single item.
+		const result = resolveItemizedShares([
+			{
+				label: 'Ramen',
+				amount: 1000,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			}
+		]);
+		expect(result.items[0].shares.map((s) => s.amountOwed)).toEqual([334, 333, 333]);
+		expect(sumOwed(result.shares)).toBe(1000);
+	});
+
+	it('resolves a 2-dp currency (THB) itemized split, summing exactly', () => {
+		// 1000 minor across 3 → 334/333/333, same minor arithmetic.
+		const items = validItems([
+			{
+				label: 'Som tam',
+				amount: 1000,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			}
+		]);
+		const result = resolveItemizedShares(items);
+		expect(sumOwed(result.shares)).toBe(1000);
+	});
+
+	it('handles a single item with a single beneficiary (owes the whole item)', () => {
+		const items = validItems([
+			{ label: 'Solo', amount: 5000, splitMode: 'equal', beneficiaries: [{ memberId: 'm1' }] }
+		]);
+		const result = resolveItemizedShares(items);
+		expect(result.items[0].shares).toEqual([{ memberId: 'm1', amountOwed: 5000 }]);
+		expect(result.shares).toEqual([{ memberId: 'm1', amountOwed: 5000 }]);
+	});
+
+	it('throws on zero items (schema requires at least one)', () => {
+		expect(() => resolveItemizedShares([])).toThrow(/zero items/);
+	});
+
+	it('aggregated owed sums to items_subtotal across a randomized itemized sweep', () => {
+		function lcg(seed: number): () => number {
+			let state = seed >>> 0;
+			return () => {
+				state = (1664525 * state + 1013904223) >>> 0;
+				return state / 0x100000000;
+			};
+		}
+		const rand = lcg(7);
+		for (let i = 0; i < 300; i++) {
+			const itemCount = 1 + Math.floor(rand() * 5); // 1..5 items
+			const items: ItemInput[] = Array.from({ length: itemCount }, () => {
+				const n = 1 + Math.floor(rand() * 5); // 1..5 beneficiaries
+				const amount = 1 + Math.floor(rand() * 50_000);
+				const benes = Array.from({ length: n }, (_, k) => ({ memberId: `m${k + 1}` }));
+				// Alternate equal / share to exercise both rounding paths.
+				if (i % 2 === 0) {
+					return { label: 'x', amount, splitMode: 'equal' as const, beneficiaries: benes };
+				}
+				const weights = benes.map(() => Math.floor(rand() * 4));
+				if (weights.reduce((a, b) => a + b, 0) === 0) weights[0] = 1;
+				return {
+					label: 'x',
+					amount,
+					splitMode: 'share' as const,
+					beneficiaries: benes.map((b, k) => ({ ...b, shareWeight: weights[k] }))
+				};
+			});
+			const subtotal = items.reduce((acc, it) => acc + it.amount, 0);
+			const result = resolveItemizedShares(items);
+			// Each item sums to its own amount, and the aggregate sums to the subtotal.
+			for (let k = 0; k < items.length; k++) {
+				expect(sumOwed(result.items[k].shares)).toBe(items[k].amount);
+			}
+			expect(sumOwed(result.shares)).toBe(subtotal);
 		}
 	});
 });

@@ -17,10 +17,12 @@
 // co-locating under `lib/money`) keeps the generic largest-remainder primitive
 // (`distribute`) separate from this transaction-domain resolver that consumes it.
 //
-// ── Scope (task 4.5 only) ─────────────────────────────────────────────────────
-// Resolves split_mode ∈ { equal, amount, share } in the TRANSACTION CURRENCY only.
+// ── Scope (tasks 4.5 + 4.8) ───────────────────────────────────────────────────
+// Resolves split_mode ∈ { equal, amount, share } (task 4.5) AND `itemized`
+// (task 4.8 — `resolveItemizedShares`) in the TRANSACTION CURRENCY only. Itemized
+// resolves EACH item via the SAME per-line equal/amount/share core, rounding
+// WITHIN each item, then aggregates per member across items.
 // Deliberately NOT here:
-//   - `itemized` resolution (per-item splits aggregated)        → task 4.8.
 //   - charges / discounts allocation                            → task 4.9.
 //   - FX / settlement conversion of the resolved owed amounts   → task 4.10.
 // Input is assumed schema-valid (validation is task 4.4); we assert a couple of
@@ -32,7 +34,7 @@
 // tie-break and sums EXACTLY to the total — this module never re-implements it.
 
 import { distribute } from '$lib/money';
-import type { TransactionInput } from '$lib/schemas/transaction';
+import type { TransactionInput, ItemInput } from '$lib/schemas/transaction';
 
 /**
  * One beneficiary's resolved share (PLAN §7.2 `transaction_share`). `amountOwed`
@@ -86,39 +88,140 @@ export interface ResolveSharesInput {
  *   `equal`/`share` weight errors surface from `distribute`.
  */
 export function resolveShares(input: ResolveSharesInput): ResolvedShare[] {
-	const { splitMode, amountTotal, beneficiaries } = input;
+	return resolveSplitLine(input.splitMode, input.amountTotal, input.beneficiaries);
+}
 
+/**
+ * The SHARED per-split-line core (PLAN §7.2): resolve a single `target` total
+ * across its `beneficiaries` by `mode` (equal/amount/share), rounding by
+ * largest-remainder + ascending-`member_id` so the resolved owed sums **exactly**
+ * to `target`. Used by BOTH the non-itemized {@link resolveShares} (the whole
+ * transaction is one line) AND {@link resolveItemizedShares} (one call per item,
+ * each item's `amount` its own target) — so the equal/amount/share math is ONE
+ * code path at both levels and can never drift.
+ *
+ * @throws if `beneficiaries` is empty, or — defensively — an `amount` line is
+ *   missing its `rawAmount`. `equal`/`share` weight errors surface from `distribute`.
+ */
+function resolveSplitLine(
+	mode: 'equal' | 'amount' | 'share',
+	target: number,
+	beneficiaries: ResolveSharesInput['beneficiaries']
+): ResolvedShare[] {
 	if (beneficiaries.length === 0) {
-		// The schema requires ≥1 beneficiary for non-itemized splits; guard anyway so
-		// a misuse fails loudly rather than silently returning [] that can't sum to total.
+		// The schema requires ≥1 beneficiary per split line (top-level or per item);
+		// guard anyway so a misuse fails loudly rather than returning [] that can't sum.
 		throw new Error('Cannot resolve shares for zero beneficiaries');
 	}
 
-	switch (splitMode) {
+	switch (mode) {
 		case 'equal':
 			// Every beneficiary gets weight 1; the remainder is handed out by the
 			// largest-remainder + ascending-memberId rule inside `distribute`.
 			return fromDistribute(
-				amountTotal,
+				target,
 				beneficiaries.map((b) => ({ memberId: b.memberId, weight: 1 }))
 			);
 
 		case 'share':
 			// Entered weights drive the proportional split; `distribute` rounds by
-			// largest remainder and sums exactly to `amountTotal`.
+			// largest remainder and sums exactly to `target`.
 			return fromDistribute(
-				amountTotal,
+				target,
 				beneficiaries.map((b) => ({ memberId: b.memberId, weight: shareWeightOf(b) }))
 			);
 
 		case 'amount':
-			// Passthrough: each owed IS the entered raw_amount. Σ raw_amount == amountTotal
+			// Passthrough: each owed IS the entered raw_amount. Σ raw_amount == target
 			// is a §7.4 invariant already validated in 4.4, so the sum is exact by input.
 			return beneficiaries.map((b) => ({
 				memberId: b.memberId,
 				amountOwed: rawAmountOf(b)
 			}));
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Itemized resolution (PLAN §7.2.1 / §7.2.3 — task 4.8).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One item's resolution result: the per-member owed for THIS item (the
+ * `transaction_item_share` rows), in the item's order. Returned alongside the
+ * aggregated per-member totals so the service can persist BOTH the per-item
+ * shares and the aggregated `transaction_share` rows from one resolver call.
+ */
+export interface ResolvedItem {
+	/** The item this resolution is for (index into the input `items`). */
+	readonly itemIndex: number;
+	/** Per-member resolved owed for this item, in INPUT-beneficiary order. */
+	readonly shares: ResolvedShare[];
+}
+
+/**
+ * The full result of {@link resolveItemizedShares}: the per-item resolutions (for
+ * the `transaction_item_share` rows) AND the aggregated per-member owed across all
+ * items (the `transaction_share` rows — the §8 source of truth). For 4.8 there are
+ * no charges, so each aggregated `amountOwed` IS the member's final owed and the
+ * aggregated totals sum **exactly** to `items_subtotal` (= `amount_total`).
+ */
+export interface ResolvedItemized {
+	/** Per-item resolved shares, one entry per input item, in input order. */
+	readonly items: ResolvedItem[];
+	/**
+	 * Per-member owed aggregated across every item the member appears in. A member
+	 * in some items and not others owes only the sum of the items they share. First
+	 * appearance (lowest item index, then within-item input order) sets the order.
+	 */
+	readonly shares: ResolvedShare[];
+}
+
+/**
+ * Resolve an ITEMIZED spending (PLAN §7.2.1 / §7.2.3 resolution, items-only for
+ * 4.8). For each item: resolve its beneficiaries against the item's own `amount`
+ * via the SHARED {@link resolveSplitLine} core (the same equal/amount/share +
+ * largest-remainder/ascending-`member_id` rounding the non-itemized path uses),
+ * so EACH item's shares sum EXACTLY to its `amount`. Then aggregate per member by
+ * summing their owed across every item they appear in.
+ *
+ * Because each item sums exactly to its `amount`, the aggregated per-member totals
+ * sum exactly to `Σ item.amount = items_subtotal`, which (no charges in 4.8) equals
+ * `amount_total`. A member can be in some items and not others; their aggregated
+ * owed is the sum of only the items they're in.
+ *
+ * Pure + client-importable (NOT `$lib/server`) — task 4.9's live breakdown calls it.
+ *
+ * @throws if `items` is empty (schema requires ≥1), or any item has zero
+ *   beneficiaries / a missing `amount`-mode `rawAmount` (both schema-guaranteed;
+ *   guarded defensively by the per-line core).
+ */
+export function resolveItemizedShares(items: readonly ItemInput[]): ResolvedItemized {
+	if (items.length === 0) {
+		// Schema requires ≥1 item for an itemized split; guard so misuse fails loudly
+		// rather than producing an empty aggregate that can't sum to the subtotal.
+		throw new Error('Cannot resolve an itemized split with zero items');
+	}
+
+	// Aggregate per member, preserving FIRST-APPEARANCE order (Map keeps insertion
+	// order) so the aggregated `transaction_share` rows are deterministic.
+	const aggregate = new Map<string, number>();
+
+	const resolvedItems: ResolvedItem[] = items.map((item, itemIndex) => {
+		// Resolve THIS item against its OWN amount — rounding happens WITHIN the item,
+		// so the item's shares sum exactly to `item.amount`.
+		const shares = resolveSplitLine(item.splitMode, item.amount, item.beneficiaries);
+		for (const share of shares) {
+			aggregate.set(share.memberId, (aggregate.get(share.memberId) ?? 0) + share.amountOwed);
+		}
+		return { itemIndex, shares };
+	});
+
+	const shares: ResolvedShare[] = [...aggregate].map(([memberId, amountOwed]) => ({
+		memberId,
+		amountOwed
+	}));
+
+	return { items: resolvedItems, shares };
 }
 
 /**

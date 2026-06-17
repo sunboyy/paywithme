@@ -71,7 +71,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 4.5 Split resolution equal/amount/share (+ rounding/tie-break) + unit tests — PLAN §7.2 @done deps:4.1,4.4
 - [x] 4.6 `lib/server` audit-log write helper (same DB transaction) — PLAN §12.1 (wire into all mutations below) @done deps:4.2
 - [x] 4.7 Transaction add/edit/list UI: spending & transfer, type toggle, category picker @done deps:4.5,4.3,4.6
-- [ ] 4.8 Itemized splitting: items + per-item split + resolution + tests — PLAN §7.2.1 @todo deps:4.7
+- [x] 4.8 Itemized splitting: items + per-item split + resolution + tests — PLAN §7.2.1 @done deps:4.7
 - [ ] 4.9 Charges/discounts: service/VAT/discount (mode/base/sort_order), proportional allocation, live breakdown UI + tests — PLAN §7.2.2-3 @todo deps:4.8
 - [ ] 4.10 Multi-currency + manual FX: currency picker, rate/settlement-total entry, convert-then-distribute into settlement shares + tests — PLAN §7.6 @todo deps:4.9
 - [ ] 4.11 Transaction view/edit page; soft-delete + restore (audited) @todo deps:4.7

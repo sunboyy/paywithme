@@ -15,8 +15,9 @@
 //   - `amount_total_settlement == amount_total`,
 //   - each payer's `amount_paid_settlement == amount_paid`,
 //   - each share's settlement `amount_owed` == the txn-currency resolved owed.
+// Task 4.8 ADDS `itemized` split resolution + persistence (transaction_items /
+// transaction_item_shares + aggregated transaction_shares) on top of this.
 // Deliberately NOT here (later tasks own them, with clean seams left):
-//   - `itemized` split UI + resolution (items / item-shares)       → task 4.8.
 //   - charges / discounts                                          → task 4.9.
 //   - multi-currency / manual FX (currency picker, rate entry)     → task 4.10.
 //   - `updateTransaction` / soft-delete / restore                  → task 4.11.
@@ -47,13 +48,19 @@ import {
 	categories,
 	transactions,
 	transactionPayers,
-	transactionShares
+	transactionShares,
+	transactionItems,
+	transactionItemShares
 } from './db/transactions-schema';
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog } from './audit';
 import { buildTransactionSchema, type TransactionInput } from '$lib/schemas/transaction';
-import { resolveShares } from '$lib/transactions/resolve';
+import {
+	resolveShares,
+	resolveItemizedShares,
+	type ResolvedShare
+} from '$lib/transactions/resolve';
 import { getCategory } from '$lib/categories';
 import { formatAmount, type CurrencyCode } from '$lib/money';
 
@@ -162,12 +169,18 @@ export async function createTransaction({
 		await assertCategoryExists(data.categoryId, tx);
 
 		// RE-RESOLVE per-member owed amounts server-side (never trust the client). For
-		// currency==settlement the txn-currency owed IS the settlement owed.
-		const resolved = resolveShares({
-			splitMode: data.splitMode as Exclude<TransactionInput['splitMode'], 'itemized'>,
-			amountTotal: data.amountTotal,
-			beneficiaries: data.beneficiaries
-		});
+		// currency==settlement the txn-currency owed IS the settlement owed. Itemized
+		// resolves each item (rounding within the item) and aggregates per member; the
+		// per-item resolutions are persisted too (transaction_item_shares).
+		const isItemized = data.splitMode === 'itemized';
+		const itemized = isItemized ? resolveItemizedShares(data.items) : null;
+		const resolved: ResolvedShare[] = isItemized
+			? itemized!.shares
+			: resolveShares({
+					splitMode: data.splitMode as Exclude<TransactionInput['splitMode'], 'itemized'>,
+					amountTotal: data.amountTotal,
+					beneficiaries: data.beneficiaries
+				});
 
 		const transactionId = crypto.randomUUID();
 
@@ -199,17 +212,62 @@ export async function createTransaction({
 			});
 		}
 
-		// 3) Share rows. The RESOLVED owed (txn-currency) == settlement owed here. The
-		//    raw inputs (share_weight / raw_amount) are preserved for 4.11 re-edit.
-		for (const beneficiary of data.beneficiaries) {
-			const owed = resolved.find((r) => r.memberId === beneficiary.memberId)?.amountOwed ?? 0;
-			await tx.insert(transactionShares).values({
-				transactionId,
-				memberId: beneficiary.memberId,
-				amountOwed: owed,
-				shareWeight: beneficiary.shareWeight ?? null,
-				rawAmount: beneficiary.rawAmount ?? null
-			});
+		// 3) For ITEMIZED: persist the item rows + per-item share rows (§7.2.1), then
+		//    the AGGREGATED transaction_share rows (per-member total owed, the §8 source
+		//    of truth). For non-itemized: persist the resolved share rows directly.
+		if (isItemized) {
+			// 3a) One transaction_items row per item (label, amount, sort_order), and its
+			//     transaction_item_shares (resolved per-item owed + the per-item split
+			//     inputs preserved for 4.11 re-edit). All through the same `tx`.
+			for (let i = 0; i < data.items.length; i++) {
+				const item = data.items[i];
+				const itemId = crypto.randomUUID();
+				await tx.insert(transactionItems).values({
+					id: itemId,
+					transactionId,
+					label: item.label,
+					amount: item.amount,
+					sortOrder: i
+				});
+				const itemShares = itemized!.items[i].shares;
+				for (const beneficiary of item.beneficiaries) {
+					const owed = itemShares.find((s) => s.memberId === beneficiary.memberId)?.amountOwed ?? 0;
+					await tx.insert(transactionItemShares).values({
+						itemId,
+						memberId: beneficiary.memberId,
+						amountOwed: owed,
+						splitMode: item.splitMode,
+						shareWeight: beneficiary.shareWeight ?? null,
+						rawAmount: beneficiary.rawAmount ?? null
+					});
+				}
+			}
+
+			// 3b) Aggregated per-member transaction_share rows. No top-level inputs for an
+			//     itemized split (per-item inputs live on transaction_item_shares), so the
+			//     share_weight / raw_amount are null here.
+			for (const share of resolved) {
+				await tx.insert(transactionShares).values({
+					transactionId,
+					memberId: share.memberId,
+					amountOwed: share.amountOwed,
+					shareWeight: null,
+					rawAmount: null
+				});
+			}
+		} else {
+			// Non-itemized share rows. The RESOLVED owed (txn-currency) == settlement owed
+			// here. The raw inputs (share_weight / raw_amount) are preserved for 4.11.
+			for (const beneficiary of data.beneficiaries) {
+				const owed = resolved.find((r) => r.memberId === beneficiary.memberId)?.amountOwed ?? 0;
+				await tx.insert(transactionShares).values({
+					transactionId,
+					memberId: beneficiary.memberId,
+					amountOwed: owed,
+					shareWeight: beneficiary.shareWeight ?? null,
+					rawAmount: beneficiary.rawAmount ?? null
+				});
+			}
 		}
 
 		// 4) Audit row — IN THE SAME TRANSACTION (PLAN §12.1). Human summary via
@@ -257,20 +315,15 @@ async function loadSettlementCurrency(
 }
 
 /**
- * Guard the 4.7 single-currency / non-itemized / no-charge scope. The shared
- * schema accepts itemized/charges/FX (later tasks surface them), so a hand-crafted
- * payload could smuggle them past validation; reject them HERE with a clear seam
- * rather than silently persisting an unsupported shape.
+ * Guard the supported scope. As of task 4.8 itemized splits + (non-empty) `items`
+ * are ALLOWED (resolved + persisted below); `charges` and foreign currency stay
+ * REJECTED here (tasks 4.9 / 4.10). The shared schema validates the full payload,
+ * so a hand-crafted payload could smuggle a deferred feature past validation;
+ * reject those HERE with a clear seam rather than silently persisting them.
  */
 function assertSingleCurrencyScope(data: TransactionInput, settlementCurrency: CurrencyCode): void {
 	const issues: z.core.$ZodIssue[] = [];
-	if (data.splitMode === 'itemized') {
-		// Itemized split UI + resolution is task 4.8.
-		issues.push(makeIssue(['splitMode'], 'Itemized splits are not supported yet'));
-	}
-	if (data.items.length > 0) {
-		issues.push(makeIssue(['items'], 'Items are not supported yet'));
-	}
+	// Itemized split + items are now supported (task 4.8) — no longer rejected.
 	if (data.charges.length > 0) {
 		// Charges / discounts are task 4.9.
 		issues.push(makeIssue(['charges'], 'Charges are not supported yet'));

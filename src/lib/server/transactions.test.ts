@@ -84,6 +84,8 @@ vi.mock('$lib/server/db/transactions-schema', () => {
 		transactions: tag('transactions'),
 		transactionPayers: tag('transaction_payers'),
 		transactionShares: tag('transaction_shares'),
+		transactionItems: tag('transaction_items'),
+		transactionItemShares: tag('transaction_item_shares'),
 		categories: tag('categories')
 	};
 });
@@ -101,7 +103,7 @@ vi.mock('$lib/server/db/audit-schema', () => {
 
 import { createTransaction, listTransactions, TransactionValidationError } from './transactions';
 import { GroupAccessError } from './groups';
-import { resolveShares } from '$lib/transactions/resolve';
+import { resolveShares, resolveItemizedShares } from '$lib/transactions/resolve';
 
 /** Queue the row-sets each successive SELECT chain resolves to. */
 function queueSelects(...rowSets: unknown[][]) {
@@ -340,6 +342,206 @@ describe('createTransaction (PLAN §7.1, §7.2, §12.1)', () => {
 				userId: 'u1',
 				groupId: 'g1',
 				input: { ...equalInput(), beneficiaries: [{ memberId: 'ghost' }] },
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(insertsTo('transactions')).toHaveLength(0);
+	});
+});
+
+describe('createTransaction — itemized split (PLAN §7.2.1, task 4.8)', () => {
+	// A valid itemized spending: two items (Pizza 100 across m1/m2/m3 equal; Wine 10
+	// across m1:1/m2:2 share). items_subtotal = amount_total = 110, no charges.
+	function itemizedInput() {
+		const items = [
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal' as const,
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share' as const,
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		];
+		return {
+			type: 'spending' as const,
+			title: 'Group dinner',
+			categoryId: 'spending-food-drink',
+			amountTotal: 110,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 110,
+			splitMode: 'itemized' as const,
+			payers: [{ memberId: 'm1', amountPaid: 110 }],
+			beneficiaries: [],
+			items,
+			charges: []
+		};
+	}
+
+	it('inserts items + item-shares + aggregated shares + audit ALL through the SAME tx', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: itemizedInput(),
+			settlementCurrency: 'THB'
+		});
+
+		expect(insertsTo('transactions')).toHaveLength(1);
+		expect(insertsTo('transaction_items')).toHaveLength(2); // 2 items
+		// item-shares: Pizza 2 + Wine 2 = 4.
+		expect(insertsTo('transaction_item_shares')).toHaveLength(4);
+		// aggregated shares: m1 + m2 = 2.
+		expect(insertsTo('transaction_shares')).toHaveLength(2);
+		expect(insertsTo('audit_log')).toHaveLength(1);
+
+		// Every insert went through the SAME open transaction handle (§12.1 atomicity).
+		expect(inserts.every((i) => (i.via as { name: string }).name === 'tx')).toBe(true);
+	});
+
+	it('persists item rows with label, amount and sort_order; item-shares carry per-item mode + inputs', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: itemizedInput(),
+			settlementCurrency: 'THB'
+		});
+
+		const itemRows = insertsTo('transaction_items').map((i) => ({
+			label: i.values.label,
+			amount: i.values.amount,
+			sortOrder: i.values.sortOrder
+		}));
+		expect(itemRows).toEqual([
+			{ label: 'Pizza', amount: 100, sortOrder: 0 },
+			{ label: 'Wine', amount: 10, sortOrder: 1 }
+		]);
+
+		// Each item row got a generated id; item-shares reference one of those ids.
+		const itemIds = insertsTo('transaction_items').map((i) => i.values.id);
+		const itemShareRows = insertsTo('transaction_item_shares').map((i) => ({
+			itemId: i.values.itemId,
+			memberId: i.values.memberId,
+			amountOwed: i.values.amountOwed,
+			splitMode: i.values.splitMode,
+			shareWeight: i.values.shareWeight,
+			rawAmount: i.values.rawAmount
+		}));
+		expect(itemShareRows.every((r) => itemIds.includes(r.itemId))).toBe(true);
+		// Pizza (equal 100/2 → 50/50), Wine (share 1:2 of 10 → 3/7).
+		expect(itemShareRows).toEqual([
+			{
+				itemId: itemIds[0],
+				memberId: 'm1',
+				amountOwed: 50,
+				splitMode: 'equal',
+				shareWeight: null,
+				rawAmount: null
+			},
+			{
+				itemId: itemIds[0],
+				memberId: 'm2',
+				amountOwed: 50,
+				splitMode: 'equal',
+				shareWeight: null,
+				rawAmount: null
+			},
+			{
+				itemId: itemIds[1],
+				memberId: 'm1',
+				amountOwed: 3,
+				splitMode: 'share',
+				shareWeight: 1,
+				rawAmount: null
+			},
+			{
+				itemId: itemIds[1],
+				memberId: 'm2',
+				amountOwed: 7,
+				splitMode: 'share',
+				shareWeight: 2,
+				rawAmount: null
+			}
+		]);
+	});
+
+	it('aggregated transaction_shares equal the resolver output and sum to amount_total', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: itemizedInput(),
+			settlementCurrency: 'THB'
+		});
+
+		const expected = resolveItemizedShares(itemizedInput().items).shares;
+		const shareRows = insertsTo('transaction_shares').map((i) => ({
+			memberId: i.values.memberId,
+			amountOwed: i.values.amountOwed,
+			shareWeight: i.values.shareWeight,
+			rawAmount: i.values.rawAmount
+		}));
+		expect(shareRows.map((r) => ({ memberId: r.memberId, amountOwed: r.amountOwed }))).toEqual(
+			expected.map((e) => ({ memberId: e.memberId, amountOwed: e.amountOwed }))
+		);
+		// m1: 50 + 3 = 53; m2: 50 + 7 = 57. Aggregated, NO per-item inputs at top level.
+		expect(shareRows).toEqual([
+			{ memberId: 'm1', amountOwed: 53, shareWeight: null, rawAmount: null },
+			{ memberId: 'm2', amountOwed: 57, shareWeight: null, rawAmount: null }
+		]);
+		const sum = shareRows.reduce((acc, r) => acc + (r.amountOwed as number), 0);
+		expect(sum).toBe(110); // == amount_total (= items_subtotal, no charges)
+	});
+
+	it('still rejects CHARGES (deferred to 4.9) with TransactionValidationError, no inserts', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		// amount_total includes a 10% service on the 110 subtotal → 121, so the payload
+		// is schema-valid; the service scope guard rejects the non-empty charges.
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: {
+					...itemizedInput(),
+					amountTotal: 121,
+					amountTotalSettlement: 121,
+					payers: [{ memberId: 'm1', amountPaid: 121 }],
+					charges: [
+						{
+							kind: 'service' as const,
+							mode: 'percent' as const,
+							value: 1000,
+							base: 'items_subtotal' as const,
+							sortOrder: 0
+						}
+					]
+				},
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(insertsTo('transactions')).toHaveLength(0);
+	});
+
+	it('rejects an itemized TRANSFER (transfers are never itemized, §7.2.3)', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: {
+					...itemizedInput(),
+					type: 'transfer' as const,
+					categoryId: 'transfer-debt-settlement'
+				},
 				settlementCurrency: 'THB'
 			})
 		).rejects.toBeInstanceOf(TransactionValidationError);

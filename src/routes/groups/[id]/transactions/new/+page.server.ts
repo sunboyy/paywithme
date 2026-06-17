@@ -8,10 +8,12 @@
 // re-validates + re-resolves server-side — never trusts the client). The <form>
 // posts to a real action and works without JS; superforms `enhance` upgrades it.
 //
-// SCOPE (4.7): spending & transfer with split_mode ∈ {equal, amount, share} in the
-// group settlement currency. Itemized (4.8), charges (4.9), FX (4.10), and the
-// view/edit page (4.11) are later tasks. The form submits empty `items`/`charges`,
-// `exchangeRate: '1'`, and `amountTotalSettlement == amountTotal`.
+// SCOPE (4.7 + 4.8): spending & transfer with split_mode ∈ {equal, amount, share,
+// itemized} in the group settlement currency. Itemized (4.8) submits non-empty
+// `items` (Spending only); the route just re-validates + delegates — the service
+// resolves + persists. Charges (4.9), FX (4.10), and the view/edit page (4.11) are
+// later tasks. The form still submits empty `charges`, `exchangeRate: '1'`, and
+// `amountTotalSettlement == amountTotal`.
 
 import { error, fail, redirect } from '@sveltejs/kit';
 import { setError, superValidate } from 'sveltekit-superforms';
