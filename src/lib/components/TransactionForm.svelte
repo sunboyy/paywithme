@@ -224,23 +224,37 @@
 	// payer (the default) mirrors the total so `Σ amountPaid == amountTotal` holds.
 	$effect(() => {
 		const total = $formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
-		$formData.amountTotal = total;
-		$formData.currency = entryCode;
+
+		let nextRate: string;
+		let nextSettlement: number;
 		if (!isForeign) {
-			$formData.exchangeRate = '1';
-			$formData.amountTotalSettlement = total;
+			nextRate = '1';
+			nextSettlement = total;
 		} else {
 			const rate = effectiveRate;
-			$formData.exchangeRate = rate ?? '';
+			nextRate = rate ?? '';
 			// Recompute the canonical settlement total from the rate (consistent with
 			// the §7.6 scalar the schema checks). When the rate isn't valid yet, leave
 			// the settlement total at the txn total as a placeholder (the schema will
 			// reject the invalid rate, surfacing the error before save).
-			$formData.amountTotalSettlement =
+			nextSettlement =
 				rate !== null ? convertToSettlement(total, entryCode, settlementCode, rate) : total;
 		}
-		if ($formData.payers.length === 1) {
-			$formData.payers[0].amountPaid = total;
+
+		// Guard EVERY write with an equality check so this effect is idempotent. It
+		// reads `$formData` (subscribing to the superForm store) and writes back to it;
+		// superForm's store notifies subscribers on every write, so an UNCONDITIONAL
+		// write would re-trigger this effect forever → `effect_update_depth_exceeded`
+		// (the page froze on mount). Writing only on an actual change lets the effect
+		// settle once the derived values match the form state.
+		if ($formData.amountTotal !== total) $formData.amountTotal = total;
+		if ($formData.currency !== entryCode) $formData.currency = entryCode;
+		if ($formData.exchangeRate !== nextRate) $formData.exchangeRate = nextRate;
+		if ($formData.amountTotalSettlement !== nextSettlement) {
+			$formData.amountTotalSettlement = nextSettlement;
+		}
+		if ($formData.payers.length === 1 && $formData.payers[0].amountPaid !== total) {
+			$formData.payers = [{ ...$formData.payers[0], amountPaid: total }];
 		}
 	});
 

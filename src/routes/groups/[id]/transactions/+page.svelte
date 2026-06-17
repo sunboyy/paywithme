@@ -60,7 +60,12 @@
 	<div class="flex items-center justify-between gap-2">
 		<div>
 			<h1 class="text-2xl font-semibold">Transactions</h1>
-			<p class="text-muted-foreground text-sm">{data.group.name}</p>
+			<a
+				href={resolve('/groups/[id]/members', { id: data.group.id })}
+				class="text-muted-foreground text-sm hover:underline"
+			>
+				{data.group.name} · Members
+			</a>
 		</div>
 		<Button href={newPath} class="gap-1">
 			<PlusIcon class="size-4" />
