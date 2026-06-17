@@ -56,6 +56,12 @@
 		currencies?: FormCurrency[];
 		/** Submit-button label (e.g. "Add transaction" / "Save changes"). */
 		submitLabel?: string;
+		/**
+		 * Optional form `action` target (e.g. `'?/edit'` for the edit page). Omitted →
+		 * posts to the route's default action (the `new` page). Progressive enhancement
+		 * keeps the nested-array payload reaching the named action without JS too.
+		 */
+		action?: string;
 	}
 </script>
 
@@ -76,7 +82,8 @@
 		categories,
 		currency,
 		currencies,
-		submitLabel = 'Add transaction'
+		submitLabel = 'Add transaction',
+		action
 	}: TransactionFormProps = $props();
 
 	// The parent owns `form` for the component's lifetime; destructuring its stores
@@ -656,7 +663,7 @@
 	});
 </script>
 
-<form method="POST" use:enhance class="space-y-6">
+<form method="POST" {action} use:enhance class="space-y-6">
 	{#if $message?.type === 'error'}
 		<p class="text-destructive text-sm" role="alert">{$message.text}</p>
 	{/if}

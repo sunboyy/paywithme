@@ -130,16 +130,14 @@
 		<ul class="space-y-2">
 			{#each data.transactions as txn (txn.id)}
 				<li>
-					<!-- The per-transaction view/edit page is task 4.11; that route doesn't
-					     exist in the router yet, so `resolve('/groups/[id]/transactions/[txid]')`
-					     would not type-check. The link target is intentionally a plain
-					     absolute path; re-enable the rule right after. -->
-					<!-- eslint-disable svelte/no-navigation-without-resolve -->
+					<!-- Links to the per-transaction view/edit page (task 4.11). -->
 					<a
-						href={`/groups/${data.group.id}/transactions/${txn.id}`}
+						href={resolve('/groups/[id]/transactions/[txid]', {
+							id: data.group.id,
+							txid: txn.id
+						})}
 						class="bg-card hover:bg-accent flex items-center gap-3 rounded-lg border p-3 transition-colors"
 					>
-						<!-- eslint-enable svelte/no-navigation-without-resolve -->
 						<span
 							class="bg-muted text-muted-foreground flex size-10 shrink-0 items-center justify-center rounded-full"
 						>

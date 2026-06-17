@@ -16,10 +16,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //   - `listTransactions` filters by type/category and shapes rows newest-first.
 
 // --- Fluent DB mock -------------------------------------------------------
-const { selectQueue, inserts, makeDb, lastTxHandle } = vi.hoisted(() => {
+const { selectQueue, inserts, updates, deletes, makeDb, lastTxHandle } = vi.hoisted(() => {
 	const selectQueue: unknown[][] = [];
 	// Records: which table + values for every insert, plus the tx handle used.
 	const inserts: { table: string; values: Record<string, unknown>; via: object }[] = [];
+	// Records: which table + the .set() values for every update, plus the tx handle.
+	const updates: { table: string; values: Record<string, unknown>; via: object }[] = [];
+	// Records: which table was deleted from, plus the tx handle.
+	const deletes: { table: string; via: object }[] = [];
 	const lastTxHandle: { current: object | null } = { current: null };
 
 	function nextSelectRows(): unknown[] {
@@ -50,14 +54,22 @@ const { selectQueue, inserts, makeDb, lastTxHandle } = vi.hoisted(() => {
 					return Promise.resolve(undefined);
 				}
 			}),
-			update: () => {
+			update: (table: unknown) => {
 				const chain: Record<string, unknown> = {};
-				chain.set = () => chain;
+				chain.set = (values: Record<string, unknown>) => {
+					updates.push({ table: tableName(table), values, via });
+					return chain;
+				};
 				chain.where = () => chain;
 				chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 				return chain;
 			},
-			delete: () => ({ where: () => Promise.resolve(undefined) })
+			delete: (table: unknown) => ({
+				where: () => {
+					deletes.push({ table: tableName(table), via });
+					return Promise.resolve(undefined);
+				}
+			})
 		};
 	}
 
@@ -71,7 +83,7 @@ const { selectQueue, inserts, makeDb, lastTxHandle } = vi.hoisted(() => {
 		}
 	};
 
-	return { selectQueue, inserts, makeDb: () => db, lastTxHandle };
+	return { selectQueue, inserts, updates, deletes, makeDb: () => db, lastTxHandle };
 });
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
@@ -102,10 +114,25 @@ vi.mock('$lib/server/db/audit-schema', () => {
 	return { auditLog: tag('audit_log') };
 });
 
-import { createTransaction, listTransactions, TransactionValidationError } from './transactions';
+import {
+	createTransaction,
+	listTransactions,
+	getTransactionDetail,
+	updateTransaction,
+	softDeleteTransaction,
+	restoreTransaction,
+	TransactionValidationError,
+	TransactionNotFoundError,
+	TransactionDeletedError
+} from './transactions';
 import { GroupAccessError } from './groups';
 import { resolveShares, resolveItemizedWithCharges } from '$lib/transactions/resolve';
-import { applyCharges, convertToSettlement, type ChargeInput } from '$lib/schemas/transaction';
+import {
+	applyCharges,
+	convertToSettlement,
+	buildTransactionSchema,
+	type ChargeInput
+} from '$lib/schemas/transaction';
 
 /** Queue the row-sets each successive SELECT chain resolves to. */
 function queueSelects(...rowSets: unknown[][]) {
@@ -141,9 +168,18 @@ function insertsTo(table: string) {
 
 beforeEach(() => {
 	inserts.length = 0;
+	updates.length = 0;
+	deletes.length = 0;
 	selectQueue.length = 0;
 	lastTxHandle.current = null;
 });
+
+function updatesTo(table: string) {
+	return updates.filter((u) => u.table === table);
+}
+function deletesTo(table: string) {
+	return deletes.filter((d) => d.table === table);
+}
 
 describe('createTransaction (PLAN §7.1, §7.2, §12.1)', () => {
 	it('throws GroupAccessError and writes nothing when access is denied', async () => {
@@ -837,5 +873,530 @@ describe('listTransactions (PLAN §7, §10)', () => {
 		});
 		expect(result).toHaveLength(2);
 		expect(result[0].type).toBe('spending');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 4.11 — view/edit + soft-delete/restore (PLAN §7.1, §7.2, §7.6, §9, §12.1).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SETTLEMENT_THB = [{ settlementCurrency: 'THB' }];
+
+/** A persisted same-currency (THB) equal-split spending txn row (live). */
+function txnRow(over: Record<string, unknown> = {}) {
+	return [
+		{
+			id: 't1',
+			groupId: 'g1',
+			type: 'spending',
+			title: 'Dinner',
+			categoryId: 'spending-food-drink',
+			amountTotal: 9000,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 9000,
+			splitMode: 'equal',
+			createdAt: new Date('2026-02-01T00:00:00.000Z'),
+			deletedAt: null,
+			...over
+		}
+	];
+}
+
+describe('getTransactionDetail — reconstruction round-trips (PLAN §7.2/§7.6)', () => {
+	it('throws TransactionNotFoundError (→404) when the txn is not in this group; no writes', async () => {
+		// access ok → settlement currency → txn row EMPTY (wrong group / bogus id).
+		queueSelects(ACCESS_OK, SETTLEMENT_THB, []);
+		await expect(
+			getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 'nope' })
+		).rejects.toBeInstanceOf(TransactionNotFoundError);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('throws GroupAccessError (→404) when access is denied', async () => {
+		queueSelects([]); // access check fails
+		await expect(
+			getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' })
+		).rejects.toBeInstanceOf(GroupAccessError);
+	});
+
+	it('reconstructs an EQUAL split input (round-trips the original)', async () => {
+		// access → settlement → txn → payers → shares → items(none) → charges(none).
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow(),
+			[{ memberId: 'm1', amountPaid: 9000 }],
+			[
+				{ memberId: 'm1', amountOwed: 4500, shareWeight: null, rawAmount: null },
+				{ memberId: 'm2', amountOwed: 4500, shareWeight: null, rawAmount: null }
+			],
+			[], // no items
+			[] // no charges
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.deletedAt).toBeNull();
+		expect(detail.input).toEqual({
+			type: 'spending',
+			title: 'Dinner',
+			categoryId: 'spending-food-drink',
+			amountTotal: 9000,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 9000,
+			splitMode: 'equal',
+			payers: [{ memberId: 'm1', amountPaid: 9000 }],
+			beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }],
+			items: [],
+			charges: []
+		});
+		// The reconstructed input re-validates byte-identically with the shared schema.
+		const schema = buildTransactionSchema({ settlementCurrency: 'THB', memberIds: ['m1', 'm2'] });
+		expect(schema.safeParse(detail.input).success).toBe(true);
+		// And the view carries the resolved settlement shares + entry currency.
+		expect(detail.shares).toEqual([
+			{ memberId: 'm1', amountOwed: 4500 },
+			{ memberId: 'm2', amountOwed: 4500 }
+		]);
+		expect(detail.currency).toBe('THB');
+		expect(detail.isForeign).toBe(false);
+	});
+
+	it('reconstructs an AMOUNT split (raw_amount preserved per member)', async () => {
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow({ splitMode: 'amount' }),
+			[{ memberId: 'm1', amountPaid: 9000 }],
+			[
+				{ memberId: 'm1', amountOwed: 2000, shareWeight: null, rawAmount: 2000 },
+				{ memberId: 'm2', amountOwed: 7000, shareWeight: null, rawAmount: 7000 }
+			],
+			[],
+			[]
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.input.splitMode).toBe('amount');
+		expect(detail.input.beneficiaries).toEqual([
+			{ memberId: 'm1', rawAmount: 2000 },
+			{ memberId: 'm2', rawAmount: 7000 }
+		]);
+	});
+
+	it('reconstructs a SHARE split (share_weight preserved per member)', async () => {
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow({ splitMode: 'share' }),
+			[{ memberId: 'm1', amountPaid: 9000 }],
+			[
+				{ memberId: 'm1', amountOwed: 3000, shareWeight: 1, rawAmount: null },
+				{ memberId: 'm2', amountOwed: 6000, shareWeight: 2, rawAmount: null }
+			],
+			[],
+			[]
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.input.splitMode).toBe('share');
+		expect(detail.input.beneficiaries).toEqual([
+			{ memberId: 'm1', shareWeight: 1 },
+			{ memberId: 'm2', shareWeight: 2 }
+		]);
+	});
+
+	it('reconstructs an ITEMIZED + charges input (per-item mode/inputs + charges preserved)', async () => {
+		// Two items (Pizza equal m1/m2; Wine share m1:1/m2:2) + service 10% + flat 5 discount.
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow({ splitMode: 'itemized', amountTotal: 116, amountTotalSettlement: 116 }),
+			[{ memberId: 'm1', amountPaid: 116 }],
+			[
+				{ memberId: 'm1', amountOwed: 56, shareWeight: null, rawAmount: null },
+				{ memberId: 'm2', amountOwed: 60, shareWeight: null, rawAmount: null }
+			],
+			// items (ordered by sort_order)
+			[
+				{ id: 'i0', label: 'Pizza', amount: 100, sortOrder: 0 },
+				{ id: 'i1', label: 'Wine', amount: 10, sortOrder: 1 }
+			],
+			// item-shares (all of them; grouped by item_id in the service)
+			[
+				{
+					itemId: 'i0',
+					memberId: 'm1',
+					amountOwed: 50,
+					splitMode: 'equal',
+					shareWeight: null,
+					rawAmount: null
+				},
+				{
+					itemId: 'i0',
+					memberId: 'm2',
+					amountOwed: 50,
+					splitMode: 'equal',
+					shareWeight: null,
+					rawAmount: null
+				},
+				{
+					itemId: 'i1',
+					memberId: 'm1',
+					amountOwed: 3,
+					splitMode: 'share',
+					shareWeight: 1,
+					rawAmount: null
+				},
+				{
+					itemId: 'i1',
+					memberId: 'm2',
+					amountOwed: 7,
+					splitMode: 'share',
+					shareWeight: 2,
+					rawAmount: null
+				}
+			],
+			// charges (ordered by sort_order)
+			[
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'discount', mode: 'absolute', value: 5, base: 'running_total', sortOrder: 1 }
+			]
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.input.splitMode).toBe('itemized');
+		expect(detail.input.beneficiaries).toEqual([]);
+		expect(detail.input.items).toEqual([
+			{
+				label: 'Pizza',
+				amount: 100,
+				splitMode: 'equal',
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+			},
+			{
+				label: 'Wine',
+				amount: 10,
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			}
+		]);
+		expect(detail.input.charges).toEqual([
+			{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+			{ kind: 'discount', mode: 'absolute', value: 5, base: 'running_total', sortOrder: 1 }
+		]);
+		// The reconstructed itemized+charges input re-validates (amount_total math holds).
+		const schema = buildTransactionSchema({ settlementCurrency: 'THB', memberIds: ['m1', 'm2'] });
+		expect(schema.safeParse(detail.input).success).toBe(true);
+	});
+
+	it('reconstructs a FOREIGN-currency txn preserving currency + exchange_rate (§7.6)', async () => {
+		// CN¥90.00 equal split in a THB group @4.85 → settlement 43650.
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow({ currency: 'CNY', exchangeRate: '4.85', amountTotalSettlement: 43650 }),
+			[{ memberId: 'm1', amountPaid: 9000 }],
+			[
+				{ memberId: 'm1', amountOwed: 21825, shareWeight: null, rawAmount: null },
+				{ memberId: 'm2', amountOwed: 21825, shareWeight: null, rawAmount: null }
+			],
+			[],
+			[]
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.currency).toBe('CNY');
+		expect(detail.isForeign).toBe(true);
+		expect(detail.input.currency).toBe('CNY');
+		expect(detail.input.exchangeRate).toBe('4.85');
+		expect(detail.input.amountTotal).toBe(9000); // CNY entry minor
+		expect(detail.input.amountTotalSettlement).toBe(43650);
+		// Round-trips through the schema (FX scalar check passes).
+		const schema = buildTransactionSchema({ settlementCurrency: 'THB', memberIds: ['m1', 'm2'] });
+		expect(schema.safeParse(detail.input).success).toBe(true);
+	});
+
+	it('still returns a SOFT-DELETED txn (so it can be restored), marked deleted', async () => {
+		const deletedAt = new Date('2026-03-01T00:00:00.000Z');
+		queueSelects(
+			ACCESS_OK,
+			SETTLEMENT_THB,
+			txnRow({ deletedAt }),
+			[{ memberId: 'm1', amountPaid: 9000 }],
+			[
+				{ memberId: 'm1', amountOwed: 4500, shareWeight: null, rawAmount: null },
+				{ memberId: 'm2', amountOwed: 4500, shareWeight: null, rawAmount: null }
+			],
+			[],
+			[]
+		);
+		const detail = await getTransactionDetail({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(detail.deletedAt).toBe(deletedAt.toISOString());
+		expect(detail.title).toBe('Dinner');
+	});
+});
+
+describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.1, §12.1)', () => {
+	// SELECT order inside the tx (settlementCurrency PASSED, so loadSettlementCurrency
+	// is skipped): access → load txn (title,deletedAt) → activeMembers → category
+	// existence → deleteTransactionChildren item-id lookup.
+	function queueEditSelects(opts: { deletedAt?: Date | null; itemIds?: { id: string }[] } = {}) {
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Dinner', deletedAt: opts.deletedAt ?? null }],
+			ACTIVE_MEMBERS,
+			CATEGORY_ROW,
+			opts.itemIds ?? [] // existing item ids to delete (none for a non-itemized txn)
+		);
+	}
+
+	it('updates the txn row (occurred_at untouched, updated_at bumped, created_at from input)', async () => {
+		queueEditSelects();
+		const when = new Date('2026-05-05T05:05:05.000Z');
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: { ...equalInput(), title: 'Lunch' },
+			settlementCurrency: 'THB',
+			now: () => when
+		});
+
+		const txnUpdate = updatesTo('transactions');
+		expect(txnUpdate).toHaveLength(1);
+		const set = txnUpdate[0].values;
+		expect(set.title).toBe('Lunch');
+		// created_at = the editable real-world date (from `now`); updated_at bumped too.
+		expect(set.createdAt).toBe(when);
+		expect(set.updatedAt).toBe(when);
+		// occurred_at is IMMUTABLE — never written on edit (§7.1).
+		expect('occurredAt' in set).toBe(false);
+		// Everything through the SAME open tx handle (§12.1).
+		expect((txnUpdate[0].via as { name: string }).name).toBe('tx');
+	});
+
+	it('deletes ALL existing child rows then re-inserts the freshly resolved ones', async () => {
+		queueEditSelects();
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		// Children replaced: payers + shares + items + charges deleted (item-shares only
+		// when there were items — none here). Then re-inserted.
+		expect(deletesTo('transaction_payers')).toHaveLength(1);
+		expect(deletesTo('transaction_shares')).toHaveLength(1);
+		expect(deletesTo('transaction_items')).toHaveLength(1);
+		expect(deletesTo('transaction_charges')).toHaveLength(1);
+		// Re-inserted resolved rows (no transactions INSERT on edit — it's an update).
+		expect(insertsTo('transactions')).toHaveLength(0);
+		expect(insertsTo('transaction_payers')).toHaveLength(1);
+		expect(insertsTo('transaction_shares')).toHaveLength(2);
+		// All deletes + inserts + the audit went through the SAME tx handle (§12.1).
+		expect(deletes.every((d) => (d.via as { name: string }).name === 'tx')).toBe(true);
+		expect(inserts.every((i) => (i.via as { name: string }).name === 'tx')).toBe(true);
+	});
+
+	it('RE-RESOLVES settlement amounts server-side (does not trust client share values)', async () => {
+		queueEditSelects();
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: {
+				...equalInput(),
+				splitMode: 'share',
+				beneficiaries: [
+					{ memberId: 'm1', shareWeight: 1 },
+					{ memberId: 'm2', shareWeight: 2 }
+				]
+			},
+			settlementCurrency: 'THB'
+		});
+		const expected = resolveShares({
+			splitMode: 'share',
+			amountTotal: 9000,
+			beneficiaries: [
+				{ memberId: 'm1', shareWeight: 1 },
+				{ memberId: 'm2', shareWeight: 2 }
+			]
+		});
+		const shareRows = insertsTo('transaction_shares').map((i) => ({
+			memberId: i.values.memberId,
+			amountOwed: i.values.amountOwed
+		}));
+		expect(shareRows).toEqual(
+			expected.map((e) => ({ memberId: e.memberId, amountOwed: e.amountOwed }))
+		);
+		expect(shareRows).toEqual([
+			{ memberId: 'm1', amountOwed: 3000 },
+			{ memberId: 'm2', amountOwed: 6000 }
+		]);
+	});
+
+	it('writes an `edit` audit row (entity=transaction) through the SAME tx', async () => {
+		queueEditSelects();
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: { ...equalInput(), title: 'Lunch' },
+			settlementCurrency: 'THB'
+		});
+		const audit = insertsTo('audit_log');
+		expect(audit).toHaveLength(1);
+		expect(audit[0].values.action).toBe('edit');
+		expect(audit[0].values.entityType).toBe('transaction');
+		expect(audit[0].values.entityId).toBe('t1');
+		expect(String(audit[0].values.summary)).toContain('Lunch');
+		expect((audit[0].via as { name: string }).name).toBe('tx');
+	});
+
+	it('deletes item-shares per existing item id when the txn HAD items', async () => {
+		queueEditSelects({ itemIds: [{ id: 'old-i0' }, { id: 'old-i1' }] });
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		// One item-shares delete per existing item id (keyed by item_id).
+		expect(deletesTo('transaction_item_shares')).toHaveLength(2);
+	});
+
+	it('REFUSES to edit a soft-deleted txn (TransactionDeletedError); no writes', async () => {
+		queueEditSelects({ deletedAt: new Date('2026-03-01T00:00:00.000Z') });
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: equalInput(),
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionDeletedError);
+		expect(updates).toHaveLength(0);
+		expect(inserts).toHaveLength(0);
+		expect(deletes).toHaveLength(0);
+	});
+
+	it('rejects invalid input with TransactionValidationError; no writes', async () => {
+		queueEditSelects();
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: { ...equalInput(), payers: [{ memberId: 'm1', amountPaid: 1 }] },
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(updates).toHaveLength(0);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('throws TransactionNotFoundError when the txn is not in this group; no writes', async () => {
+		queueSelects(ACCESS_OK, []); // access ok, but no txn row
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 'nope',
+				input: equalInput(),
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionNotFoundError);
+		expect(updates).toHaveLength(0);
+	});
+
+	it('access denied → GroupAccessError, no writes', async () => {
+		queueSelects([]); // access fails
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: equalInput(),
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(GroupAccessError);
+		expect(updates).toHaveLength(0);
+		expect(inserts).toHaveLength(0);
+	});
+});
+
+describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => {
+	it('soft-delete sets deleted_at + writes a `delete` audit through the SAME tx', async () => {
+		// access → load txn (title,deletedAt).
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		const when = new Date('2026-06-01T00:00:00.000Z');
+		await softDeleteTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			now: () => when
+		});
+		const upd = updatesTo('transactions');
+		expect(upd).toHaveLength(1);
+		expect(upd[0].values.deletedAt).toBe(when);
+		const audit = insertsTo('audit_log');
+		expect(audit).toHaveLength(1);
+		expect(audit[0].values.action).toBe('delete');
+		expect(audit[0].values.entityType).toBe('transaction');
+		// Same tx handle → the audit row commits/rolls back WITH the soft-delete (§12.1).
+		expect((upd[0].via as { name: string }).name).toBe('tx');
+		expect((audit[0].via as { name: string }).name).toBe('tx');
+	});
+
+	it('restore clears deleted_at + writes a `restore` audit through the SAME tx', async () => {
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: new Date() }]);
+		await restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		const upd = updatesTo('transactions');
+		expect(upd).toHaveLength(1);
+		expect(upd[0].values.deletedAt).toBeNull();
+		const audit = insertsTo('audit_log');
+		expect(audit).toHaveLength(1);
+		expect(audit[0].values.action).toBe('restore');
+		expect((audit[0].via as { name: string }).name).toBe('tx');
+	});
+
+	it('both are access-checked → GroupAccessError, no writes', async () => {
+		queueSelects([]); // access fails
+		await expect(
+			softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' })
+		).rejects.toBeInstanceOf(GroupAccessError);
+		queueSelects([]);
+		await expect(
+			restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' })
+		).rejects.toBeInstanceOf(GroupAccessError);
+		expect(updates).toHaveLength(0);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('not-found (wrong group / bogus id) → TransactionNotFoundError, no writes', async () => {
+		queueSelects(ACCESS_OK, []); // access ok, no txn row
+		await expect(
+			softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 'nope' })
+		).rejects.toBeInstanceOf(TransactionNotFoundError);
+		expect(updates).toHaveLength(0);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('the audit trail is written independent of the soft-delete (append-only, outlives it)', async () => {
+		// A soft-delete followed by a restore both append their own audit rows — neither
+		// removes prior history (§12.1: append-only, outlives the soft-delete).
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		await softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(insertsTo('audit_log')).toHaveLength(1);
+		inserts.length = 0;
+		updates.length = 0;
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: new Date() }]);
+		await restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		const audit = insertsTo('audit_log');
+		expect(audit).toHaveLength(1);
+		expect(audit[0].values.action).toBe('restore');
 	});
 });
