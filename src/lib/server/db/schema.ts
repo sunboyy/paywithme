@@ -27,8 +27,9 @@
 //     (task 4.2) → re-exported from `transactions-schema.ts`, hand-authored
 //     ledger tables (PLAN §9, §7.6, §8). SCHEMA-ONLY: money is integer minor
 //     units in `bigint` columns, `exchange_rate` is `numeric(18,6)`, and the
-//     enum-like columns are `text`. `categories` is created here but SEEDED in
-//     task 4.3. The `created_at` (real-world, editable) vs `occurred_at`
+//     enum-like columns are `text`. `categories` is created here and SEEDED in
+//     task 4.3 (14 fixed rows + a `sort_order` column; canonical data
+//     `src/lib/categories.ts`). The `created_at` (real-world, editable) vs `occurred_at`
 //     (immutable server insert time) naming is DELIBERATELY reversed (§7.1).
 //   - audit_log (task 4.2) → re-exported from `audit-schema.ts`, the append-only
 //     audit trail (PLAN §9, §12.1): no updated_at / no soft-delete; `entity_id`

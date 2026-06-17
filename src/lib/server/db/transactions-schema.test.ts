@@ -28,7 +28,8 @@ describe('categories drizzle table', () => {
 			'appliesTo',
 			'icon',
 			'id',
-			'name'
+			'name',
+			'sortOrder'
 		]);
 	});
 
@@ -43,6 +44,10 @@ describe('categories drizzle table', () => {
 		expect(c.appliesTo.name).toBe('applies_to');
 		expect(c.appliesTo.notNull).toBe(true);
 		expect(c.appliesTo.columnType).toBe('PgText');
+		// sort_order: display order within an applies_to set (PLAN §7.3).
+		expect(c.sortOrder.name).toBe('sort_order');
+		expect(c.sortOrder.notNull).toBe(true);
+		expect(c.sortOrder.columnType).toBe('PgInteger');
 	});
 
 	it('is re-exported from the schema entry point', () => {

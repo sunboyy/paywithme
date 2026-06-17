@@ -85,7 +85,11 @@ export const categories = pgTable('categories', {
 	icon: text('icon').notNull(),
 	// Constrained value set: 'spending' | 'transfer' (text, validated at the Zod
 	// layer in 4.4). Determines which transaction `type` may use the category.
-	appliesTo: text('applies_to').notNull()
+	appliesTo: text('applies_to').notNull(),
+	// Display order WITHIN an `applies_to` set (PLAN §7.3): the transaction form
+	// shows only the categories whose `applies_to` matches the selected type, in
+	// this order. Canonical values live in `src/lib/categories.ts` (seed source).
+	sortOrder: integer('sort_order').notNull()
 });
 
 // ── transactions ─────────────────────────────────────────────────────────────

@@ -43,6 +43,13 @@
       "when": 1781669119622,
       "tag": "0005_redundant_raider",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781669707350,
+      "tag": "0006_aspiring_stranger",
+      "breakpoints": true
     }
   ]
 }
