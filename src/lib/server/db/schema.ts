@@ -22,11 +22,23 @@
 //     hand-authored (PLAN §7.5.1): the 29 supported fiat currencies (code PK,
 //     name, exponent, symbol). The table DDL + the 29-row idempotent seed live
 //     in the migration; the canonical data is `src/lib/money/currencies.ts`.
-//
-// Tables still to come in later tasks:
-//   - transactions / audit_log → Phase 4+
+//   - categories / transactions / transaction_payers / transaction_shares /
+//     transaction_items / transaction_item_shares / transaction_charges
+//     (task 4.2) → re-exported from `transactions-schema.ts`, hand-authored
+//     ledger tables (PLAN §9, §7.6, §8). SCHEMA-ONLY: money is integer minor
+//     units in `bigint` columns, `exchange_rate` is `numeric(18,6)`, and the
+//     enum-like columns are `text`. `categories` is created here and SEEDED in
+//     task 4.3 (14 fixed rows + a `sort_order` column; canonical data
+//     `src/lib/categories.ts`). The `created_at` (real-world, editable) vs `occurred_at`
+//     (immutable server insert time) naming is DELIBERATELY reversed (§7.1).
+//   - audit_log (task 4.2) → re-exported from `audit-schema.ts`, the append-only
+//     audit trail (PLAN §9, §12.1): no updated_at / no soft-delete; `entity_id`
+//     is deliberately NOT a FK (may dangle after hard-delete); `metadata` is
+//     `jsonb`. The audit-write helper is task 4.6.
 
 export * from './auth-schema';
 export * from './rate-limit-schema';
 export * from './groups-schema';
 export * from './currencies-schema';
+export * from './transactions-schema';
+export * from './audit-schema';

@@ -11,6 +11,7 @@
 	//
 	// shadcn-svelte components are used from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored / edited here).
+	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { toast } from 'svelte-sonner';
@@ -19,7 +20,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
 	import { Badge } from '$lib/components/ui/badge';
-	import { Button } from '$lib/components/ui/button';
+	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
@@ -132,9 +133,17 @@
 </svelte:head>
 
 <div class="space-y-6">
-	<div class="space-y-1">
-		<h1 class="text-2xl font-semibold tracking-tight">{data.group.name}</h1>
-		<p class="text-muted-foreground text-sm">Manage who's splitting in this group.</p>
+	<div class="flex items-start justify-between gap-2">
+		<div class="space-y-1">
+			<h1 class="text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+			<p class="text-muted-foreground text-sm">Manage who's splitting in this group.</p>
+		</div>
+		<a
+			href={resolve('/groups/[id]/transactions', { id: data.group.id })}
+			class={buttonVariants({ variant: 'outline', size: 'sm' })}
+		>
+			Transactions
+		</a>
 	</div>
 
 	{#if statusMessage}
