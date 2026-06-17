@@ -56,10 +56,15 @@ import {
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog } from './audit';
-import { buildTransactionSchema, type TransactionInput } from '$lib/schemas/transaction';
+import {
+	buildTransactionSchema,
+	convertToSettlement,
+	type TransactionInput
+} from '$lib/schemas/transaction';
 import {
 	resolveShares,
 	resolveItemizedWithCharges,
+	distributeToSettlement,
 	type ResolvedShare
 } from '$lib/transactions/resolve';
 import { getCategory } from '$lib/categories';
@@ -160,10 +165,22 @@ export async function createTransaction({
 		}
 		const data = parsed.data;
 
-		// Single-currency only: foreign-currency FX is task 4.10. Itemized splits +
-		// charges/discounts are now supported (tasks 4.8/4.9); this guard now only
-		// rejects a foreign `currency` so a smuggled FX payload fails here.
-		assertSingleCurrencyScope(data, currency);
+		// charges/discounts are now supported (tasks 4.8/4.9); foreign currency + manual
+		// FX is now supported too (task 4.10). The shared schema (task 4.4) enforces every
+		// §7.6 FX rule from the payload alone — supported currency, rate==1 iff same
+		// currency, rate>0 for a foreign currency, and the scalar
+		// `amount_total_settlement == convert(amount_total, rate)` — so the single-currency
+		// scope guard is retired: the schema IS the gate.
+
+		// Canonical settlement total — RECOMPUTED server-side from trusted context (the
+		// validated currency/rate), NEVER trusting the client's `amountTotalSettlement`
+		// (defense in depth; the schema already validated the client value equals this).
+		const amountTotalSettlement = convertToSettlement(
+			data.amountTotal,
+			data.currency as CurrencyCode,
+			currency,
+			data.exchangeRate
+		);
 
 		// Category must exist in the seeded set AND match the type (the schema already
 		// checks the in-app constant; this is the DB-existence half, task 4.7's job).
@@ -185,6 +202,26 @@ export async function createTransaction({
 					beneficiaries: data.beneficiaries
 				});
 
+		// CONVERT-THEN-DISTRIBUTE into settlement currency (PLAN §7.6). Splitting /
+		// itemization / charges all ran in the TXN currency above (per-member owed,
+		// per-payer paid). Now a SINGLE conversion of the total → `amountTotalSettlement`,
+		// then distribute THAT one settlement total across members weighted by their
+		// txn-currency owed (and across payers weighted by their txn-currency paid) via
+		// `distributeToSettlement` (largest-remainder). Distributing the SAME total to both
+		// sides ties paid and owed to one number, so Σ owed == Σ paid == amountTotalSettlement
+		// and group balances always net to 0. For currency==settlement this is a
+		// byte-identical no-op (rate 1, settlement total == txn total).
+		const settlementOwed = distributeToSettlement(
+			resolved.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
+			amountTotalSettlement
+		);
+		const settlementOwedByMember = new Map(settlementOwed.map((s) => [s.memberId, s.amountOwed]));
+		const settlementPaid = distributeToSettlement(
+			data.payers.map((p) => ({ memberId: p.memberId, amount: p.amountPaid })),
+			amountTotalSettlement
+		);
+		const settlementPaidByMember = new Map(settlementPaid.map((s) => [s.memberId, s.amountOwed]));
+
 		const transactionId = crypto.randomUUID();
 
 		// 1) The transaction row. `created_at` = the user's real-world date (default
@@ -196,22 +233,24 @@ export async function createTransaction({
 			title: data.title,
 			categoryId: data.categoryId,
 			amountTotal: data.amountTotal,
-			currency,
-			// Single-currency: rate is exactly 1, settlement total == txn total (§7.6).
-			exchangeRate: '1',
-			amountTotalSettlement: data.amountTotal,
+			// The REAL entry currency + manual FX rate (§7.6) — no longer hardcoded '1'.
+			currency: data.currency,
+			exchangeRate: data.exchangeRate,
+			// Server-recomputed canonical settlement total (defense in depth, §7.6).
+			amountTotalSettlement,
 			splitMode: data.splitMode,
 			createdBy: userId,
 			createdAt: now()
 		});
 
-		// 2) Payer rows. amount_paid_settlement == amount_paid (currency==settlement).
+		// 2) Payer rows. `amount_paid` stays in the TXN currency; `amount_paid_settlement`
+		//    is the settlement-DISTRIBUTED paid (§7.6) — Σ == amountTotalSettlement.
 		for (const payer of data.payers) {
 			await tx.insert(transactionPayers).values({
 				transactionId,
 				memberId: payer.memberId,
 				amountPaid: payer.amountPaid,
-				amountPaidSettlement: payer.amountPaid
+				amountPaidSettlement: settlementPaidByMember.get(payer.memberId) ?? 0
 			});
 		}
 
@@ -269,7 +308,8 @@ export async function createTransaction({
 				await tx.insert(transactionShares).values({
 					transactionId,
 					memberId: share.memberId,
-					amountOwed: share.amountOwed,
+					// SETTLEMENT-distributed owed (§7.6); §8 reads this. Σ == amountTotalSettlement.
+					amountOwed: settlementOwedByMember.get(share.memberId) ?? 0,
 					shareWeight: null,
 					rawAmount: null
 				});
@@ -278,11 +318,12 @@ export async function createTransaction({
 			// Non-itemized share rows. The RESOLVED owed (txn-currency) == settlement owed
 			// here. The raw inputs (share_weight / raw_amount) are preserved for 4.11.
 			for (const beneficiary of data.beneficiaries) {
-				const owed = resolved.find((r) => r.memberId === beneficiary.memberId)?.amountOwed ?? 0;
+				// SETTLEMENT-distributed owed (§7.6) — the §8 source of truth. The raw inputs
+				// (share_weight / raw_amount, TXN currency) are preserved for 4.11 re-edit.
 				await tx.insert(transactionShares).values({
 					transactionId,
 					memberId: beneficiary.memberId,
-					amountOwed: owed,
+					amountOwed: settlementOwedByMember.get(beneficiary.memberId) ?? 0,
 					shareWeight: beneficiary.shareWeight ?? null,
 					rawAmount: beneficiary.rawAmount ?? null
 				});
@@ -290,19 +331,28 @@ export async function createTransaction({
 		}
 
 		// 4) Audit row — IN THE SAME TRANSACTION (PLAN §12.1). Human summary via
-		//    `lib/money` `formatAmount` (e.g. "Added spending 'Dinner' — ฿90.00").
+		//    `lib/money` `formatAmount` in the ENTRY currency (e.g. "Added spending
+		//    'Dinner' — ฿90.00"); for a foreign transaction the settlement equivalent
+		//    is appended (e.g. "CN¥90.00 (฿436.50)", §7.6).
+		const entryCurrency = data.currency as CurrencyCode;
+		const isForeign = entryCurrency !== currency;
+		const amountSummary = isForeign
+			? `${formatAmount(data.amountTotal, entryCurrency)} (${formatAmount(amountTotalSettlement, currency)})`
+			: formatAmount(data.amountTotal, entryCurrency);
 		await writeAuditLog(tx, {
 			groupId,
 			actorUserId: userId,
 			action: 'create',
 			entityType: 'transaction',
 			entityId: transactionId,
-			summary: `Added ${data.type} '${data.title}' — ${formatAmount(data.amountTotal, currency)}`,
+			summary: `Added ${data.type} '${data.title}' — ${amountSummary}`,
 			metadata: {
 				type: data.type,
 				categoryId: data.categoryId,
 				amountTotal: data.amountTotal,
-				currency,
+				currency: entryCurrency,
+				amountTotalSettlement,
+				settlementCurrency: currency,
 				splitMode: data.splitMode
 			}
 		});
@@ -333,27 +383,7 @@ async function loadSettlementCurrency(
 	return row.settlementCurrency as CurrencyCode;
 }
 
-/**
- * Guard the supported scope. As of task 4.8 itemized splits + (non-empty) `items`
- * are ALLOWED, and as of task 4.9 `charges`/discounts are too (both resolved +
- * persisted below). Only a FOREIGN currency stays REJECTED here (task 4.10). The
- * shared schema validates the full payload, so a hand-crafted payload could smuggle
- * a deferred feature past validation; reject those HERE with a clear seam rather
- * than silently persisting them.
- */
-function assertSingleCurrencyScope(data: TransactionInput, settlementCurrency: CurrencyCode): void {
-	const issues: z.core.$ZodIssue[] = [];
-	// Itemized split + items (4.8) and charges/discounts (4.9) are now supported.
-	if (data.currency !== settlementCurrency) {
-		// Multi-currency / manual FX is task 4.10.
-		issues.push(makeIssue(['currency'], 'Foreign-currency transactions are not supported yet'));
-	}
-	if (issues.length > 0) {
-		throw new TransactionValidationError(issues);
-	}
-}
-
-/** Build a minimal custom Zod issue for the scope guards above. */
+/** Build a minimal custom Zod issue for the category guard below. */
 function makeIssue(path: (string | number)[], message: string): z.core.$ZodIssue {
 	return { code: 'custom', path, message } as z.core.$ZodIssue;
 }
@@ -393,10 +423,20 @@ export interface TransactionListItem {
 	categoryId: string;
 	categoryName: string;
 	categoryIcon: string;
+	/**
+	 * The ORIGINAL transaction total, in the ENTRY currency's minor units (§7.6
+	 * display: lists/detail show the original amount + currency). For a same-currency
+	 * transaction this equals the settlement total.
+	 */
+	amountTotal: number;
+	/** The ENTRY currency the transaction was recorded in — what `amountTotal` is in. */
+	currency: CurrencyCode;
 	/** Settlement-currency minor units (the canonical total §8 reads). */
 	amountTotalSettlement: number;
 	/** Group settlement currency code — what `amountTotalSettlement` is denominated in. */
 	settlementCurrency: CurrencyCode;
+	/** Whether the entry currency differs from the group's settlement currency (§7.6). */
+	isForeign: boolean;
 	/** The real-world date (PLAN §7.1 `created_at`), ISO string — the display/sort date. */
 	createdAt: string;
 }
@@ -416,6 +456,11 @@ export async function listTransactions({
 	filters?: TransactionListFilters;
 }): Promise<TransactionListItem[]> {
 	await assertGroupAccess(userId, groupId);
+
+	// The group's settlement currency denominates every `amount_total_settlement`
+	// (§7.6) — load it once so foreign-currency rows display their settlement
+	// equivalent in the group currency, not the entry currency.
+	const settlementCurrency = await loadSettlementCurrency(groupId, db);
 
 	const conditions = [
 		eq(transactions.groupId, groupId),
@@ -437,6 +482,7 @@ export async function listTransactions({
 			categoryId: transactions.categoryId,
 			categoryName: categories.name,
 			categoryIcon: categories.icon,
+			amountTotal: transactions.amountTotal,
 			amountTotalSettlement: transactions.amountTotalSettlement,
 			currency: transactions.currency,
 			createdAt: transactions.createdAt
@@ -448,18 +494,25 @@ export async function listTransactions({
 		// the immutable insert-time tie-break.
 		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt));
 
-	// `currency` on a transaction is the ENTRY currency; for 4.7 it equals the
-	// group settlement currency (single-currency), so the settlement total is
-	// denominated in it. (4.10 will load the group's settlement currency directly.)
-	return rows.map((r) => ({
-		id: r.id,
-		type: r.type as 'spending' | 'transfer',
-		title: r.title,
-		categoryId: r.categoryId,
-		categoryName: r.categoryName,
-		categoryIcon: r.categoryIcon,
-		amountTotalSettlement: r.amountTotalSettlement,
-		settlementCurrency: r.currency as CurrencyCode,
-		createdAt: r.createdAt.toISOString()
-	}));
+	// `currency` is the ENTRY currency the row was recorded in (§7.6); it may differ
+	// from the group's `settlementCurrency`, which is what `amountTotalSettlement` is
+	// always denominated in. The list surfaces BOTH so the UI can show the original
+	// amount + currency with the settlement equivalent as secondary text (§7.6 display).
+	return rows.map((r) => {
+		const entryCurrency = r.currency as CurrencyCode;
+		return {
+			id: r.id,
+			type: r.type as 'spending' | 'transfer',
+			title: r.title,
+			categoryId: r.categoryId,
+			categoryName: r.categoryName,
+			categoryIcon: r.categoryIcon,
+			amountTotal: r.amountTotal,
+			currency: entryCurrency,
+			amountTotalSettlement: r.amountTotalSettlement,
+			settlementCurrency,
+			isForeign: entryCurrency !== settlementCurrency,
+			createdAt: r.createdAt.toISOString()
+		};
+	});
 }

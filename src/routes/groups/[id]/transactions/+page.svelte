@@ -156,8 +156,17 @@
 								{txn.categoryName} · {formatDate(txn.createdAt)}
 							</span>
 						</span>
-						<span class="shrink-0 font-medium tabular-nums">
-							{formatAmount(txn.amountTotalSettlement, settlementCurrency)}
+						<!-- §7.6 display: show the ORIGINAL amount + currency; for a foreign
+						     transaction the settlement equivalent is secondary text below. -->
+						<span class="shrink-0 text-right">
+							<span class="block font-medium tabular-nums">
+								{formatAmount(txn.amountTotal, txn.currency)}
+							</span>
+							{#if txn.isForeign}
+								<span class="text-muted-foreground block text-xs tabular-nums">
+									{formatAmount(txn.amountTotalSettlement, settlementCurrency)}
+								</span>
+							{/if}
 						</span>
 					</a>
 				</li>

@@ -3,11 +3,13 @@ import {
 	resolveShares,
 	resolveItemizedShares,
 	resolveItemizedWithCharges,
+	distributeToSettlement,
 	type ResolveSharesInput
 } from './resolve';
 import {
 	buildTransactionSchema,
 	applyCharges,
+	convertToSettlement,
 	type TransactionInput,
 	type ItemInput,
 	type ChargeInput
@@ -900,5 +902,151 @@ describe('resolveItemizedWithCharges — edge cases (§7.2.3 notes)', () => {
 		expect(result.amountTotal).toBe(1080);
 		expect(byMember(result.shares)).toEqual({ m1: 648, m2: 432 });
 		expect(sumOwed(result.shares)).toBe(1080);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FX convert-then-distribute (PLAN §7.6 — task 4.10).
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `distributeToSettlement` takes a SINGLE canonical settlement total (already
+// converted once via `convertToSettlement`) and distributes it across txn-currency
+// lines weighted by each line's txn amount, via the largest-remainder `distribute`.
+// The crux invariants proven here:
+//   - Σ settlement == the settlement total EXACTLY (never converting each share
+//     independently — that's how balances stay tied to one number);
+//   - owed AND paid distributed from the SAME total ⇒ each member's net (paid −
+//     owed, settlement) sums to 0 across the group;
+//   - a 0-weight line → 0 settlement;
+//   - cross-exponent pairs (CNY 2dp → JPY 0dp; JPY 0dp → THB 2dp) and same-exponent
+//     (CNY → THB) all sum exactly;
+//   - round-half-up boundary handed out by ascending member id;
+//   - rate-1 same-currency is a byte-identical no-op (settlement amounts == txn).
+describe('distributeToSettlement (PLAN §7.6)', () => {
+	/** Net (paid − owed) per member from two settlement distributions over the SAME total. */
+	function netByMember(
+		paid: { memberId: string; amountOwed: number }[],
+		owed: { memberId: string; amountOwed: number }[]
+	): Record<string, number> {
+		const net: Record<string, number> = {};
+		for (const p of paid) net[p.memberId] = (net[p.memberId] ?? 0) + p.amountOwed;
+		for (const o of owed) net[o.memberId] = (net[o.memberId] ?? 0) - o.amountOwed;
+		return net;
+	}
+
+	it('worked §7.6 example: CNY→THB @4.85, ¥200.00 → ฿970.00, sums exactly', () => {
+		// Single payer ¥200; split equally between m1/m2 (¥100 each in txn currency).
+		const settlementTotal = convertToSettlement(20000, 'CNY', 'THB', '4.85');
+		expect(settlementTotal).toBe(97000); // ฿970.00
+
+		const owed = distributeToSettlement(
+			[
+				{ memberId: 'm1', amount: 10000 },
+				{ memberId: 'm2', amount: 10000 }
+			],
+			settlementTotal
+		);
+		expect(byMember(owed)).toEqual({ m1: 48500, m2: 48500 });
+		expect(sumOwed(owed)).toBe(settlementTotal);
+	});
+
+	it('owed + paid from the SAME settlement total ⇒ each member nets out, group sums to 0', () => {
+		// CNY→THB @4.85. Txn total ¥333.33 (33333 minor) — deliberately not divisible.
+		const settlementTotal = convertToSettlement(33333, 'CNY', 'THB', '4.85');
+		// m1 paid the whole ¥333.33; owed split 3 ways (¥111.11 each, remainder to m1).
+		const owedLines = [
+			{ memberId: 'm1', amount: 11111 },
+			{ memberId: 'm2', amount: 11111 },
+			{ memberId: 'm3', amount: 11111 }
+		];
+		const paidLines = [
+			{ memberId: 'm1', amount: 33333 },
+			{ memberId: 'm2', amount: 0 },
+			{ memberId: 'm3', amount: 0 }
+		];
+		const owed = distributeToSettlement(owedLines, settlementTotal);
+		const paid = distributeToSettlement(paidLines, settlementTotal);
+
+		// Both sides sum EXACTLY to the one settlement total.
+		expect(sumOwed(owed)).toBe(settlementTotal);
+		expect(sumOwed(paid)).toBe(settlementTotal);
+
+		// Net (paid − owed) per member sums to 0 across the group (balances tie out).
+		const net = netByMember(paid, owed);
+		const groupSum = Object.values(net).reduce((a, b) => a + b, 0);
+		expect(groupSum).toBe(0);
+	});
+
+	it('a 0-weight line gets 0 settlement (weight 0)', () => {
+		const settlementTotal = convertToSettlement(10000, 'CNY', 'THB', '4.85'); // ฿485.00
+		const owed = distributeToSettlement(
+			[
+				{ memberId: 'm1', amount: 10000 },
+				{ memberId: 'm2', amount: 0 }
+			],
+			settlementTotal
+		);
+		expect(byMember(owed)).toEqual({ m1: 48500, m2: 0 });
+		expect(sumOwed(owed)).toBe(settlementTotal);
+	});
+
+	it('cross-exponent CNY (2dp) → JPY (0dp) sums exactly', () => {
+		// ¥200.00 @21.5 → ¥4300 (0-dp). Split 3 ways: 1434/1433/1433, remainder to m1.
+		const settlementTotal = convertToSettlement(20000, 'CNY', 'JPY', '21.5');
+		expect(settlementTotal).toBe(4300);
+		const owed = distributeToSettlement(
+			[
+				{ memberId: 'm1', amount: 6667 },
+				{ memberId: 'm2', amount: 6667 },
+				{ memberId: 'm3', amount: 6666 }
+			],
+			settlementTotal
+		);
+		expect(sumOwed(owed)).toBe(4300);
+		// Largest remainders win: m1 (highest weight) and the ascending tie-break.
+		expect(owed.every((s) => Number.isInteger(s.amountOwed))).toBe(true);
+	});
+
+	it('cross-exponent JPY (0dp) → THB (2dp) sums exactly', () => {
+		// ¥1000 (0-dp) @0.235 → ฿235.00 (2-dp) = 23500.
+		const settlementTotal = convertToSettlement(1000, 'JPY', 'THB', '0.235');
+		expect(settlementTotal).toBe(23500);
+		const owed = distributeToSettlement(
+			[
+				{ memberId: 'm1', amount: 600 },
+				{ memberId: 'm2', amount: 400 }
+			],
+			settlementTotal
+		);
+		// 23500 × 600/1000 = 14100; × 400/1000 = 9400.
+		expect(byMember(owed)).toEqual({ m1: 14100, m2: 9400 });
+		expect(sumOwed(owed)).toBe(23500);
+	});
+
+	it('round-half-up boundary: equal split of an odd settlement total favours lower member id', () => {
+		// settlement total 101 split equally between m1/m2 → 51/50 (leftover unit to m1).
+		const owed = distributeToSettlement(
+			[
+				{ memberId: 'm2', amount: 100 },
+				{ memberId: 'm1', amount: 100 }
+			],
+			101
+		);
+		expect(byMember(owed)).toEqual({ m1: 51, m2: 50 });
+		expect(sumOwed(owed)).toBe(101);
+	});
+
+	it('rate-1 same-currency is a no-op: settlement amounts == txn amounts', () => {
+		// THB group, THB txn @1: settlement total == txn total, and distributing it by
+		// the txn-currency owed hands each member EXACTLY its txn owed (Σ weight == total).
+		const settlementTotal = convertToSettlement(9000, 'THB', 'THB', '1');
+		expect(settlementTotal).toBe(9000);
+		const txnOwed = [
+			{ memberId: 'm1', amount: 3000 },
+			{ memberId: 'm2', amount: 6000 }
+		];
+		const owed = distributeToSettlement(txnOwed, settlementTotal);
+		expect(byMember(owed)).toEqual({ m1: 3000, m2: 6000 });
+		expect(sumOwed(owed)).toBe(9000);
 	});
 });

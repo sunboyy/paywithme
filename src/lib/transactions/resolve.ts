@@ -347,6 +347,50 @@ export function resolveItemizedWithCharges(
 	return { items: itemized.items, subtotalShares, charges: resolvedCharges, shares, amountTotal };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FX: convert-then-distribute into settlement-currency shares (PLAN §7.6 — task 4.10).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Distribute a SINGLE canonical `settlementTotal` (settlement-currency minor
+ * units — already converted once from the transaction total via
+ * `convertToSettlement`) across the given transaction-currency lines, weighted by
+ * each line's txn-currency amount, using `distribute` (largest-remainder +
+ * ascending-`member_id` tie-break). The returned settlement amounts sum **exactly**
+ * to `settlementTotal` (PLAN §7.6 step 2/3).
+ *
+ * This is the convert-THEN-distribute primitive shared by BOTH the owed side
+ * (`transaction_share.amount_owed`) and the paid side
+ * (`transaction_payer.amount_paid_settlement`): pass each member's txn-currency
+ * `amountOwed` (or each payer's txn-currency `amountPaid`) as the weight. Because
+ * paid and owed are both distributed from the SAME `settlementTotal`, Σ paid ==
+ * Σ owed == `settlementTotal`, so group balances always net to 0 (§8 reads only
+ * these settlement amounts).
+ *
+ * A line with 0 txn-currency weight → 0 settlement (weight 0). When the txn
+ * currency == settlement, the caller passes `settlementTotal == amountTotal` and
+ * the weights ARE the settlement amounts, so this is a byte-identical no-op
+ * (`distribute` hands each member exactly its weight when Σ weight == total).
+ *
+ * Pure + client-importable (NOT `$lib/server`) — the form's live breakdown calls
+ * it to preview the settlement-converted shares before saving.
+ *
+ * @param lines  each `{ memberId, amount }` in TXN-currency minor units (owed or paid).
+ * @param settlementTotal  the canonical settlement total to distribute (minor units).
+ * @throws if `lines` is empty, or Σ weight is 0 while `settlementTotal ≠ 0`
+ *   (a non-zero settlement total cannot be distributed across zero weight) — both
+ *   surface from `distribute`.
+ */
+export function distributeToSettlement(
+	lines: readonly { readonly memberId: string; readonly amount: number }[],
+	settlementTotal: number
+): ResolvedShare[] {
+	return distribute(
+		settlementTotal,
+		lines.map((l) => ({ memberId: l.memberId, weight: l.amount }))
+	).map((r) => ({ memberId: String(r.memberId), amountOwed: r.amount }));
+}
+
 /**
  * Run `distribute` for the equal/share modes and re-key its `DistributeResult`
  * (`{ memberId, amount }`) into a {@link ResolvedShare} (`{ memberId, amountOwed }`).

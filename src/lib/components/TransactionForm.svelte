@@ -6,13 +6,15 @@
 	// `buildTransactionSchema`) and the submit target; this component renders the
 	// fields and drives the split-mode UI.
 	//
-	// SCOPE (4.7–4.9): spending & transfer; split_mode ∈ {equal, amount, share,
+	// SCOPE (4.7–4.10): spending & transfer; split_mode ∈ {equal, amount, share,
 	// itemized}; a type toggle (Tabs) + a category picker (Select). Itemized (4.8)
 	// adds a repeatable item-row UI (Spending only — §7.2.3). Charges (4.9) add a
 	// repeatable charge-row section + a live computed breakdown (items subtotal →
-	// ± each charge → total, plus each member's resolved final share). The FX /
-	// currency picker (4.10) is a later task — this form leaves a clean seam
-	// (exchangeRate '1', amountTotalSettlement == amountTotal in the single currency).
+	// ± each charge → total, plus each member's resolved final share). FX (4.10) adds
+	// a currency picker (default = group settlement currency); choosing a DIFFERENT
+	// currency reveals a rate / settlement-total entry (enter EITHER; the other is
+	// derived) with a live converted total, and recomputes `amountTotalSettlement`
+	// from the rate. Same-currency stays the no-op seam (rate '1', settlement == txn).
 
 	import type { SuperForm } from 'sveltekit-superforms';
 	import type { TransactionInput, ChargeInput } from '$lib/schemas/transaction';
@@ -31,11 +33,13 @@
 		icon: string;
 	}
 
-	/** The group's settlement currency descriptor (symbol + exponent for entry/format). */
+	/** A currency descriptor (symbol + exponent for entry/format). */
 	export interface FormCurrency {
 		code: string;
 		symbol: string;
 		exponent: number;
+		/** Optional display name (shown in the FX currency picker). */
+		name?: string;
 	}
 
 	export interface TransactionFormProps {
@@ -43,7 +47,13 @@
 		form: SuperForm<TransactionInput>;
 		members: FormMember[];
 		categories: { spending: FormCategory[]; transfer: FormCategory[] };
+		/** The group's SETTLEMENT currency (the default + what balances are shown in). */
 		currency: FormCurrency;
+		/**
+		 * The supported currencies for the FX picker (§7.6). Defaults to just the
+		 * settlement currency when omitted, so a single-currency caller keeps working.
+		 */
+		currencies?: FormCurrency[];
 		/** Submit-button label (e.g. "Add transaction" / "Save changes"). */
 		submitLabel?: string;
 	}
@@ -51,20 +61,21 @@
 
 <script lang="ts">
 	import { formatAmount, parseAmount, type CurrencyCode } from '$lib/money';
-	import { applyCharges } from '$lib/schemas/transaction';
+	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Select from '$lib/components/ui/select';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
-	import { resolveItemizedWithCharges } from '$lib/transactions/resolve';
+	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
 
 	let {
 		form,
 		members,
 		categories,
 		currency,
+		currencies,
 		submitLabel = 'Add transaction'
 	}: TransactionFormProps = $props();
 
@@ -73,10 +84,45 @@
 	// svelte-ignore state_referenced_locally
 	const { form: formData, message, submitting, enhance, errors } = form;
 
-	// The settlement currency is fixed for this form (4.7 single-currency), so
-	// capturing it once is intentional.
+	// The group's SETTLEMENT currency — the default entry currency and what balances
+	// are denominated in. Fixed for this form's lifetime; capturing once is intentional.
 	// svelte-ignore state_referenced_locally
-	const currencyCode = currency.code as CurrencyCode;
+	const settlementCode = currency.code as CurrencyCode;
+
+	// The supported-currency list for the FX picker (§7.6). Falls back to just the
+	// settlement currency so a single-currency caller (no `currencies` prop) still works.
+	// Props don't change after hydration, so capturing them once here is intentional.
+	// svelte-ignore state_referenced_locally
+	const currencyOptions: FormCurrency[] =
+		currencies && currencies.length > 0 ? currencies : [currency];
+
+	// ── FX state (PLAN §7.6) ──────────────────────────────────────────────────────
+	// The chosen ENTRY currency (the txn currency). Defaults to the group settlement
+	// currency; choosing a DIFFERENT one reveals the rate / settlement-total entry.
+	let entryCode = $state(($formData.currency as CurrencyCode) || settlementCode);
+
+	// Whether the chosen entry currency is FOREIGN (≠ settlement) — drives the FX UI.
+	const isForeign = $derived(entryCode !== settlementCode);
+
+	// The descriptor for the CHOSEN entry currency (symbol/exponent for amount entry).
+	const entryCurrency = $derived(currencyOptions.find((c) => c.code === entryCode) ?? currency);
+	// `entryCode` is what every amount field on the form is denominated in.
+	const currencyCode = $derived(entryCode);
+
+	// The FX rate string (settlement units per 1 entry unit, ≤6dp). For a foreign
+	// currency the user types EITHER this OR the settlement-equivalent total below;
+	// the other is derived. Held as a display string (separate from the parsed schema
+	// value) so editing doesn't clobber mid-keystroke. `''` until the user enters one.
+	let rateInput = $state(isForeignInitial() ? ($formData.exchangeRate ?? '') : '');
+	// The settlement-equivalent total display string (the alternative FX entry).
+	let settlementTotalInput = $state('');
+	// Which field the user last edited drives the derivation direction (the OTHER is
+	// computed). 'rate' → derive settlement total; 'total' → derive the rate.
+	let fxDriver = $state<'rate' | 'total'>('rate');
+
+	function isForeignInitial(): boolean {
+		return (($formData.currency as string) || settlementCode) !== settlementCode;
+	}
 
 	// The category set shown depends on the selected type (PLAN §7.3).
 	const typeCategories = $derived(
@@ -86,7 +132,9 @@
 	// ── Amount entry (major-unit strings ↔ minor units) ──────────────────────────
 	// Money is integer MINOR UNITS in the schema; the user types major-unit strings.
 	// We keep a string for the total field and parse → minor units on input, mirror
-	// it into `amountTotal` (and the single-currency `amountTotalSettlement`).
+	// it into `amountTotal` (and `amountTotalSettlement`). The initial display string
+	// is captured once from the seeded currency — intentional (the effect keeps it live).
+	// svelte-ignore state_referenced_locally
 	let totalInput = $state(
 		$formData.amountTotal > 0
 			? formatAmount($formData.amountTotal, currencyCode, { symbol: false })
@@ -113,22 +161,119 @@
 		}
 	}
 
-	// Keep the schema's `amountTotal` + single-currency `amountTotalSettlement` in
-	// sync with the total. For non-itemized that's the typed total; for ITEMIZED the
-	// total is DERIVED (§7.2.2: amount_total == items_subtotal + Σ signed charges) —
-	// the user never types it. A single payer (the default) mirrors the total into
-	// its `amountPaid` so `Σ amountPaid == amountTotal` holds.
+	// ── FX rate / settlement-total derivation (PLAN §7.6) ─────────────────────────
+	// Normalize a typed rate string to the `numeric(18,6)` shape the schema validates
+	// (≤6 fractional digits, positive). Returns null when it isn't a usable rate.
+	function normalizeRate(raw: string): string | null {
+		const trimmed = raw.trim();
+		if (trimmed === '') return null;
+		if (!/^\d{1,12}(?:\.\d+)?$/.test(trimmed)) return null;
+		const n = Number(trimmed);
+		if (!Number.isFinite(n) || n <= 0) return null;
+		// Clamp to ≤6 dp (the numeric(18,6) envelope) without float drift.
+		const [intPart, fracPart = ''] = trimmed.split('.');
+		const frac = fracPart.slice(0, 6).replace(/0+$/, '');
+		return frac === '' ? intPart : `${intPart}.${frac}`;
+	}
+
+	// The CURRENT effective rate string for the chosen entry currency. Same currency →
+	// always '1' (§7.6). Foreign + driver 'rate' → the typed rate. Foreign + driver
+	// 'total' → derived from settlement_total / txn_total (in minor units, exact-ish).
+	const effectiveRate = $derived.by<string | null>(() => {
+		if (!isForeign) return '1';
+		const txnMinor =
+			$formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
+		if (fxDriver === 'rate') {
+			return normalizeRate(rateInput);
+		}
+		// driver 'total': rate = settlement_total / txn_total. Need both totals > 0.
+		const stlMinor = parseSettlement(settlementTotalInput);
+		if (stlMinor === null || txnMinor <= 0) return null;
+		// Convert minor→major-unit ratio: (stl/10^expStl) / (txn/10^expTxn).
+		const expTxn = entryCurrency.exponent;
+		const expStl = currency.exponent;
+		const rate = stlMinor / 10 ** expStl / (txnMinor / 10 ** expTxn);
+		return normalizeRate(rate.toFixed(6));
+	});
+
+	/** Parse the settlement-equivalent total string → settlement-currency minor units. */
+	function parseSettlement(value: string): number | null {
+		const trimmed = value.trim();
+		if (trimmed === '') return null;
+		try {
+			return parseAmount(trimmed, settlementCode);
+		} catch {
+			return null;
+		}
+	}
+
+	// Keep the schema's `amountTotal`, `currency`, `exchangeRate`, and
+	// `amountTotalSettlement` in sync. For non-itemized the total is the typed value;
+	// for ITEMIZED it's DERIVED (§7.2.2). When the entry currency == settlement the
+	// rate is forced to '1' and the settlement total == txn total (no-op). When it's
+	// FOREIGN, the settlement total is RECOMPUTED from the effective rate via
+	// `convertToSettlement` so it stays consistent with what the schema validates
+	// (§7.6: stored canonical = the rate + the recomputed settlement total). A single
+	// payer (the default) mirrors the total so `Σ amountPaid == amountTotal` holds.
 	$effect(() => {
 		const total = $formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
 		$formData.amountTotal = total;
-		// Single-currency (4.7): settlement total == txn total, rate 1.
-		$formData.amountTotalSettlement = total;
-		$formData.exchangeRate = '1';
-		$formData.currency = currency.code;
+		$formData.currency = entryCode;
+		if (!isForeign) {
+			$formData.exchangeRate = '1';
+			$formData.amountTotalSettlement = total;
+		} else {
+			const rate = effectiveRate;
+			$formData.exchangeRate = rate ?? '';
+			// Recompute the canonical settlement total from the rate (consistent with
+			// the §7.6 scalar the schema checks). When the rate isn't valid yet, leave
+			// the settlement total at the txn total as a placeholder (the schema will
+			// reject the invalid rate, surfacing the error before save).
+			$formData.amountTotalSettlement =
+				rate !== null ? convertToSettlement(total, entryCode, settlementCode, rate) : total;
+		}
 		if ($formData.payers.length === 1) {
 			$formData.payers[0].amountPaid = total;
 		}
 	});
+
+	// The live converted total (e.g. "¥200 → ฿970") shown under the FX entry (§7.6/§10).
+	const settlementPreview = $derived.by(() => {
+		if (!isForeign) return null;
+		const rate = effectiveRate;
+		const total = $formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
+		if (rate === null || total <= 0) return null;
+		try {
+			const stl = convertToSettlement(total, entryCode, settlementCode, rate);
+			return { txn: formatAmount(total, entryCode), settlement: formatAmount(stl, settlementCode) };
+		} catch {
+			return null;
+		}
+	});
+
+	/** Switch the entry currency. Back to settlement → clear the rate to 1 (§7.6). */
+	function onCurrencyChange(code: string) {
+		entryCode = code as CurrencyCode;
+		if (code === settlementCode) {
+			rateInput = '';
+			settlementTotalInput = '';
+			fxDriver = 'rate';
+		}
+	}
+
+	function onRateInput(raw: string) {
+		fxDriver = 'rate';
+		rateInput = raw;
+	}
+
+	function onSettlementTotalInput(raw: string) {
+		fxDriver = 'total';
+		settlementTotalInput = raw;
+	}
+
+	const selectedCurrencyLabel = $derived(
+		`${entryCurrency.code}${entryCurrency.name ? ` · ${entryCurrency.name}` : ''}`
+	);
 
 	// ── Beneficiary selection ─────────────────────────────────────────────────────
 	const selectedBeneficiaryIds = $derived(new Set($formData.beneficiaries.map((b) => b.memberId)));
@@ -489,6 +634,26 @@
 	function memberName(memberId: string): string {
 		return members.find((m) => m.id === memberId)?.displayName ?? memberId;
 	}
+
+	// Per-member SETTLEMENT-converted owed for the itemized breakdown (§7.6): convert
+	// the txn total once, then distribute across members by their txn-currency owed —
+	// the SAME convert-then-distribute the service persists. Null when not foreign or
+	// the breakdown/rate isn't ready.
+	const settlementShares = $derived.by(() => {
+		if (!isForeign || !itemizedBreakdown) return null;
+		const stl = $formData.amountTotalSettlement;
+		if (stl <= 0) return null;
+		try {
+			return new Map(
+				distributeToSettlement(
+					itemizedBreakdown.shares.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
+					stl
+				).map((s) => [s.memberId, s.amountOwed])
+			);
+		} catch {
+			return null;
+		}
+	});
 </script>
 
 <form method="POST" use:enhance class="space-y-6">
@@ -570,6 +735,76 @@
 		{#if $errors.categoryId}<p class="text-destructive text-sm">{$errors.categoryId}</p>{/if}
 	</div>
 
+	<!-- Currency picker (PLAN §7.6): defaults to the group settlement currency.
+	     Choosing a DIFFERENT currency reveals the FX (rate / settlement-total) entry. -->
+	<div class="space-y-2">
+		<Label>Currency</Label>
+		<Select.Root type="single" value={entryCode} onValueChange={onCurrencyChange}>
+			<Select.Trigger class="w-full">{selectedCurrencyLabel}</Select.Trigger>
+			<Select.Content>
+				{#each currencyOptions as option (option.code)}
+					<Select.Item value={option.code} label={option.code}>
+						{option.code}{option.name ? ` · ${option.name}` : ''}
+						{#if option.code === settlementCode}
+							<span class="text-muted-foreground text-xs">(group)</span>
+						{/if}
+					</Select.Item>
+				{/each}
+			</Select.Content>
+		</Select.Root>
+	</div>
+
+	<!-- FX entry (PLAN §7.6 / §10) — only when the entry currency is FOREIGN. Enter
+	     EITHER the exchange rate OR the settlement-equivalent total; the other is
+	     derived, with a live converted total shown (e.g. "¥200 → ฿970"). -->
+	{#if isForeign}
+		<div class="space-y-3 rounded-md border p-3">
+			<p class="text-sm font-medium">
+				Exchange to {currency.code}
+			</p>
+			<div class="grid grid-cols-2 gap-3">
+				<div class="space-y-1">
+					<Label for="fx-rate">Rate (1 {entryCode} = ? {currency.code})</Label>
+					<Input
+						id="fx-rate"
+						inputmode="decimal"
+						placeholder="0.000000"
+						value={fxDriver === 'rate' ? rateInput : (effectiveRate ?? '')}
+						oninput={(e) => onRateInput(e.currentTarget.value)}
+					/>
+				</div>
+				<div class="space-y-1">
+					<Label for="fx-total">Total in {currency.code}</Label>
+					<div class="flex items-center gap-1">
+						<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+						<Input
+							id="fx-total"
+							inputmode="decimal"
+							placeholder="0.00"
+							value={fxDriver === 'total'
+								? settlementTotalInput
+								: settlementPreview
+									? formatAmount($formData.amountTotalSettlement, settlementCode, { symbol: false })
+									: ''}
+							oninput={(e) => onSettlementTotalInput(e.currentTarget.value)}
+						/>
+					</div>
+				</div>
+			</div>
+			{#if settlementPreview}
+				<p class="text-muted-foreground text-sm">
+					{settlementPreview.txn} → {settlementPreview.settlement}
+				</p>
+			{/if}
+			{#if $errors.exchangeRate}
+				<p class="text-destructive text-sm">{$errors.exchangeRate}</p>
+			{/if}
+			{#if $errors.amountTotalSettlement}
+				<p class="text-destructive text-sm">{$errors.amountTotalSettlement}</p>
+			{/if}
+		</div>
+	{/if}
+
 	<!-- Total amount. For non-itemized the user types it (major units → minor units).
 	     For itemized the total is DERIVED from the items subtotal (§7.2.1), shown
 	     read-only — the item rows below drive it. -->
@@ -582,7 +817,7 @@
 			</div>
 		{:else}
 			<div class="flex items-center gap-2">
-				<span class="text-muted-foreground text-sm">{currency.symbol}</span>
+				<span class="text-muted-foreground text-sm">{entryCurrency.symbol}</span>
 				<Input
 					id="amountTotal"
 					inputmode="decimal"
@@ -614,7 +849,7 @@
 					</label>
 					{#if isPayer && multiplePayers}
 						<div class="flex items-center gap-1">
-							<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+							<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
 							<Input
 								inputmode="decimal"
 								placeholder="0.00"
@@ -671,7 +906,7 @@
 						</label>
 						{#if isBeneficiary && $formData.splitMode === 'amount'}
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+								<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
 								<Input
 									inputmode="decimal"
 									placeholder="0.00"
@@ -720,7 +955,7 @@
 						<div class="w-28 space-y-1">
 							<Label for="item-{index}-amount">Amount</Label>
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+								<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
 								<Input
 									id="item-{index}-amount"
 									inputmode="decimal"
@@ -771,7 +1006,7 @@
 								</label>
 								{#if isBeneficiary && item.splitMode === 'amount'}
 									<div class="flex items-center gap-1">
-										<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+										<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
 										<Input
 											inputmode="decimal"
 											placeholder="0.00"
@@ -857,7 +1092,7 @@
 							<Label for="charge-{index}-value">Value</Label>
 							<div class="flex items-center gap-1">
 								<span class="text-muted-foreground text-xs">
-									{charge.mode === 'percent' ? '%' : currency.symbol}
+									{charge.mode === 'percent' ? '%' : entryCurrency.symbol}
 								</span>
 								<Input
 									id="charge-{index}-value"
@@ -926,7 +1161,14 @@
 					{/each}
 					<div class="flex items-center justify-between border-t pt-1 font-medium">
 						<span>Total</span>
-						<span>{formatAmount(itemizedBreakdown.amountTotal, currencyCode)}</span>
+						<span class="text-right">
+							<span class="block">{formatAmount(itemizedBreakdown.amountTotal, currencyCode)}</span>
+							{#if isForeign && settlementPreview}
+								<span class="text-muted-foreground block text-xs font-normal">
+									{formatAmount($formData.amountTotalSettlement, settlementCode)}
+								</span>
+							{/if}
+						</span>
 					</div>
 				</div>
 
@@ -936,7 +1178,14 @@
 						{#each itemizedBreakdown.shares as share (share.memberId)}
 							<div class="flex items-center justify-between">
 								<span>{memberName(share.memberId)}</span>
-								<span>{formatAmount(share.amountOwed, currencyCode)}</span>
+								<span class="text-right">
+									<span class="block">{formatAmount(share.amountOwed, currencyCode)}</span>
+									{#if isForeign && settlementShares}
+										<span class="text-muted-foreground block text-xs">
+											{formatAmount(settlementShares.get(share.memberId) ?? 0, settlementCode)}
+										</span>
+									{/if}
+								</span>
 							</div>
 						{/each}
 					</div>

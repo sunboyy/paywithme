@@ -66,6 +66,7 @@
 					members={data.members}
 					categories={data.categories}
 					currency={data.currency}
+					currencies={data.currencies}
 					submitLabel="Add transaction"
 				/>
 			{/if}

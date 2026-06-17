@@ -20,7 +20,7 @@ import { setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { categoriesFor } from '$lib/categories';
-import { getCurrency, type CurrencyCode } from '$lib/money';
+import { getCurrency, CURRENCIES, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
@@ -79,6 +79,15 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		currency: currency
 			? { code: currency.code, symbol: currency.symbol, exponent: currency.exponent }
 			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },
+		// The full supported-currency list for the FX picker (§7.6). The form defaults
+		// the picker to the group settlement currency; choosing a different one reveals
+		// the rate / settlement-total entry.
+		currencies: CURRENCIES.map((c) => ({
+			code: c.code,
+			symbol: c.symbol,
+			exponent: c.exponent,
+			name: c.name
+		})),
 		members: activeMembers,
 		viewerMemberId: viewerMember?.id ?? null,
 		// Both category sets so the client can swap the picker when the type toggles.

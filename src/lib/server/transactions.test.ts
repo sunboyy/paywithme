@@ -105,7 +105,7 @@ vi.mock('$lib/server/db/audit-schema', () => {
 import { createTransaction, listTransactions, TransactionValidationError } from './transactions';
 import { GroupAccessError } from './groups';
 import { resolveShares, resolveItemizedWithCharges } from '$lib/transactions/resolve';
-import { applyCharges, type ChargeInput } from '$lib/schemas/transaction';
+import { applyCharges, convertToSettlement, type ChargeInput } from '$lib/schemas/transaction';
 
 /** Queue the row-sets each successive SELECT chain resolves to. */
 function queueSelects(...rowSets: unknown[][]) {
@@ -287,6 +287,61 @@ describe('createTransaction (PLAN §7.1, §7.2, §12.1)', () => {
 		const payerRow = insertsTo('transaction_payers')[0].values;
 		expect(payerRow.amountPaidSettlement).toBe(payerRow.amountPaid);
 		expect(payerRow.amountPaid).toBe(9000);
+	});
+
+	it('FOREIGN currency: persists real currency + rate + server-recomputed settlement total (§7.6)', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		// CN¥90.00 equal split between m1/m2 in a THB group @4.85.
+		const settlementTotal = convertToSettlement(9000, 'CNY', 'THB', '4.85');
+		expect(settlementTotal).toBe(43650); // ฿436.50
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: {
+				...equalInput(),
+				currency: 'CNY',
+				exchangeRate: '4.85',
+				amountTotalSettlement: settlementTotal
+			},
+			settlementCurrency: 'THB'
+		});
+
+		const txnRow = insertsTo('transactions')[0].values;
+		expect(txnRow.currency).toBe('CNY');
+		expect(txnRow.exchangeRate).toBe('4.85');
+		expect(txnRow.amountTotal).toBe(9000); // CNY entry minor
+		expect(txnRow.amountTotalSettlement).toBe(settlementTotal);
+
+		// transaction_shares in SETTLEMENT minor units summing to the settlement total.
+		const shareRows = insertsTo('transaction_shares');
+		const shareSum = shareRows.reduce((acc, i) => acc + (i.values.amountOwed as number), 0);
+		expect(shareSum).toBe(settlementTotal);
+		// Equal split of ฿436.50 → 21825 each.
+		expect(shareRows.map((i) => i.values.amountOwed)).toEqual([21825, 21825]);
+
+		// Payer paid stays CNY; paid_settlement sums to the settlement total.
+		const payer = insertsTo('transaction_payers')[0].values;
+		expect(payer.amountPaid).toBe(9000); // CNY
+		expect(payer.amountPaidSettlement).toBe(settlementTotal); // single payer gets it all
+	});
+
+	it('rejects a wrong client amountTotalSettlement (schema is the gate, server never trusts it)', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		// CNY @4.85 → correct settlement is 43650; pass a deliberately WRONG client value.
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: {
+					...equalInput(),
+					currency: 'CNY',
+					exchangeRate: '4.85',
+					amountTotalSettlement: 1 // wrong (correct = 43650)
+				},
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(insertsTo('transactions')).toHaveLength(0);
 	});
 
 	it('sets created_at to the supplied real-world clock (PLAN §7.1)', async () => {
@@ -646,31 +701,60 @@ describe('createTransaction — itemized + charges/discounts (PLAN §7.2.2-3, ta
 		expect(insertsTo('audit_log')).toHaveLength(1);
 	});
 
-	it('still rejects a FOREIGN currency (FX deferred to 4.10), no inserts', async () => {
+	it('FOREIGN currency itemized + charges end-to-end: settlement shares sum to settlement total (§7.6)', async () => {
 		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
-		// A foreign currency on an itemized+charges payload is still rejected by the
-		// scope guard even though charges are now allowed. amount_total settlement is
-		// the converted total to keep the payload schema-valid (CNY @4.85).
+		// The SAME itemized+charges bill, but recorded in CNY @4.85 in a THB group.
+		// amount_total (CNY minor) = 116; settlement total = 116 × 4.85 = 562.6 → 563.
 		const input = chargedInput();
-		await expect(
-			createTransaction({
-				userId: 'u1',
-				groupId: 'g1',
-				input: {
-					...input,
-					currency: 'CNY',
-					exchangeRate: '4.85',
-					amountTotalSettlement: 563 // 116 × 4.85 = 562.6 → 563 (round-half-up)
-				},
-				settlementCurrency: 'THB'
-			})
-		).rejects.toBeInstanceOf(TransactionValidationError);
-		expect(insertsTo('transactions')).toHaveLength(0);
+		const settlementTotal = convertToSettlement(116, 'CNY', 'THB', '4.85');
+		expect(settlementTotal).toBe(563);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: {
+				...input,
+				currency: 'CNY',
+				exchangeRate: '4.85',
+				amountTotalSettlement: settlementTotal
+			},
+			settlementCurrency: 'THB'
+		});
+
+		// The transaction row persists the REAL currency + rate + recomputed settlement.
+		const txnRow = insertsTo('transactions')[0].values;
+		expect(txnRow.currency).toBe('CNY');
+		expect(txnRow.exchangeRate).toBe('4.85');
+		expect(txnRow.amountTotal).toBe(116); // CNY minor (entry currency)
+		expect(txnRow.amountTotalSettlement).toBe(settlementTotal);
+
+		// transaction_shares are in SETTLEMENT minor units and sum EXACTLY to the
+		// settlement total (convert-then-distribute, §7.6).
+		const shareSum = insertsTo('transaction_shares').reduce(
+			(acc, i) => acc + (i.values.amountOwed as number),
+			0
+		);
+		expect(shareSum).toBe(settlementTotal);
+
+		// transaction_payers: amount_paid stays CNY; amount_paid_settlement sums to the
+		// settlement total too (single payer paid the whole bill → gets it all).
+		const payerRows = insertsTo('transaction_payers');
+		expect(payerRows[0].values.amountPaid).toBe(116); // CNY entry
+		const paidSettlementSum = payerRows.reduce(
+			(acc, i) => acc + (i.values.amountPaidSettlement as number),
+			0
+		);
+		expect(paidSettlementSum).toBe(settlementTotal);
+
+		// Everything in ONE tx (§12.1).
+		expect(inserts.every((i) => (i.via as { name: string }).name === 'tx')).toBe(true);
 	});
 });
 
 describe('listTransactions (PLAN §7, §10)', () => {
 	const now = new Date('2026-03-01T00:00:00.000Z');
+	// Two rows: a same-currency THB row and a FOREIGN CNY row (§7.6 display). Each
+	// carries the original entry `amountTotal` + `currency` AND the settlement total.
+	const SETTLEMENT_ROW = [{ settlementCurrency: 'THB' }];
 	const ROWS = [
 		{
 			id: 't1',
@@ -679,8 +763,21 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			categoryId: 'spending-food-drink',
 			categoryName: 'Food & Drink',
 			categoryIcon: 'utensils',
+			amountTotal: 9000,
 			amountTotalSettlement: 9000,
 			currency: 'THB',
+			createdAt: now
+		},
+		{
+			id: 't2',
+			type: 'spending',
+			title: 'Bubble tea',
+			categoryId: 'spending-food-drink',
+			categoryName: 'Food & Drink',
+			categoryIcon: 'utensils',
+			amountTotal: 5000, // CN¥50.00 (entry currency)
+			amountTotalSettlement: 24250, // ฿242.50 @4.85
+			currency: 'CNY',
 			createdAt: now
 		}
 	];
@@ -692,10 +789,12 @@ describe('listTransactions (PLAN §7, §10)', () => {
 		);
 	});
 
-	it('returns shaped rows (category + settlement total + ISO date) under access', async () => {
-		queueSelects(ACCESS_OK, ROWS);
+	it('returns shaped rows with original amount/currency + settlement total denominated in the GROUP currency (§7.6)', async () => {
+		// SELECT order: access check → group settlement currency → rows.
+		queueSelects(ACCESS_OK, SETTLEMENT_ROW, ROWS);
 		const result = await listTransactions({ userId: 'u1', groupId: 'g1' });
-		expect(result).toHaveLength(1);
+		expect(result).toHaveLength(2);
+		// Same-currency row: not foreign; original == settlement.
 		expect(result[0]).toEqual({
 			id: 't1',
 			type: 'spending',
@@ -703,8 +802,26 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			categoryId: 'spending-food-drink',
 			categoryName: 'Food & Drink',
 			categoryIcon: 'utensils',
+			amountTotal: 9000,
+			currency: 'THB',
 			amountTotalSettlement: 9000,
 			settlementCurrency: 'THB',
+			isForeign: false,
+			createdAt: now.toISOString()
+		});
+		// Foreign row: original CNY amount kept; settlement total denominated in THB.
+		expect(result[1]).toEqual({
+			id: 't2',
+			type: 'spending',
+			title: 'Bubble tea',
+			categoryId: 'spending-food-drink',
+			categoryName: 'Food & Drink',
+			categoryIcon: 'utensils',
+			amountTotal: 5000,
+			currency: 'CNY',
+			amountTotalSettlement: 24250,
+			settlementCurrency: 'THB',
+			isForeign: true,
 			createdAt: now.toISOString()
 		});
 	});
@@ -712,13 +829,13 @@ describe('listTransactions (PLAN §7, §10)', () => {
 	it('passes the type + category filters through (access then list)', async () => {
 		// We can't easily introspect the WHERE in this stub, but we can assert it
 		// resolves and shapes the rows (the conditions are pushed before the query).
-		queueSelects(ACCESS_OK, ROWS);
+		queueSelects(ACCESS_OK, SETTLEMENT_ROW, ROWS);
 		const result = await listTransactions({
 			userId: 'u1',
 			groupId: 'g1',
 			filters: { type: 'spending', categoryId: 'spending-food-drink' }
 		});
-		expect(result).toHaveLength(1);
+		expect(result).toHaveLength(2);
 		expect(result[0].type).toBe('spending');
 	});
 });
