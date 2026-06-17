@@ -64,7 +64,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 4 — Transactions (PLAN §7, §14.4)
 
-- [ ] 4.1 `lib/money` currency-aware helper (parse/format/largest-remainder, ascending member_id tie-break) + unit tests — PLAN §7.5/§7.2 @todo deps:3.2
+- [x] 4.1 `lib/money` currency-aware helper (parse/format/largest-remainder, ascending member_id tie-break) + unit tests — PLAN §7.5/§7.2 @done deps:3.2
 - [ ] 4.2 Schema: `transactions`, `transaction_payers`, `transaction_shares`, `transaction_items`, `transaction_item_shares`, `transaction_charges`, `audit_log` (+ indexes) — PLAN §9 @todo deps:3.1
 - [ ] 4.3 Categories seed (spending + transfer sets, lucide icons) — PLAN §7.3 @todo deps:4.2
 - [ ] 4.4 Shared Zod schemas + validation rules — PLAN §7.4 @todo deps:4.2
