@@ -12,9 +12,8 @@
 //   - start_url  = "/"
 //   - icons      = 192 + 512 (+ a maskable 512)
 //
-// The icon files referenced here are PLACEHOLDERS created in task 7.1; task 7.6
-// replaces them with designed icons at the same paths so the manifest does not
-// change.
+// The icon files referenced here are the designed split-coin icons authored in
+// task 7.6 (sources in assets/icons/, rasterized by scripts/gen-icons.mjs).
 import type { SvelteKitPWAOptions } from '@vite-pwa/sveltekit';
 
 // Derive the manifest option type straight from the plugin (which extends
@@ -24,8 +23,10 @@ import type { SvelteKitPWAOptions } from '@vite-pwa/sveltekit';
 // the object arm only.
 type ManifestConfig = Exclude<NonNullable<SvelteKitPWAOptions['manifest']>, boolean>;
 
-// Brand colors (kept here so the manifest and any future <meta theme-color> can
-// share one source). Aligned to the app's neutral-light shell (PLAN §10).
+// Brand colors. Kept here as the single source; src/app.html's
+// <meta name="theme-color"> must mirror THEME_COLOR. slate-900 / white are
+// retained: slate-900 is the icon background and the app's neutral/slate brand
+// (PLAN §10), and white keeps the install splash clean on light-default mobile.
 export const THEME_COLOR = '#0f172a'; // slate-900 — app chrome / status bar tint
 export const BACKGROUND_COLOR = '#ffffff'; // splash background
 

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  "Pay with me" maskable icon — source of truth.
+
+  Same split-coin mark as icon.svg, but the meaningful artwork is kept well
+  inside the maskable safe zone. The spec's minimum safe zone is the central
+  80% diameter (inner 40% radius). Here the coin radius is 140px on a 512 canvas
+  centred at (256,256): its farthest edge sits 140px from centre = 54.7% of the
+  256px half-canvas, comfortably inside the 80%-diameter (≈205px radius) circle.
+  The slate-900 background fills the FULL bleed (no rounded corners, no
+  transparency) so any platform mask (circle / squircle / rounded-rect) clips
+  only the background and never the mark.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Pay with me">
+  <rect width="512" height="512" fill="#0f172a"/>
+  <g>
+    <path d="M256 116 a140 140 0 0 0 0 280 Z" fill="#f1f5f9"/>
+    <path d="M256 116 a140 140 0 0 1 0 280 Z" fill="#94a3b8"/>
+    <rect x="248.5" y="116" width="15" height="280" fill="#0f172a"/>
+    <circle cx="256" cy="189" r="22" fill="#0f172a"/>
+    <circle cx="256" cy="323" r="22" fill="#0f172a"/>
+  </g>
+</svg>

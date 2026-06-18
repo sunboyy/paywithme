@@ -3,7 +3,6 @@
 	import { browser } from '$app/environment';
 	import { resolve } from '$app/paths';
 	import { enhance } from '$app/forms';
-	import favicon from '$lib/assets/favicon.svg';
 	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
 	import { registerPwa } from '$lib/pwa/register.svelte';
@@ -43,8 +42,6 @@
 		if (browser) return startInstallWatch();
 	});
 </script>
-
-<svelte:head><link rel="icon" href={favicon} /></svelte:head>
 
 <!--
 	Root app shell (PLAN §10, decision #28): mobile-first, fully responsive chrome.
