@@ -24,17 +24,17 @@
 // Both carry a stable `code` discriminator so callers can branch without string
 // matching.
 //
-// AUDIT LOG — DEFERRED (do NOT build here): the `audit_log` table (task 4.2) and
-// the same-transaction write helper (task 4.6) don't exist yet; group / member /
-// invite audit writes are retrofitted in task 6.1. Per PLAN §12.1 every mutation
-// must eventually append an immutable `audit_log` row in the SAME DB transaction,
-// so each mutation below already runs inside `db.transaction(...)` and carries a
-// `TODO(6.1)` at the exact insert site, making the retrofit mechanical.
+// AUDIT LOG (task 6.1 — DONE): per PLAN §12.1 every mutation appends an immutable
+// `audit_log` row in the SAME DB transaction as the mutation. Each mutation below
+// runs inside `db.transaction(...)` and calls `writeAuditLog(tx, …)` through that
+// SAME `tx` handle (never the global `db`), so the audit row commits/rolls back
+// atomically with the change it records.
 
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { groups, members } from './db/groups-schema';
 import { currencyCodeSchema } from '$lib/schemas/currency';
+import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update'>;
@@ -186,8 +186,16 @@ export async function createGroup({
 			displayName: userName
 		});
 
-		// TODO(6.1): append audit_log row (action='create', entity_type='group') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
+		await writeAuditLog(tx, {
+			groupId: group.id,
+			actorUserId: userId,
+			action: 'create',
+			entityType: 'group',
+			entityId: group.id,
+			summary: `Created group '${group.name}'`,
+			metadata: { name: group.name, settlementCurrency: group.settlementCurrency }
+		});
 		return group;
 	});
 }
@@ -221,8 +229,18 @@ export async function renameGroup({
 			throw new GroupAccessError();
 		}
 
-		// TODO(6.1): append audit_log row (action='rename', entity_type='group') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). We record the new name
+		// (denormalized, durable). The old value isn't in scope and isn't worth an
+		// extra read here (PLAN §12.1 / task 6.1 metadata guidance).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'rename',
+			entityType: 'group',
+			entityId: groupId,
+			summary: `Renamed group to '${updated.name}'`,
+			metadata: { name: updated.name }
+		});
 		return updated;
 	});
 }
@@ -253,8 +271,16 @@ export async function softDeleteGroup({
 			.set({ deletedAt: new Date() })
 			.where(and(eq(groups.id, groupId), isNull(groups.deletedAt)));
 
-		// TODO(6.1): append audit_log row (action='delete', entity_type='group') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). The trail is append-only
+		// and OUTLIVES the soft-delete (the row is never removed).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'delete',
+			entityType: 'group',
+			entityId: groupId,
+			summary: 'Deleted the group'
+		});
 	});
 }
 
@@ -293,8 +319,16 @@ export async function updateSettlementCurrency({
 			throw new GroupAccessError();
 		}
 
-		// TODO(6.1): append audit_log row (action='currency_set', entity_type='group')
-		// in this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'currency_set',
+			entityType: 'group',
+			entityId: groupId,
+			summary: `Set settlement currency to ${updated.settlementCurrency}`,
+			metadata: { settlementCurrency: updated.settlementCurrency }
+		});
 		return updated;
 	});
 }

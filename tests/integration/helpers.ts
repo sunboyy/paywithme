@@ -46,11 +46,20 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 	try {
 		const res = await db.execute(sql`
 			select
-				to_regclass('public.groups')      as groups,
-				to_regclass('public.members')     as members,
-				to_regclass('public.invites')     as invites,
-				to_regclass('public.currencies')  as currencies,
-				to_regclass('public."user"')      as users
+				to_regclass('public.groups')       as groups,
+				to_regclass('public.members')      as members,
+				to_regclass('public.invites')      as invites,
+				to_regclass('public.currencies')   as currencies,
+				to_regclass('public."user"')       as users,
+				-- Phase-4 ledger + audit tables. The audit integration suite (task 6.4)
+				-- drives the transaction services, which need these migrated; checking
+				-- them here keeps the integration run safe on a DB that has only the
+				-- Phase-3 tables (the whole suite skips cleanly instead of erroring with
+				-- a missing-relation). The existing Phase-3 suites are unaffected: the
+				-- migrated DB always has these too.
+				to_regclass('public.audit_log')    as audit_log,
+				to_regclass('public.transactions') as transactions,
+				to_regclass('public.categories')   as categories
 		`);
 		const row = (res.rows?.[0] ?? {}) as Record<string, unknown>;
 		const missing = Object.entries(row)
@@ -60,6 +69,17 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 			return {
 				ok: false,
 				reason: `schema not migrated (missing tables: ${missing.join(', ')}). Run \`pnpm db:migrate\`.`
+			};
+		}
+		// `categories` must also be SEEDED (task 4.3) — `createTransaction` asserts the
+		// chosen category id physically exists, so an empty table would fail the audit
+		// suite's transaction tests. Treat un-seeded as "not ready" (skip, don't error).
+		const seed = await db.execute(sql`select count(*)::int as n from categories`);
+		const n = Number((seed.rows?.[0] as { n?: number } | undefined)?.n ?? 0);
+		if (n === 0) {
+			return {
+				ok: false,
+				reason: 'categories not seeded. Run `pnpm db:migrate` (the 4.3 seed migration).'
 			};
 		}
 	} catch (e) {

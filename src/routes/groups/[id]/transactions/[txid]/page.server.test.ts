@@ -28,6 +28,7 @@ const {
 	restoreTransaction,
 	getGroupForUser,
 	listMembers,
+	listEntityActivity,
 	requireGroupAccess,
 	requireUser
 } = vi.hoisted(() => ({
@@ -37,6 +38,7 @@ const {
 	restoreTransaction: vi.fn(),
 	getGroupForUser: vi.fn(),
 	listMembers: vi.fn(),
+	listEntityActivity: vi.fn(),
 	requireGroupAccess: vi.fn(),
 	requireUser: vi.fn()
 }));
@@ -58,6 +60,7 @@ vi.mock('$lib/server/groups', async () => {
 	return { ...actual, getGroupForUser };
 });
 vi.mock('$lib/server/members', () => ({ listMembers }));
+vi.mock('$lib/server/activity', () => ({ listEntityActivity }));
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
 
 import { load, actions } from './+page.server';
@@ -161,6 +164,7 @@ beforeEach(() => {
 	restoreTransaction.mockReset();
 	getGroupForUser.mockReset();
 	listMembers.mockReset();
+	listEntityActivity.mockReset();
 	requireGroupAccess.mockReset();
 	requireUser.mockReset();
 
@@ -169,6 +173,7 @@ beforeEach(() => {
 	getGroupForUser.mockResolvedValue(GROUP);
 	listMembers.mockResolvedValue(MEMBERS);
 	getTransactionDetail.mockResolvedValue(detailFixture());
+	listEntityActivity.mockResolvedValue([]);
 	updateTransaction.mockResolvedValue(undefined);
 	softDeleteTransaction.mockResolvedValue(undefined);
 	restoreTransaction.mockResolvedValue(undefined);
@@ -193,6 +198,49 @@ describe('/groups/[id]/transactions/[txid] load', () => {
 		expect(superValidate).toHaveBeenCalled();
 		expect(superValidate.mock.calls[0][0]).toMatchObject({ title: 'Dinner' });
 		expect(result.memberNames.m1).toBe('Alice');
+	});
+
+	it("returns this transaction's history, scoped to its entity_id", async () => {
+		const HISTORY = [
+			{
+				id: 'a1',
+				action: 'create',
+				entityType: 'transaction',
+				entityId: 't1',
+				summary: 'Created Dinner',
+				metadata: null,
+				occurredAt: '2026-02-01T00:00:00.000Z',
+				actorUserId: 'u1',
+				actorName: 'Alice'
+			}
+		];
+		listEntityActivity.mockResolvedValueOnce(HISTORY);
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			history: typeof HISTORY;
+		};
+		expect(listEntityActivity).toHaveBeenCalledWith({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
+		expect(result.history).toEqual(HISTORY);
+	});
+
+	it('degrades to an empty history on a GroupAccessError race (does not fail the page)', async () => {
+		listEntityActivity.mockRejectedValueOnce(new GroupAccessError());
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			detail: { id: string };
+			history: unknown[];
+		};
+		// The page still loads (detail intact); only the history sidebar is empty.
+		expect(result.detail.id).toBe('t1');
+		expect(result.history).toEqual([]);
+	});
+
+	it('does NOT swallow an unexpected history error (real errors still surface)', async () => {
+		listEntityActivity.mockRejectedValueOnce(new Error('DB exploded'));
+		await expect(load(makeLoadEvent({ id: 'u1', name: 'Alice' }))).rejects.toThrow('DB exploded');
 	});
 
 	it('404s when the transaction is not found (existence never leaked)', async () => {

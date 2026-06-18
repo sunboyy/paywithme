@@ -24,6 +24,7 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import TransactionForm from '$lib/components/TransactionForm.svelte';
+	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import PencilIcon from '@lucide/svelte/icons/pencil';
@@ -309,4 +310,42 @@
 			{/if}
 		</Card.Root>
 	{/if}
+
+	<!-- History: this transaction's OWN audit trail (§12.1) — entries filtered to its
+	     entity_id, newest-first. Read-only; no mutation/audit write here. Times render
+	     in the viewer's locale/timezone. Shared action labels + time helpers
+	     ($lib/activity-labels) keep this identical to the group activity feed. -->
+	<Card.Root>
+		<Card.Header>
+			<Card.Title class="text-base">History</Card.Title>
+			<Card.Description>Changes to this transaction</Card.Description>
+		</Card.Header>
+		{#if data.history.length === 0}
+			<Card.Content class="py-6 text-center">
+				<p class="text-muted-foreground text-sm">No history yet.</p>
+			</Card.Content>
+		{:else}
+			<Card.Content class="divide-border divide-y p-0">
+				{#each data.history as entry (entry.id)}
+					<div class="flex flex-col gap-1 px-6 py-3">
+						<div class="flex items-start justify-between gap-2">
+							<p class="min-w-0 text-sm">
+								<span class="font-medium">{entry.actorName}</span>
+								<span class="text-muted-foreground"> {actionLabel(entry.action)} </span>
+							</p>
+							<time
+								datetime={entry.occurredAt}
+								title={absoluteTime(entry.occurredAt)}
+								class="text-muted-foreground shrink-0 text-xs whitespace-nowrap"
+							>
+								{relativeTime(entry.occurredAt)}
+							</time>
+						</div>
+						<p class="text-sm">{entry.summary}</p>
+						<p class="text-muted-foreground text-xs">{absoluteTime(entry.occurredAt)}</p>
+					</div>
+				{/each}
+			</Card.Content>
+		{/if}
+	</Card.Root>
 </div>

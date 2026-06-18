@@ -138,12 +138,20 @@
 			<h1 class="text-2xl font-semibold tracking-tight">{data.group.name}</h1>
 			<p class="text-muted-foreground text-sm">Manage who's splitting in this group.</p>
 		</div>
-		<a
-			href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-			class={buttonVariants({ variant: 'outline', size: 'sm' })}
-		>
-			Transactions
-		</a>
+		<div class="flex gap-2">
+			<a
+				href={resolve('/groups/[id]/activity', { id: data.group.id })}
+				class={buttonVariants({ variant: 'outline', size: 'sm' })}
+			>
+				Activity
+			</a>
+			<a
+				href={resolve('/groups/[id]/transactions', { id: data.group.id })}
+				class={buttonVariants({ variant: 'outline', size: 'sm' })}
+			>
+				Transactions
+			</a>
+		</div>
 	</div>
 
 	{#if statusMessage}

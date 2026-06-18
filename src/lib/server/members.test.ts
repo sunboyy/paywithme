@@ -60,7 +60,7 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 			return chain;
 		};
 		chain.where = () => chain;
-		chain.returning = () => Promise.resolve([{ id: 'member-1' }]);
+		chain.returning = () => Promise.resolve([{ id: 'member-1', displayName: 'Updated Name' }]);
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 		return chain;
 	}
@@ -101,11 +101,17 @@ import {
 	MemberNotFoundError
 } from './members';
 import { GroupAccessError } from './groups';
+import { auditLog } from './db/audit-schema';
 
 /** Queue the row-sets each successive SELECT chain resolves to. */
 function queueSelects(...rowSets: unknown[][]) {
 	selectQueue.length = 0;
 	selectQueue.push(...rowSets);
+}
+
+/** The recorded `insert(table).values(v)` calls that targeted the audit_log table. */
+function auditInserts() {
+	return insertCalls.filter((c) => c.table === auditLog);
 }
 
 /** An access-granting member row (the access SELECT finds one). */
@@ -172,12 +178,39 @@ describe('addMember (PLAN §6.1 — inserts a NEW UNLINKED slot)', () => {
 		queueSelects(ACCESS_OK); // access check passes
 		const member = await addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' });
 
-		expect(insertCalls).toHaveLength(1);
-		const values = insertCalls[0].values as Record<string, unknown>;
+		// The member insert + the audit insert (both on the same tx).
+		const memberInserts = insertCalls.filter((c) => c.table !== auditLog);
+		expect(memberInserts).toHaveLength(1);
+		const values = memberInserts[0].values as Record<string, unknown>;
 		expect(values).toMatchObject({ groupId: 'g1', displayName: 'Alex' });
 		// The defining property: a participant slot, NOT a user link.
 		expect(values.userId).toBeNull();
 		expect(member.id).toBe('member-1');
+	});
+
+	it('writes exactly ONE add/member audit row in the same transaction', async () => {
+		queueSelects(ACCESS_OK);
+		await addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' });
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			groupId: 'g1',
+			actorUserId: 'u1',
+			action: 'add',
+			entityType: 'member',
+			entityId: 'member-1'
+		});
+		expect(v.summary).toBe("Added member 'Alex'");
+	});
+
+	it('writes NO audit row when access is denied', async () => {
+		queueSelects([]);
+		await expect(
+			addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' })
+		).rejects.toBeInstanceOf(GroupAccessError);
+		expect(auditInserts()).toHaveLength(0);
 	});
 
 	it('throws GroupAccessError and inserts nothing when access is denied', async () => {
@@ -292,5 +325,82 @@ describe('reactivateMember (PLAN §6.3 — flag flip)', () => {
 		expect(updateCalls).toHaveLength(1);
 		expect((updateCalls[0].set as Record<string, unknown>).deactivatedAt).toBeNull();
 		expect(updated.id).toBe('member-1');
+	});
+});
+
+describe('audit writes (task 6.1, PLAN §12.1 — same transaction)', () => {
+	it('renameMember writes one rename/member audit row with from/to metadata', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		await renameMember({ userId: 'u1', groupId: 'g1', memberId: 'm1', displayName: 'New' });
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			groupId: 'g1',
+			actorUserId: 'u1',
+			action: 'rename',
+			entityType: 'member',
+			entityId: 'm1'
+		});
+		// before = the loaded target's name ('Alex'); after = the update's returning.
+		expect(v.metadata).toEqual({ from: 'Alex', to: 'Updated Name' });
+	});
+
+	it('removeMember soft-deactivate writes one deactivate/member audit row', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		await removeMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' }, async () => true);
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			action: 'deactivate',
+			entityType: 'member',
+			entityId: 'm1'
+		});
+		expect(v.summary).toBe("Deactivated member 'Alex'");
+	});
+
+	it('removeMember HARD-DELETE writes NO audit row (zero-activity cleanup)', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		const result = await removeMember(
+			{ userId: 'u1', groupId: 'g1', memberId: 'm1' },
+			async () => false
+		);
+
+		expect(result.action).toBe('hard_delete');
+		// The decision: no `delete`/`member` row referencing a row that no longer exists.
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('reactivateMember writes one reactivate/member audit row', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		await reactivateMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			action: 'reactivate',
+			entityType: 'member',
+			entityId: 'm1'
+		});
+	});
+
+	it('writes NO audit row when access is denied (rename rolls back)', async () => {
+		queueSelects([]); // access denied
+		await expect(
+			renameMember({ userId: 'u1', groupId: 'g1', memberId: 'm1', displayName: 'New' })
+		).rejects.toBeInstanceOf(GroupAccessError);
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('writes NO audit row when the member is not in the group', async () => {
+		queueSelects(ACCESS_OK, []); // access ok, member lookup empty
+		await expect(
+			reactivateMember({ userId: 'u1', groupId: 'g1', memberId: 'nope' })
+		).rejects.toBeInstanceOf(MemberNotFoundError);
+		expect(auditInserts()).toHaveLength(0);
 	});
 });
