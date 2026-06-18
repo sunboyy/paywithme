@@ -57,7 +57,8 @@ const { selectResult, insertCalls, orderByCalls, makeDb } = vi.hoisted(() => {
 		const chain: Record<string, unknown> = {};
 		chain.set = () => chain;
 		chain.where = () => chain;
-		chain.returning = () => Promise.resolve([{ id: 'group-1' }]);
+		chain.returning = () =>
+			Promise.resolve([{ id: 'group-1', name: 'Trip', settlementCurrency: 'USD' }]);
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 		return chain;
 	}
@@ -95,10 +96,17 @@ import {
 	GroupAccessError,
 	CurrencyLockedError
 } from './groups';
+import { auditLog } from './db/audit-schema';
+import { groups as groupsTable, members as membersTable } from './db/groups-schema';
 
 /** Program the access/list/get SELECT to resolve to `rows`. */
 function setSelectRows(rows: unknown[]) {
 	selectResult.selectRows = rows;
+}
+
+/** The recorded `insert(table).values(v)` calls that targeted the audit_log table. */
+function auditInserts() {
+	return insertCalls.filter((c) => c.table === auditLog);
 }
 
 beforeEach(() => {
@@ -179,10 +187,13 @@ describe('createGroup (PLAN §6.1 — also creates the creator member)', () => {
 			settlementCurrency: 'THB'
 		});
 
-		// Two inserts in the same transaction: groups then members.
-		expect(insertCalls).toHaveLength(2);
+		// Three inserts in the same transaction: groups, members, then the audit row.
+		expect(insertCalls).toHaveLength(3);
 
-		const groupInsert = insertCalls[0].values as Record<string, unknown>;
+		const groupInsert = insertCalls.find((c) => c.table === groupsTable)!.values as Record<
+			string,
+			unknown
+		>;
 		expect(groupInsert).toMatchObject({
 			name: 'Trip',
 			settlementCurrency: 'THB',
@@ -191,7 +202,10 @@ describe('createGroup (PLAN §6.1 — also creates the creator member)', () => {
 
 		// The REQUIRED creator-member link: without it the creator can't access
 		// their own group (PLAN §6.1 — access is via a linked member).
-		const memberInsert = insertCalls[1].values as Record<string, unknown>;
+		const memberInsert = insertCalls.find((c) => c.table === membersTable)!.values as Record<
+			string,
+			unknown
+		>;
 		expect(memberInsert).toMatchObject({
 			groupId: 'group-1',
 			userId: 'user-42',
@@ -199,6 +213,27 @@ describe('createGroup (PLAN §6.1 — also creates the creator member)', () => {
 		});
 
 		expect(group.id).toBe('group-1');
+	});
+
+	it('writes exactly ONE audit row (create/group) in the same transaction', async () => {
+		await createGroup({
+			userId: 'user-42',
+			userName: 'Alice',
+			name: 'Trip',
+			settlementCurrency: 'THB'
+		});
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			groupId: 'group-1',
+			actorUserId: 'user-42',
+			action: 'create',
+			entityType: 'group',
+			entityId: 'group-1'
+		});
+		expect(v.summary).toBe("Created group 'Trip'");
 	});
 
 	it('rejects an unsupported settlement currency before inserting anything', async () => {
@@ -234,6 +269,64 @@ describe('access enforcement on mutations + reads (PLAN §12)', () => {
 	it('getGroupForUser returns null when the user has no access', async () => {
 		setSelectRows([]);
 		expect(await getGroupForUser('u1', 'g1')).toBeNull();
+	});
+
+	it('writes NO audit row when a mutation is rejected for no access', async () => {
+		setSelectRows([]); // access denied
+		await expect(renameGroup({ userId: 'u1', groupId: 'g1', name: 'New' })).rejects.toBeInstanceOf(
+			GroupAccessError
+		);
+		expect(auditInserts()).toHaveLength(0);
+	});
+});
+
+describe('audit writes (task 6.1, PLAN §12.1 — same transaction)', () => {
+	beforeEach(() => setSelectRows([{ id: 'm1' }])); // access granted for all of these
+
+	it('renameGroup writes one rename/group audit row (summary uses the new name)', async () => {
+		await renameGroup({ userId: 'u1', groupId: 'group-1', name: 'New' });
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			groupId: 'group-1',
+			actorUserId: 'u1',
+			action: 'rename',
+			entityType: 'group',
+			entityId: 'group-1'
+		});
+		expect(v.summary).toBe("Renamed group to 'Trip'");
+	});
+
+	it('softDeleteGroup writes one delete/group audit row', async () => {
+		await softDeleteGroup({ userId: 'u1', groupId: 'group-1' });
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			actorUserId: 'u1',
+			action: 'delete',
+			entityType: 'group',
+			entityId: 'group-1'
+		});
+	});
+
+	it('updateSettlementCurrency writes one currency_set/group audit row', async () => {
+		await updateSettlementCurrency({
+			userId: 'u1',
+			groupId: 'group-1',
+			settlementCurrency: 'USD'
+		});
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			action: 'currency_set',
+			entityType: 'group',
+			entityId: 'group-1'
+		});
+		expect(v.summary).toBe('Set settlement currency to USD');
+		expect(v.metadata).toEqual({ settlementCurrency: 'USD' });
 	});
 });
 

@@ -21,17 +21,18 @@
 //     not exist in this group (or was hard-deleted). Same not-found outcome, but
 //     a distinct `code` so the route layer can branch without string matching.
 //
-// AUDIT LOG — DEFERRED (do NOT build here): the `audit_log` table (task 4.2) and
-// the same-transaction write helper (task 4.6) don't exist yet; member audit
-// writes are retrofitted in task 6.1. Per PLAN §12.1 every mutation must
-// eventually append an immutable `audit_log` row in the SAME DB transaction, so
-// each mutation below runs inside `db.transaction(...)` and carries a `TODO(6.1)`
-// at the exact insert site, making the retrofit mechanical.
+// AUDIT LOG (task 6.1 — DONE): per PLAN §12.1 every mutation appends an immutable
+// `audit_log` row in the SAME DB transaction as the mutation. Each mutation below
+// runs inside `db.transaction(...)` and calls `writeAuditLog(tx, …)` through that
+// SAME `tx` handle (never the global `db`), so the audit row commits/rolls back
+// atomically with the change. The hard-delete branch of `removeMember` is the one
+// exception (a zero-activity cleanup with no ledger history) — see there.
 
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
+import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
@@ -203,8 +204,16 @@ export async function addMember({
 			})
 			.returning();
 
-		// TODO(6.1): append audit_log row (action='add', entity_type='member') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'add',
+			entityType: 'member',
+			entityId: member.id,
+			summary: `Added member '${member.displayName}'`,
+			metadata: { displayName: member.displayName }
+		});
 		return member;
 	});
 }
@@ -228,7 +237,8 @@ export async function renameMember({
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 		// Cross-group guard: confirm the slot is in THIS group before touching it.
-		await getGroupMemberOrThrow(groupId, memberId, tx);
+		// Capture the OLD name (already loaded here) for a before/after audit snapshot.
+		const before = await getGroupMemberOrThrow(groupId, memberId, tx);
 
 		const [updated] = await tx
 			.update(members)
@@ -242,8 +252,17 @@ export async function renameMember({
 			throw new MemberNotFoundError();
 		}
 
-		// TODO(6.1): append audit_log row (action='rename', entity_type='member') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). before/after from values
+		// already in scope (no extra read).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'rename',
+			entityType: 'member',
+			entityId: memberId,
+			summary: `Renamed member to '${updated.displayName}'`,
+			metadata: { from: before.displayName, to: updated.displayName }
+		});
 		return updated;
 	});
 }
@@ -288,7 +307,7 @@ export async function removeMember(
 ): Promise<RemoveMemberResult> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
-		await getGroupMemberOrThrow(groupId, memberId, tx);
+		const target = await getGroupMemberOrThrow(groupId, memberId, tx);
 
 		const decision = decideMemberRemoval(await hasActivity(memberId));
 
@@ -303,13 +322,22 @@ export async function removeMember(
 					and(eq(members.id, memberId), eq(members.groupId, groupId), isNull(members.deactivatedAt))
 				);
 
-			// TODO(6.1): append audit_log row (action='deactivate', entity_type='member')
-			// in this same transaction.
+			// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). Denormalize the name so
+			// the line stays readable even after the slot later changes.
+			await writeAuditLog(tx, {
+				groupId,
+				actorUserId: userId,
+				action: 'deactivate',
+				entityType: 'member',
+				entityId: memberId,
+				summary: `Deactivated member '${target.displayName}'`,
+				metadata: { displayName: target.displayName }
+			});
 		} else {
 			// Hard-delete: a zero-activity slot has no ledger history to preserve, so
-			// physically remove it (mistyped-slot cleanup, §6.3). Audit for a pure
-			// cleanup delete is OPTIONAL (nothing meaningful happened in the ledger);
-			// task 6.1 may add a 'delete' entry if desired.
+			// physically remove it (mistyped-slot cleanup, §6.3). DELIBERATELY NOT
+			// audited (task 6.1 decision): nothing meaningful happened in the ledger,
+			// and a 'delete'/'member' entry would reference a row that no longer exists.
 			await tx.delete(members).where(and(eq(members.id, memberId), eq(members.groupId, groupId)));
 		}
 
@@ -346,8 +374,16 @@ export async function reactivateMember({
 			throw new MemberNotFoundError();
 		}
 
-		// TODO(6.1): append audit_log row (action='reactivate', entity_type='member')
-		// in this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'reactivate',
+			entityType: 'member',
+			entityId: memberId,
+			summary: `Reactivated member '${updated.displayName}'`,
+			metadata: { displayName: updated.displayName }
+		});
 		return updated;
 	});
 }

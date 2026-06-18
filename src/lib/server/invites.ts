@@ -32,18 +32,18 @@
 // `crypto.randomUUID()` (only 122 bits and not intended as an unguessable
 // capability token). The token is NEVER logged.
 //
-// AUDIT LOG — DEFERRED (do NOT build here): the `audit_log` table (task 4.2) and
-// the same-transaction write helper (task 4.6) don't exist yet; invite audit
-// writes are retrofitted in task 6.1. Per PLAN §12.1 every mutation must
-// eventually append an immutable `audit_log` row in the SAME DB transaction, so
-// each mutation below runs inside `db.transaction(...)` and carries a `TODO(6.1)`
-// at the exact insert site, making the retrofit mechanical.
+// AUDIT LOG (task 6.1 — DONE): per PLAN §12.1 every mutation appends an immutable
+// `audit_log` row in the SAME DB transaction as the mutation. Each mutation below
+// runs inside `db.transaction(...)` and calls `writeAuditLog(tx, …)` through that
+// SAME `tx` handle (never the global `db`). The raw invite token is a capability
+// secret and is NEVER written to the summary or metadata.
 
 import { randomBytes } from 'node:crypto';
 import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { groups, invites, members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
+import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update'>;
@@ -144,8 +144,16 @@ export async function createInvite({
 			})
 			.returning();
 
-		// TODO(6.1): append audit_log row (action='create', entity_type='invite') in
-		// this same transaction. Do NOT include the raw token in the audit summary.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). NEVER log the token (it is
+		// the capability secret): neither summary nor metadata reference it.
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'create',
+			entityType: 'invite',
+			entityId: invite.id,
+			summary: 'Created an invite link'
+		});
 		return {
 			id: invite.id,
 			token: invite.token,
@@ -236,8 +244,15 @@ export async function revokeInvite({
 				and(eq(invites.id, inviteId), eq(invites.groupId, groupId), isNull(invites.revokedAt))
 			);
 
-		// TODO(6.1): append audit_log row (action='revoke', entity_type='invite') in
-		// this same transaction.
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). NEVER log the token.
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'revoke',
+			entityType: 'invite',
+			entityId: inviteId,
+			summary: 'Revoked an invite link'
+		});
 	});
 }
 
@@ -473,8 +488,21 @@ export async function acceptInvite({
 					return { status: 'slot_taken' };
 				}
 
-				// TODO(6.1): append audit_log row (action='accept', entity_type='member',
-				// entity_id=selection.memberId) in this same transaction. Never log the token.
+				// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). DECISION (task 6.1):
+				// model BOTH accept paths as member `add` rather than introduce a new
+				// 'accept' verb — the user joins the group (gains a member link) either
+				// way, so this is uniform with the new-member path below and needs no
+				// schema/`AUDIT_ACTIONS` change ('add' is already in the constrained set).
+				// entity_id is the CLAIMED member id. Never log the token.
+				await writeAuditLog(tx, {
+					groupId: invite.groupId,
+					actorUserId: userId,
+					action: 'add',
+					entityType: 'member',
+					entityId: claimed[0].id,
+					summary: 'Joined the group by claiming an existing member slot',
+					metadata: { via: 'invite_accept', mode: 'existing' }
+				});
 				return { status: 'accepted', groupId: invite.groupId, memberId: claimed[0].id };
 			} catch (e) {
 				// Race backstop: the partial unique index `(group_id, user_id)` rejects a
@@ -494,9 +522,18 @@ export async function acceptInvite({
 				.values({ groupId: invite.groupId, userId, displayName: userName })
 				.returning({ id: members.id });
 
-			// TODO(6.1): append audit_log row (action='add', entity_type='member',
-			// entity_id=created.id; note invite acceptance) in this same transaction.
-			// Never log the token.
+			// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). New member created +
+			// linked to the accepting user; entity_id is the created member id. Same
+			// `add` verb as the claim path (see decision above). Never log the token.
+			await writeAuditLog(tx, {
+				groupId: invite.groupId,
+				actorUserId: userId,
+				action: 'add',
+				entityType: 'member',
+				entityId: created.id,
+				summary: `Joined the group as a new member '${userName}'`,
+				metadata: { via: 'invite_accept', mode: 'new', displayName: userName }
+			});
 			return { status: 'accepted', groupId: invite.groupId, memberId: created.id };
 		} catch (e) {
 			// Race backstop: the partial unique index `(group_id, user_id)` rejects a

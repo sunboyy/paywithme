@@ -156,11 +156,20 @@ import {
 	InviteNotFoundError
 } from './invites';
 import { GroupAccessError } from './groups';
+import { auditLog } from './db/audit-schema';
 
 /** Queue the row-sets each successive SELECT chain resolves to. */
 function queueSelects(...rowSets: unknown[][]) {
 	selectQueue.length = 0;
 	selectQueue.push(...rowSets);
+}
+
+/** Recorded inserts that targeted audit_log vs the domain table. */
+function auditInserts() {
+	return insertCalls.filter((c) => c.table === auditLog);
+}
+function nonAuditInserts() {
+	return insertCalls.filter((c) => c.table !== auditLog);
 }
 
 /** An access-granting member row (the access SELECT finds one). */
@@ -196,8 +205,9 @@ describe('createInvite (PLAN §6.2 — member-agnostic link, token + 7-day expir
 		const invite = await createInvite({ userId: 'u1', groupId: 'g1' });
 		const after = Date.now();
 
-		expect(insertCalls).toHaveLength(1);
-		const values = insertCalls[0].values as Record<string, unknown>;
+		const inviteInserts = nonAuditInserts();
+		expect(inviteInserts).toHaveLength(1);
+		const values = inviteInserts[0].values as Record<string, unknown>;
 		expect(values.groupId).toBe('g1');
 		expect(values.createdBy).toBe('u1');
 		// Member-agnostic → the insert never carries a target member.
@@ -300,6 +310,57 @@ describe('revokeInvite (PLAN §6.2 — stamp revoked_at, cross-group guard)', ()
 	});
 });
 
+describe('audit writes (task 6.1, PLAN §12.1 — same transaction; token never logged)', () => {
+	it('createInvite writes one create/invite audit row WITHOUT the token', async () => {
+		queueSelects(ACCESS_OK);
+		const invite = await createInvite({ userId: 'u1', groupId: 'g1' });
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			groupId: 'g1',
+			actorUserId: 'u1',
+			action: 'create',
+			entityType: 'invite'
+		});
+		expect(v.summary).toBe('Created an invite link');
+		// The token is a capability secret — it must NOT appear anywhere in the row.
+		const serialized = JSON.stringify({ summary: v.summary, metadata: v.metadata ?? null });
+		expect(serialized).not.toContain(invite.token);
+	});
+
+	it('revokeInvite writes one revoke/invite audit row', async () => {
+		queueSelects(ACCESS_OK, [{ id: 'i1' }]);
+		await revokeInvite({ userId: 'u1', groupId: 'g1', inviteId: 'i1' });
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const v = audits[0].values as Record<string, unknown>;
+		expect(v).toMatchObject({
+			action: 'revoke',
+			entityType: 'invite',
+			entityId: 'i1'
+		});
+	});
+
+	it('writes NO audit row when createInvite is denied access', async () => {
+		queueSelects([]);
+		await expect(createInvite({ userId: 'u1', groupId: 'g1' })).rejects.toBeInstanceOf(
+			GroupAccessError
+		);
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('writes NO audit row when revokeInvite targets an invite not in the group', async () => {
+		queueSelects(ACCESS_OK, []); // access ok, invite lookup empty
+		await expect(
+			revokeInvite({ userId: 'u1', groupId: 'g1', inviteId: 'nope' })
+		).rejects.toBeInstanceOf(InviteNotFoundError);
+		expect(auditInserts()).toHaveLength(0);
+	});
+});
+
 // --- ACCEPT side (task 3.7, PLAN §6.2) ------------------------------------
 
 /** A still-valid resolved-invite row (the resolve SELECT yields this). */
@@ -386,13 +447,26 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 
 		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-1' });
 		// The new member is linked to the accepting user with their name as default.
-		expect(insertCalls).toHaveLength(1);
-		const values = insertCalls[0].values as Record<string, unknown>;
+		const memberInserts = nonAuditInserts();
+		expect(memberInserts).toHaveLength(1);
+		const values = memberInserts[0].values as Record<string, unknown>;
 		expect(values.groupId).toBe('g1');
 		expect(values.userId).toBe('u9');
 		expect(values.displayName).toBe('Dana');
 		// 'new' does NOT touch members via UPDATE.
 		expect(updateCalls).toHaveLength(0);
+
+		// One add/member audit row for the new join (entity_id = created member id).
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const a = audits[0].values as Record<string, unknown>;
+		expect(a).toMatchObject({
+			groupId: 'g1',
+			actorUserId: 'u9',
+			action: 'add',
+			entityType: 'member',
+			entityId: 'new-member-1'
+		});
 	});
 
 	it("mode 'existing': conditionally claims the empty slot (accepted, no displayName overwrite)", async () => {
@@ -414,8 +488,19 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		const set = updateCalls[0].set as Record<string, unknown>;
 		expect(set.userId).toBe('u9');
 		expect(set).not.toHaveProperty('displayName');
-		// Existing-claim creates NO new member.
-		expect(insertCalls).toHaveLength(0);
+		// Existing-claim creates NO new member (the only insert is the audit row).
+		expect(nonAuditInserts()).toHaveLength(0);
+
+		// One add/member audit row for the claim (entity_id = the claimed member id).
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const a = audits[0].values as Record<string, unknown>;
+		expect(a).toMatchObject({
+			actorUserId: 'u9',
+			action: 'add',
+			entityType: 'member',
+			entityId: 'm5'
+		});
 	});
 
 	it("mode 'existing' already claimed/deactivated/cross-group: 0 rows updated → slot_taken", async () => {
