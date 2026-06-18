@@ -8,7 +8,9 @@
 	import { Toaster } from '$lib/components/ui/sonner';
 	import { registerPwa } from '$lib/pwa/register.svelte';
 	import { startOnlineWatch } from '$lib/pwa/online.svelte';
+	import { startInstallWatch } from '$lib/pwa/install.svelte';
 	import OfflineNotice from '$lib/components/OfflineNotice.svelte';
+	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 
 	let { children, data } = $props();
 
@@ -28,6 +30,16 @@
 	// assumes online (see online.svelte.ts), so first paint never blocks writes.
 	$effect(() => {
 		if (browser) return startOnlineWatch();
+	});
+
+	// Watch for the "Add to home screen" install opportunity, browser-only, with
+	// teardown (PLAN §11). This captures Chromium's `beforeinstallprompt` (and the
+	// `appinstalled` event) and exposes reactive availability that <InstallPrompt/>
+	// reads to show a small, dismissible install affordance. SSR / iOS never set
+	// availability, so nothing shows there. Pure client UX — does not touch the
+	// §11.1 caching contract.
+	$effect(() => {
+		if (browser) return startInstallWatch();
 	});
 </script>
 
@@ -79,6 +91,11 @@
 		<!-- Sticky, accessible "you're offline" indicator (PLAN §11). Renders only
 		     while offline; reads remain usable, writes are disabled per-surface. -->
 		<OfflineNotice />
+
+		<!-- "Add to home screen" affordance (PLAN §11). Shows only when the
+		     browser actually offers install (Chromium) or as a tiny iOS Share-menu
+		     hint; dismissible for the session, hidden when already installed. -->
+		<InstallPrompt />
 
 		<main
 			class="flex-1 px-4 py-6"

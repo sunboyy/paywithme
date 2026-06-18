@@ -95,7 +95,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 7.1 `@vite-pwa/sveltekit`: manifest (name/short_name/display/start_url, placeholder icons+colors) @done deps:1.9
 - [x] 7.2 Service worker: precache static only; NetworkOnly for navigations + `/api/**` (never cache auth) — PLAN §11.1 @done deps:7.1
 - [x] 7.3 Offline shell + offline state UI (disable writes) @done deps:7.2
-- [ ] 7.4 Install prompt handling @todo deps:7.1
+- [x] 7.4 Install prompt handling @done deps:7.1
 - [ ] 7.5 SW update prompt-to-reload — PLAN §11.1 @todo deps:7.2
 - [ ] 7.6 Real PWA icons (192/512 + maskable) + theme/background colors — PLAN #25. Designed in-house (user authorized 2026-06-18: "design PWA icons as suitable for the app"). @todo deps:7.1
 
