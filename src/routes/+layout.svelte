@@ -11,6 +11,7 @@
 	import { startInstallWatch } from '$lib/pwa/install.svelte';
 	import OfflineNotice from '$lib/components/OfflineNotice.svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
+	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 
 	let { children, data } = $props();
 
@@ -87,6 +88,19 @@
 				</div>
 			</div>
 		</header>
+
+		<!-- Shell affordance ordering (PLAN §11 / §11.1): an available app update
+		     is the highest-priority shell signal — stale client code can call
+		     changed auth endpoints (§11.1) — so the prompt-to-reload sits first.
+		     Offline status follows (it gates writes), then the lowest-priority
+		     install nudge. Each renders only when its condition holds, so they
+		     rarely stack; when they do, this is the intended top-to-bottom order. -->
+
+		<!-- Prompt-to-reload (PLAN §11.1): shows only when a new SW version is
+		     waiting (`pwaState.needRefresh`); the "Reload" action calls
+		     `applyUpdate()`, the only path that activates the waiting SW and
+		     reloads. Never auto-reloads. -->
+		<UpdatePrompt />
 
 		<!-- Sticky, accessible "you're offline" indicator (PLAN §11). Renders only
 		     while offline; reads remain usable, writes are disabled per-surface. -->
