@@ -1,7 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-vercel';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { SvelteKitPWA } from '@vite-pwa/sveltekit';
 import { defineConfig } from 'vitest/config';
+import { manifest } from './src/lib/pwa/manifest';
+import { workbox } from './src/lib/pwa/workbox';
 
 export default defineConfig({
 	plugins: [
@@ -17,6 +20,24 @@ export default defineConfig({
 			// Node runtime keeps better-auth + WebAuthn and the `pg` driver simple;
 			// the edge runtime is intentionally NOT used in v1.
 			adapter: adapter({ runtime: 'nodejs22.x' })
+		}),
+		// Installable PWA (PLAN §11). Strategy = `generateSW` (Workbox); see
+		// `src/lib/pwa/workbox.ts` for why and how §11.1 (never cache authed
+		// responses) is enforced: navigations + `/api/**` are NetworkOnly and only
+		// static/build assets are precached.
+		SvelteKitPWA({
+			// `prompt`: the SW does NOT auto-activate. Task 7.5 wires a
+			// prompt-to-reload so auth flows don't break across versions
+			// (PLAN §11.1 "SW update vs. stale client code").
+			registerType: 'prompt',
+			manifest,
+			workbox,
+			devOptions: {
+				// Keep the SW OUT of dev / preview so it can't hijack navigations or
+				// auth during `pnpm dev` and the Playwright e2e run (which builds +
+				// previews). Installability is verified in production builds.
+				enabled: false
+			}
 		})
 	],
 	test: {

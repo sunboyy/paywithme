@@ -37,6 +37,7 @@
 		"@testing-library/svelte": "^5.3.1",
 		"@types/node": "^25.9.3",
 		"@types/pg": "^8.20.0",
+		"@vite-pwa/sveltekit": "^1.1.0",
 		"@vitest/coverage-v8": "^4.1.8",
 		"bits-ui": "^2.18.1",
 		"clsx": "^2.1.1",
