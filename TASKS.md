@@ -92,12 +92,12 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 7 — PWA (PLAN §11, §14.7)
 
-- [ ] 7.1 `@vite-pwa/sveltekit`: manifest (name/short_name/display/start_url, placeholder icons+colors) @todo deps:1.9
-- [ ] 7.2 Service worker: precache static only; NetworkOnly for navigations + `/api/**` (never cache auth) — PLAN §11.1 @todo deps:7.1
-- [ ] 7.3 Offline shell + offline state UI (disable writes) @todo deps:7.2
-- [ ] 7.4 Install prompt handling @todo deps:7.1
-- [ ] 7.5 SW update prompt-to-reload — PLAN §11.1 @todo deps:7.2
-- [ ] 7.6 Real PWA icons (192/512 + maskable) + theme/background colors — PLAN #25. NEEDS-INPUT: user-supplied assets @blocked deps:7.1
+- [x] 7.1 `@vite-pwa/sveltekit`: manifest (name/short_name/display/start_url, placeholder icons+colors) @done deps:1.9
+- [x] 7.2 Service worker: precache static only; NetworkOnly for navigations + `/api/**` (never cache auth) — PLAN §11.1 @done deps:7.1
+- [x] 7.3 Offline shell + offline state UI (disable writes) @done deps:7.2
+- [x] 7.4 Install prompt handling @done deps:7.1
+- [x] 7.5 SW update prompt-to-reload — PLAN §11.1 @done deps:7.2
+- [x] 7.6 Real PWA icons (192/512 + maskable) + theme/background colors — PLAN #25. Designed in-house (user authorized 2026-06-18: "design PWA icons as suitable for the app"). @done deps:7.1
 
 ## Phase 8 — Polish (PLAN §10, §13, §14.8)
 
@@ -112,6 +112,6 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 ## Blocked / NEEDS-INPUT register
 
 - ~~**2.3** — live Mailgun send~~ ✅ RESOLVED 2026-06-16: real `MAILGUN_*` creds added to `.env`; live send verified end-to-end (HTTP 200 via `mg.sunboyy.com`, real POST path, no dev-fallback).
-- **7.6** — real PWA icons + theme/background colors. Placeholders used meanwhile.
+- ~~**7.6** — real PWA icons + theme/background colors~~ ✅ UNBLOCKED 2026-06-18: user authorized designing the icons in-house ("You can design PWA icons as suitable for the app"), so no external asset hand-off is needed; the app generates its own 192/512 + maskable icons and theme/background colors.
 - **Deploy** (not a numbered task) — real Neon pooled+direct URLs. Local Postgres used for the whole build.
 - ~~**2.11 prod hardening**~~ ✅ RESOLVED 2026-06-16: rate-limit storage is **Postgres-backed** (`rate_limit` table, migration `0001`, `storage: 'database'`) so counters are shared across serverless instances, AND `advanced.ipAddress.ipAddressHeaders = ['x-real-ip','x-forwarded-for']` pins Vercel's non-spoofable client IP for true per-IP buckets. Enforcement verified live (429 after the 5/60s magic-link cap; counts persist in `rate_limit`). _Residual (by design, v1):_ per-email throttling across many IPs is not done — better-auth keys on IP+path; mitigated by account-existence-agnostic responses + single-use short-lived tokens.

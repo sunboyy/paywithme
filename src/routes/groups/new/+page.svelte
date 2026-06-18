@@ -3,6 +3,8 @@
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { createGroupSchema } from '$lib/schemas/group';
+	import { network } from '$lib/pwa/online.svelte';
+	import { writeDisabled } from '$lib/pwa/offline-writes';
 	import { CURRENCIES } from '$lib/money/currencies';
 	import { cn } from '$lib/utils';
 	import * as Card from '$lib/components/ui/card';
@@ -54,6 +56,10 @@
 		comboOpen = false;
 		tick().then(() => triggerRef?.focus());
 	}
+
+	// Disable the submit while offline (PLAN §11 — no offline creation) or while a
+	// submit is in flight, with an accessible reason. Server still re-validates.
+	const write = $derived(writeDisabled(network.offline, $submitting));
 </script>
 
 <svelte:head>
@@ -156,9 +162,19 @@
 				<Form.FieldErrors />
 			</Form.Field>
 
-			<Form.Button class="w-full" disabled={$submitting}>
+			<Form.Button
+				class="w-full"
+				disabled={write.disabled}
+				title={write.reason ?? undefined}
+				aria-describedby={write.reason ? 'offline-write-note' : undefined}
+			>
 				{$submitting ? 'Creating…' : 'Create group'}
 			</Form.Button>
+			{#if network.offline}
+				<p id="offline-write-note" class="text-muted-foreground text-sm" role="note">
+					{write.reason}
+				</p>
+			{/if}
 		</form>
 	</Card.Content>
 </Card.Root>

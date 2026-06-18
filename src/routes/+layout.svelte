@@ -1,15 +1,47 @@
 <script lang="ts">
 	import '../app.css';
+	import { browser } from '$app/environment';
 	import { resolve } from '$app/paths';
 	import { enhance } from '$app/forms';
-	import favicon from '$lib/assets/favicon.svg';
 	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
+	import { registerPwa } from '$lib/pwa/register.svelte';
+	import { startOnlineWatch } from '$lib/pwa/online.svelte';
+	import { startInstallWatch } from '$lib/pwa/install.svelte';
+	import OfflineNotice from '$lib/components/OfflineNotice.svelte';
+	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
+	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 
 	let { children, data } = $props();
-</script>
 
-<svelte:head><link rel="icon" href={favicon} /></svelte:head>
+	// Activate the service worker once, browser-only (PLAN §11 / §11.1). This is
+	// a safe no-op during SSR and in dev/preview builds where no SW is emitted
+	// (vite.config.ts `devOptions.enabled: false`), so it cannot hijack the e2e
+	// run. Registration uses `registerType: 'prompt'`: it never auto-reloads —
+	// the update/install/offline UIs (tasks 7.5 / 7.4 / 7.3) consume the reactive
+	// `pwaState` and `applyUpdate()` exposed by the register module.
+	$effect(() => {
+		if (browser) registerPwa();
+	});
+
+	// Watch connectivity, browser-only, and tear the listeners down on unmount
+	// (PLAN §11). The shared `network.offline` flag drives the <OfflineNotice/>
+	// banner here and the per-form write disabling on the write surfaces. SSR
+	// assumes online (see online.svelte.ts), so first paint never blocks writes.
+	$effect(() => {
+		if (browser) return startOnlineWatch();
+	});
+
+	// Watch for the "Add to home screen" install opportunity, browser-only, with
+	// teardown (PLAN §11). This captures Chromium's `beforeinstallprompt` (and the
+	// `appinstalled` event) and exposes reactive availability that <InstallPrompt/>
+	// reads to show a small, dismissible install affordance. SSR / iOS never set
+	// availability, so nothing shows there. Pure client UX — does not touch the
+	// §11.1 caching contract.
+	$effect(() => {
+		if (browser) return startInstallWatch();
+	});
+</script>
 
 <!--
 	Root app shell (PLAN §10, decision #28): mobile-first, fully responsive chrome.
@@ -53,6 +85,28 @@
 				</div>
 			</div>
 		</header>
+
+		<!-- Shell affordance ordering (PLAN §11 / §11.1): an available app update
+		     is the highest-priority shell signal — stale client code can call
+		     changed auth endpoints (§11.1) — so the prompt-to-reload sits first.
+		     Offline status follows (it gates writes), then the lowest-priority
+		     install nudge. Each renders only when its condition holds, so they
+		     rarely stack; when they do, this is the intended top-to-bottom order. -->
+
+		<!-- Prompt-to-reload (PLAN §11.1): shows only when a new SW version is
+		     waiting (`pwaState.needRefresh`); the "Reload" action calls
+		     `applyUpdate()`, the only path that activates the waiting SW and
+		     reloads. Never auto-reloads. -->
+		<UpdatePrompt />
+
+		<!-- Sticky, accessible "you're offline" indicator (PLAN §11). Renders only
+		     while offline; reads remain usable, writes are disabled per-surface. -->
+		<OfflineNotice />
+
+		<!-- "Add to home screen" affordance (PLAN §11). Shows only when the
+		     browser actually offers install (Chromium) or as a tiny iOS Share-menu
+		     hint; dismissible for the session, hidden when already installed. -->
+		<InstallPrompt />
 
 		<main
 			class="flex-1 px-4 py-6"
