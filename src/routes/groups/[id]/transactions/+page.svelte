@@ -60,12 +60,16 @@
 	<div class="flex items-center justify-between gap-2">
 		<div>
 			<h1 class="text-2xl font-semibold">Transactions</h1>
-			<a
-				href={resolve('/groups/[id]/members', { id: data.group.id })}
-				class="text-muted-foreground text-sm hover:underline"
-			>
-				{data.group.name} · Members
-			</a>
+			<span class="text-muted-foreground text-sm">
+				{data.group.name} ·
+				<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
+					Members
+				</a>
+				·
+				<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
+					Settle up
+				</a>
+			</span>
 		</div>
 		<Button href={newPath} class="gap-1">
 			<PlusIcon class="size-4" />

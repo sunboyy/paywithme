@@ -121,7 +121,10 @@ function programForm(opts: { valid: boolean; data?: unknown }) {
 function makeLoadEvent(user: User | null) {
 	return {
 		params: { id: 'g1' },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		// `load` reads `url.searchParams` for the §8.4 settle prefill (task 5.4);
+		// a plain new-transaction visit carries no prefill params.
+		url: new URL('http://localhost/groups/g1/transactions/new')
 	} as unknown as Parameters<typeof load>[0];
 }
 
