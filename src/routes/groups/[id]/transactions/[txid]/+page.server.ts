@@ -23,6 +23,7 @@ import { getCurrency, CURRENCIES, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
+import { listEntityActivity, type ActivityEntry } from '$lib/server/activity';
 import {
 	getTransactionDetail,
 	updateTransaction,
@@ -57,6 +58,26 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		throw e;
 	}
 
+	// This transaction's own audit history (§12.1) — newest-first. Access is already
+	// established by the guard + getTransactionDetail above; a GroupAccessError/not-found
+	// race here degrades to an empty history rather than 500-ing the whole page over the
+	// history section (mirrors the group activity feed). Real errors still surface.
+	let history: ActivityEntry[];
+	try {
+		history = await listEntityActivity({
+			userId: user.id,
+			groupId: params.id,
+			entityType: 'transaction',
+			entityId: params.txid
+		});
+	} catch (e) {
+		if (e instanceof GroupAccessError) {
+			history = [];
+		} else {
+			throw e;
+		}
+	}
+
 	const members = await listMembers({ userId: user.id, groupId: params.id });
 	// Active members are selectable in the edit form; but a member already ON this txn
 	// (possibly since deactivated) must stay seedable so the reconstructed input still
@@ -86,6 +107,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	return {
 		form,
 		detail,
+		history,
 		memberNames,
 		group: { id: group.id, name: group.name, settlementCurrency },
 		currency: currency

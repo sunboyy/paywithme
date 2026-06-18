@@ -16,6 +16,7 @@
 	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -34,57 +35,10 @@
 		return parts.length > 0 ? `${activityPath}?${parts.join('&')}` : activityPath;
 	}
 
-	// Human-readable label per audit action verb (PLAN §12.1 "action"). Falls back to
-	// the raw verb for any future action not yet mapped.
-	const ACTION_LABELS: Record<string, string> = {
-		create: 'created',
-		edit: 'edited',
-		delete: 'deleted',
-		restore: 'restored',
-		add: 'added',
-		deactivate: 'deactivated',
-		reactivate: 'reactivated',
-		revoke: 'revoked',
-		rename: 'renamed',
-		currency_set: 'set currency'
-	};
-	function actionLabel(action: string): string {
-		return ACTION_LABELS[action] ?? action;
-	}
-
+	// Action labels + relative/absolute time helpers are shared with the
+	// per-transaction history section (`$lib/activity-labels`) — ONE source of truth.
 	const actorLabel = (userId: string): string =>
 		data.actors.find((a) => a.userId === userId)?.displayName ?? '';
-
-	/** Absolute time in the viewer's locale/timezone (§12.1). */
-	function absoluteTime(iso: string): string {
-		return new Date(iso).toLocaleString(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit'
-		});
-	}
-
-	const RELATIVE = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-	const DIVISIONS: { amount: number; unit: Intl.RelativeTimeFormatUnit }[] = [
-		{ amount: 60, unit: 'second' },
-		{ amount: 60, unit: 'minute' },
-		{ amount: 24, unit: 'hour' },
-		{ amount: 7, unit: 'day' },
-		{ amount: 4.34524, unit: 'week' },
-		{ amount: 12, unit: 'month' },
-		{ amount: Number.POSITIVE_INFINITY, unit: 'year' }
-	];
-	/** Locale-aware "2 hours ago" / "in 3 days" relative time from an ISO string. */
-	function relativeTime(iso: string): string {
-		let delta = (new Date(iso).getTime() - Date.now()) / 1000; // seconds, signed
-		for (const { amount, unit } of DIVISIONS) {
-			if (Math.abs(delta) < amount) return RELATIVE.format(Math.round(delta), unit);
-			delta /= amount;
-		}
-		return RELATIVE.format(Math.round(delta), 'year');
-	}
 </script>
 
 <svelte:head>

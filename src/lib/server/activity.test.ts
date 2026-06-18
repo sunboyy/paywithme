@@ -102,7 +102,12 @@ vi.mock('$lib/server/db/auth-schema', () => ({
 	user: { id: { __col: 'u_id' }, name: { __col: 'u_name' } }
 }));
 
-import { listGroupActivity, parseEntityTypeFilter, ACTIVITY_LIMIT } from './activity';
+import {
+	listGroupActivity,
+	listEntityActivity,
+	parseEntityTypeFilter,
+	ACTIVITY_LIMIT
+} from './activity';
 import { GroupAccessError } from './groups';
 
 function queueSelects(...rowSets: unknown[][]) {
@@ -218,6 +223,100 @@ describe('listGroupActivity (PLAN §12.1)', () => {
 	it('applies the ACTIVITY_LIMIT cap', async () => {
 		queueSelects(ACCESS_OK, [row()]);
 		await listGroupActivity({ userId: 'u1', groupId: 'g1' });
+		expect(calls.limit[0][0]).toBe(ACTIVITY_LIMIT);
+	});
+});
+
+describe('listEntityActivity (PLAN §12.1 per-entity history)', () => {
+	it('throws GroupAccessError when access is denied', async () => {
+		queueSelects([]); // access check finds nothing
+		await expect(
+			listEntityActivity({
+				userId: 'u1',
+				groupId: 'g1',
+				entityType: 'transaction',
+				entityId: 't1'
+			})
+		).rejects.toBeInstanceOf(GroupAccessError);
+	});
+
+	it('filters to the given group + entity_type + entity_id (never another entity/group)', async () => {
+		queueSelects(ACCESS_OK, [row()]);
+		await listEntityActivity({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
+		const whereArg = calls.where[0][0] as { op: string; c: unknown[] };
+		expect(whereArg.op).toBe('and');
+		// Group scope (isolation) + the entity_type + entity_id predicate — and NOTHING
+		// else, so it can never spill into another entity's or another group's rows.
+		expect(whereArg.c).toHaveLength(3);
+		expect(whereArg.c).toContainEqual({ op: 'eq', a: { __col: 'group_id' }, b: 'g1' });
+		expect(whereArg.c).toContainEqual({
+			op: 'eq',
+			a: { __col: 'entity_type' },
+			b: 'transaction'
+		});
+		expect(whereArg.c).toContainEqual({ op: 'eq', a: { __col: 'entity_id' }, b: 't1' });
+	});
+
+	it('returns entries newest-first with occurredAt stringified and actor → member name', async () => {
+		queueSelects(ACCESS_OK, [row({ action: 'edit', summary: 'Edited Dinner' })]);
+		const result = await listEntityActivity({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
+		expect(result).toEqual([
+			{
+				id: 'a1',
+				action: 'edit',
+				entityType: 'transaction',
+				entityId: 't1',
+				summary: 'Edited Dinner',
+				metadata: null,
+				occurredAt: '2026-06-15T10:00:00.000Z',
+				actorUserId: 'u1',
+				actorName: 'Alice (member)'
+			}
+		]);
+		// occurred_at DESC (newest first) — consistent with the group feed + §12.1.
+		expect(calls.orderBy[0][0]).toEqual({ op: 'desc', a: { __col: 'occurred_at' } });
+	});
+
+	it('falls back to the user name when there is no member slot in this group', async () => {
+		queueSelects(ACCESS_OK, [row({ memberName: null })]);
+		const [r] = await listEntityActivity({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
+		expect(r.actorName).toBe('Alice User');
+	});
+
+	it('falls back to "Someone" when even the user name is null (never crash)', async () => {
+		queueSelects(ACCESS_OK, [row({ memberName: null, userName: null })]);
+		const [r] = await listEntityActivity({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
+		expect(r.actorName).toBe('Someone');
+	});
+
+	it('applies the ACTIVITY_LIMIT cap (bounded payload)', async () => {
+		queueSelects(ACCESS_OK, [row()]);
+		await listEntityActivity({
+			userId: 'u1',
+			groupId: 'g1',
+			entityType: 'transaction',
+			entityId: 't1'
+		});
 		expect(calls.limit[0][0]).toBe(ACTIVITY_LIMIT);
 	});
 });
