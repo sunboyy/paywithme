@@ -75,6 +75,8 @@
 	import { Label } from '$lib/components/ui/label';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
+	import { network } from '$lib/pwa/online.svelte';
+	import { writeDisabled } from '$lib/pwa/offline-writes';
 
 	let {
 		form,
@@ -90,6 +92,11 @@
 	// once at setup is the intended superForm usage (not a reactive re-read).
 	// svelte-ignore state_referenced_locally
 	const { form: formData, message, submitting, enhance, errors } = form;
+
+	// Disable the submit while offline (PLAN §11 — no offline creation) or while a
+	// submit is in flight, with an accessible reason. The server still re-validates
+	// regardless (server-first); this is the UX layer only.
+	const write = $derived(writeDisabled(network.offline, $submitting));
 
 	// The group's SETTLEMENT currency — the default entry currency and what balances
 	// are denominated in. Fixed for this form's lifetime; capturing once is intentional.
@@ -1261,7 +1268,18 @@
 		<input type="hidden" name="charges[{i}].sortOrder" value={charge.sortOrder} />
 	{/each}
 
-	<Button type="submit" class="w-full" disabled={$submitting}>
+	<Button
+		type="submit"
+		class="w-full"
+		disabled={write.disabled}
+		title={write.reason ?? undefined}
+		aria-describedby={write.reason ? 'offline-write-note' : undefined}
+	>
 		{$submitting ? 'Saving…' : submitLabel}
 	</Button>
+	{#if network.offline}
+		<p id="offline-write-note" class="text-muted-foreground text-sm" role="note">
+			{write.reason}
+		</p>
+	{/if}
 </form>

@@ -30,20 +30,32 @@ import type { SvelteKitPWAOptions } from '@vite-pwa/sveltekit';
 type WorkboxConfig = NonNullable<SvelteKitPWAOptions['workbox']>;
 
 export const workbox: WorkboxConfig = {
-	// Precache ONLY static/build assets. No HTML documents are precached as a
-	// navigation fallback in 7.1 (that auth-agnostic shell is task 7.3), so
-	// navigations stay NetworkOnly and the server owns auth.
+	// Precache static/build assets. The ONLY HTML document that enters the precache
+	// is the AUTH-AGNOSTIC `/offline` shell (task 7.3): it's a PRERENDERED SvelteKit
+	// route, so `@vite-pwa/sveltekit` auto-adds it to the precache manifest (as URL
+	// `"offline"` + its `"offline/__data.json"`, whose `user` resolves to null). §11.1
+	// permits this precisely because the shell carries no session data. No SSR/authed
+	// page document is precached. These globs cover the non-HTML assets.
 	globPatterns: ['**/*.{js,css,ico,png,svg,webp,woff,woff2}'],
 
 	// Clean up precaches from older SW versions on activate.
 	cleanupOutdatedCaches: true,
 
-	// CRITICAL (§11.1): NO navigation fallback in 7.1, so navigations are strictly
-	// NetworkOnly and the SERVER decides auth — the SW never serves a (potentially
-	// stale / user-specific) precached document for a page request. The plugin
-	// defaults `navigateFallback: '/'`, which would register a NavigationRoute
-	// serving the precached `/` shell offline; we explicitly disable it with
-	// `null`. Task 7.3 reintroduces an AUTH-AGNOSTIC offline shell as the fallback.
+	// CRITICAL (§11.1): NO navigation fallback — navigations are strictly NetworkOnly
+	// and the SERVER decides auth; the SW never serves a precached document for a page
+	// request. The plugin defaults `navigateFallback: '/'`, which would register a
+	// NavigationRoute serving a precached shell; we explicitly disable it with `null`.
+	//
+	// 7.3 DECISION (the §11.1 crux): we keep this `null` even though an auth-agnostic
+	// `/offline` shell is now precached. With `generateSW`, a `navigateFallback`
+	// installs a NavigationRoute whose handler serves the precached fallback FROM
+	// CACHE for matching navigations — INCLUDING online ones (`generateSW` gives no
+	// clean "network-first, fall back to the precached shell" knob). That would let
+	// the SW answer a real navigation from cache and could mask server-driven auth.
+	// So navigations stay NetworkOnly; the offline UX is handled client-side
+	// (`online.svelte.ts` + <OfflineNotice/> + per-form disabled writes). The
+	// precached `/offline` doc is therefore only ever reachable by an explicit
+	// (online) navigation — never substituted for a real page.
 	navigateFallback: null,
 
 	// `registerType: 'prompt'` (set in vite.config.ts) means we do NOT auto

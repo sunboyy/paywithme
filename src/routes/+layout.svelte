@@ -7,6 +7,8 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
 	import { registerPwa } from '$lib/pwa/register.svelte';
+	import { startOnlineWatch } from '$lib/pwa/online.svelte';
+	import OfflineNotice from '$lib/components/OfflineNotice.svelte';
 
 	let { children, data } = $props();
 
@@ -18,6 +20,14 @@
 	// `pwaState` and `applyUpdate()` exposed by the register module.
 	$effect(() => {
 		if (browser) registerPwa();
+	});
+
+	// Watch connectivity, browser-only, and tear the listeners down on unmount
+	// (PLAN §11). The shared `network.offline` flag drives the <OfflineNotice/>
+	// banner here and the per-form write disabling on the write surfaces. SSR
+	// assumes online (see online.svelte.ts), so first paint never blocks writes.
+	$effect(() => {
+		if (browser) return startOnlineWatch();
 	});
 </script>
 
@@ -65,6 +75,10 @@
 				</div>
 			</div>
 		</header>
+
+		<!-- Sticky, accessible "you're offline" indicator (PLAN §11). Renders only
+		     while offline; reads remain usable, writes are disabled per-surface. -->
+		<OfflineNotice />
 
 		<main
 			class="flex-1 px-4 py-6"

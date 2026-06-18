@@ -25,6 +25,8 @@
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import TransactionForm from '$lib/components/TransactionForm.svelte';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
+	import { network } from '$lib/pwa/online.svelte';
+	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import PencilIcon from '@lucide/svelte/icons/pencil';
@@ -103,7 +105,13 @@
 					</p>
 				</div>
 				<form method="POST" action="?/restore">
-					<Button type="submit" variant="outline" class="gap-1">
+					<Button
+						type="submit"
+						variant="outline"
+						class="gap-1"
+						disabled={network.offline}
+						title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+					>
 						<RotateCcwIcon class="size-4" />
 						Restore
 					</Button>
@@ -263,7 +271,13 @@
 
 			{#if !isDeleted}
 				<Card.Footer class="flex justify-between gap-2">
-					<Button variant="outline" class="gap-1" onclick={() => (editing = true)}>
+					<Button
+						variant="outline"
+						class="gap-1"
+						onclick={() => (editing = true)}
+						disabled={network.offline}
+						title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+					>
 						<PencilIcon class="size-4" />
 						Edit
 					</Button>
@@ -277,6 +291,8 @@
 						<AlertDialog.Root>
 							<AlertDialog.Trigger
 								type="button"
+								disabled={network.offline}
+								title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
 								class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}
 							>
 								<Trash2Icon class="size-4" />

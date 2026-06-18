@@ -39,10 +39,42 @@ describe.skipIf(!swExists)('generated sw.js (PLAN §11.1 invariants)', () => {
 		expect(sw).not.toMatch(/\bCacheFirst\b/);
 	});
 
-	it('precaches assets but never an HTML document', () => {
+	it('precaches assets and ONLY the auth-agnostic /offline HTML shell (§11.1)', () => {
 		expect(sw).toContain('precacheAndRoute');
-		// No `.html` entry in the precache manifest.
-		expect(sw).not.toMatch(/"[^"]*\.html"/);
+
+		// The plugin auto-includes the PRERENDERED `/offline` route in the precache
+		// manifest (URL `"offline"` + its `"offline/__data.json"`). §11.1 explicitly
+		// permits this: the precached HTML shell must be AUTH-AGNOSTIC, and `/offline`
+		// is prerendered with no session (its `__data.json` resolves `user: null`).
+		expect(sw).toMatch(/url:"offline"/);
+
+		// No OTHER prerendered/SSR page document is precached. SvelteKit emits server
+		// routes WITHOUT a file extension in the precache URL, so we can't key off
+		// `.html`; instead assert the only document-like (non-asset, non-manifest,
+		// non-offline) precache URLs don't exist. Real authed pages would appear as
+		// e.g. `url:"groups"` / `url:"settings"` here — they must not.
+		const precacheUrls = [...sw.matchAll(/url:"([^"]*)"/g)].map((m) => m[1]);
+		const documentLike = precacheUrls.filter(
+			(u) =>
+				u !== 'offline' &&
+				u !== 'offline/__data.json' &&
+				u !== 'manifest.webmanifest' &&
+				!/\.(js|css|ico|png|svg|webp|woff2?|json|webmanifest)$/.test(u)
+		);
+		expect(documentLike).toEqual([]);
+	});
+
+	it('serves NO navigation route — the offline shell is never used for ONLINE navs (§11.1)', () => {
+		// 7.3 decision (§11.1, the crux): the prerendered `/offline` shell is precached
+		// (auth-agnostic) but we deliberately did NOT wire a Workbox `navigateFallback`.
+		// With generateSW, `navigateFallback` installs a NavigationRoute that serves the
+		// precached fallback FROM CACHE for matching navigations — INCLUDING online ones
+		// — which could mask server-driven auth. With no NavigationRoute, navigations
+		// stay NetworkOnly (the server always owns auth) and the precached shell can
+		// only ever be reached by an explicit online navigation, never substituted for
+		// a real page. The offline UX is client-side (<OfflineNotice/> + disabled writes).
+		expect(sw).not.toContain('NavigationRoute');
+		expect(sw).not.toContain('navigateFallback');
 	});
 
 	it('does NOT auto-skipWaiting; exposes a SKIP_WAITING message hook for 7.5', () => {

@@ -16,6 +16,8 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import { network } from '$lib/pwa/online.svelte';
+	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 	import HandshakeIcon from '@lucide/svelte/icons/handshake';
 	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
@@ -149,10 +151,25 @@
 							<!-- §8.4: prefill a Transfer (payer=debtor, recipient=creditor, amount,
 							     category=Debt settlement). The href is a `resolve()`d path with an
 							     appended query string (already a resolved URL). -->
-							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-							<a href={settleUrl(s)} class={buttonVariants({ size: 'sm' }) + ' shrink-0'}>
-								Settle up
-							</a>
+							<!-- Offline (PLAN §11 — no offline creation): "Settle up" starts a write
+							     flow, so it's disabled offline as a real <button> with an accessible
+							     reason; online it's the prefill navigation link. -->
+							{#if network.offline}
+								<Button
+									type="button"
+									size="sm"
+									class="shrink-0"
+									disabled
+									title={OFFLINE_WRITE_MESSAGE}
+								>
+									Settle up
+								</Button>
+							{:else}
+								<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+								<a href={settleUrl(s)} class={buttonVariants({ size: 'sm' }) + ' shrink-0'}>
+									Settle up
+								</a>
+							{/if}
 						</li>
 					{/each}
 				</ul>

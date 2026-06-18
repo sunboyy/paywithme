@@ -17,6 +17,8 @@
 	import { toast } from 'svelte-sonner';
 	import { addMemberSchema } from '$lib/schemas/member';
 	import { createInviteSchema } from '$lib/schemas/invite';
+	import { network } from '$lib/pwa/online.svelte';
+	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
 	import { Badge } from '$lib/components/ui/badge';
@@ -211,7 +213,13 @@
 									maxlength={100}
 									class="sm:max-w-xs"
 								/>
-								<Button type="submit" variant="outline" size="sm">Rename</Button>
+								<Button
+									type="submit"
+									variant="outline"
+									size="sm"
+									disabled={network.offline}
+									title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}>Rename</Button
+								>
 							</form>
 
 							<div class="flex flex-wrap gap-2">
@@ -219,7 +227,13 @@
 									<!-- Reactivate (flag flip, §6.3). -->
 									<form method="POST" action="?/reactivate" use:reactivateEnhance>
 										<input type="hidden" name="memberId" value={member.id} />
-										<Button type="submit" variant="outline" size="sm" disabled={$reactivating}>
+										<Button
+											type="submit"
+											variant="outline"
+											size="sm"
+											disabled={$reactivating || network.offline}
+											title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+										>
 											Reactivate
 										</Button>
 									</form>
@@ -237,7 +251,7 @@
 											? `${member.displayName} (you) will be removed from this group and you'll lose access — you'll be sent back to your groups.`
 											: `${member.displayName} will be removed. If they have past activity they're deactivated and kept in history; otherwise they're deleted.`}
 										confirmLabel="Remove"
-										disabled={$removing}
+										disabled={$removing || network.offline}
 									/>
 								{/if}
 							</div>
@@ -262,7 +276,11 @@
 									bind:value={$addData.displayName}
 									class="sm:max-w-xs"
 								/>
-								<Button type="submit" disabled={$adding}>
+								<Button
+									type="submit"
+									disabled={$adding || network.offline}
+									title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+								>
 									{$adding ? 'Adding…' : 'Add member'}
 								</Button>
 							</div>
@@ -329,7 +347,7 @@
 									title="Revoke this invite link?"
 									description="The link will stop working immediately — anyone who hasn't joined yet won't be able to use it."
 									confirmLabel="Revoke"
-									disabled={$revoking}
+									disabled={$revoking || network.offline}
 								/>
 							</div>
 						</li>
@@ -342,7 +360,11 @@
 			<!-- Create a MEMBER-AGNOSTIC invite link (PLAN §6.2): a plain button, a
 			     REAL form action (works without JS); the invitee chooses how to join. -->
 			<form method="POST" action="?/createInvite" use:createInviteEnhance>
-				<Button type="submit" disabled={$creatingInvite}>
+				<Button
+					type="submit"
+					disabled={$creatingInvite || network.offline}
+					title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+				>
 					{$creatingInvite ? 'Creating…' : 'Create invite link'}
 				</Button>
 			</form>
