@@ -69,6 +69,10 @@
 				<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
 					Settle up
 				</a>
+				·
+				<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
+					Activity
+				</a>
 			</span>
 		</div>
 		<Button href={newPath} class="gap-1">

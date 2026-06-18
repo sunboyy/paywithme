@@ -86,7 +86,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 ## Phase 6 — Audit log UI (PLAN §12.1, §14.6)
 
 - [x] 6.1 Extend audit writes to member/invite/group actions (helper from 4.6) @done deps:4.6,3.6,3.3
-- [ ] 6.2 `/groups/[id]/activity` feed (newest first, optional filters) @todo deps:6.1
+- [x] 6.2 `/groups/[id]/activity` feed (newest first, optional filters) @done deps:6.1
 - [ ] 6.3 Per-transaction history on the detail page @todo deps:6.1,4.11
 - [ ] 6.4 Audit integration tests (one entry per mutation; survives soft-delete) @todo deps:6.2
 
