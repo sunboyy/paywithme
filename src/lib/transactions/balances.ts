@@ -106,3 +106,30 @@ export function computeBalances({
 		balance: (paidByMember.get(memberId) ?? 0) - (owedByMember.get(memberId) ?? 0)
 	}));
 }
+
+/**
+ * "Who should pay" ordering (PLAN §8.2): sort members by net balance ASCENDING so
+ * the MOST NEGATIVE balance (the largest debtor — who owes the most) comes first,
+ * and creditors (positive balances) come last. The §8.4 settle UI surfaces this
+ * order prominently; this is just the pure ordering primitive.
+ *
+ * PURE: no DB, no IO, integer math only. Does NOT mutate the input — returns a new
+ * sorted array (the caller may pass a frozen/read-only array safely).
+ *
+ * Ties (equal balance) are broken by `memberId` ASCENDING, matching the codebase's
+ * existing ascending-`member_id` tie-break (see `distribute` in `$lib/money`).
+ * `memberId` is a string here, so a plain lexical compare is the well-defined
+ * ascending order; this makes the result fully deterministic — two members with the
+ * same balance always come out in the same order regardless of input order.
+ */
+export function orderByWhoShouldPay(balances: readonly MemberBalance[]): MemberBalance[] {
+	// Copy first, then sort — never mutate the caller's array.
+	return [...balances].sort((a, b) => {
+		// Integer minor-unit subtraction → ascending by balance (most negative first).
+		if (a.balance !== b.balance) {
+			return a.balance - b.balance;
+		}
+		// Deterministic tie-break: lower memberId first (ascending), as strings.
+		return a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0;
+	});
+}
