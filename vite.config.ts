@@ -33,9 +33,12 @@ export default defineConfig({
 			manifest,
 			workbox,
 			devOptions: {
-				// Keep the SW OUT of dev / preview so it can't hijack navigations or
-				// auth during `pnpm dev` and the Playwright e2e run (which builds +
-				// previews). Installability is verified in production builds.
+				// `devOptions.enabled: false` disables the SW in the Vite dev server
+				// ONLY (`pnpm dev`). Under build + preview / the Playwright e2e run
+				// the SW DOES register, but it's harmless because it's NetworkOnly for
+				// navigations + `/api/**` and uses `clientsClaim: false` +
+				// `registerType: 'prompt'` — so it never seizes the open page or serves
+				// authed/stale content (PLAN §11.1).
 				enabled: false
 			}
 		})

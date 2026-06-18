@@ -57,6 +57,24 @@ export const workbox: WorkboxConfig = {
 	// + API are NetworkOnly today.
 	navigateFallbackDenylist: [/^\/api\//],
 
+	// RUNTIME-STATIC CACHING DECISION (PLAN §11 "runtime cache static assets",
+	// completed in task 7.2):
+	//   We intentionally add NO `StaleWhileRevalidate`/`CacheFirst` runtime rule
+	//   for static assets, because there are no static, non-personalized assets
+	//   left to cache at runtime: everything genuinely static is already
+	//   PRECACHED by `globPatterns` above —
+	//     - SvelteKit `build/` JS+CSS are content-hashed and precached;
+	//     - icons (static/icons/*.png) are precached by the `png` glob;
+	//     - the variable Inter font is `@import`-ed into app.css, so its `woff2`
+	//       files land in the hashed build output and are precached by `woff2`;
+	//     - the favicon is `import`-ed (hashed) and precached.
+	//   The only same-origin assets NOT precached are `robots.txt` and the
+	//   generated `manifest.webmanifest` — neither benefits from a runtime cache
+	//   and caching them adds risk for no gain. Per §11.1, when in doubt we stay
+	//   precache-only / NetworkOnly: a runtime `StaleWhileRevalidate`/`CacheFirst`
+	//   rule is reserved for a FUTURE genuinely-static, non-build-hashed,
+	//   auth-free same-origin asset (none exists today). Navigations and
+	//   `/api/**` MUST never get such a handler — they stay NetworkOnly below.
 	runtimeCaching: [
 		{
 			// All API traffic — including auth (`/api/auth/**`) — is NetworkOnly.

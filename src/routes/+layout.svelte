@@ -1,12 +1,24 @@
 <script lang="ts">
 	import '../app.css';
+	import { browser } from '$app/environment';
 	import { resolve } from '$app/paths';
 	import { enhance } from '$app/forms';
 	import favicon from '$lib/assets/favicon.svg';
 	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
+	import { registerPwa } from '$lib/pwa/register.svelte';
 
 	let { children, data } = $props();
+
+	// Activate the service worker once, browser-only (PLAN §11 / §11.1). This is
+	// a safe no-op during SSR and in dev/preview builds where no SW is emitted
+	// (vite.config.ts `devOptions.enabled: false`), so it cannot hijack the e2e
+	// run. Registration uses `registerType: 'prompt'`: it never auto-reloads —
+	// the update/install/offline UIs (tasks 7.5 / 7.4 / 7.3) consume the reactive
+	// `pwaState` and `applyUpdate()` exposed by the register module.
+	$effect(() => {
+		if (browser) registerPwa();
+	});
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
