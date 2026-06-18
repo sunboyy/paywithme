@@ -78,7 +78,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 
 ## Phase 5 — Debts & settlement (PLAN §8, §14.5)
 
-- [ ] 5.1 Net balance per member (settlement currency) + unit tests — PLAN §8.1 @todo deps:4.10
+- [x] 5.1 Net balance per member (settlement currency) + unit tests — PLAN §8.1 @done deps:4.10
 - [ ] 5.2 "Who should pay" ordering — PLAN §8.2 @todo deps:5.1
 - [ ] 5.3 Simplified settlement suggestions (greedy minimize-transfers) + unit tests (edge cases) — PLAN §8.3 @todo deps:5.1
 - [ ] 5.4 `/groups/[id]/settle` UI + settle-via-transfer prefill — PLAN §8.4 @todo deps:5.3
