@@ -12,7 +12,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">Pay with me</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">Pay with me</Card.Title>
 		<Card.Description>Split group spending and settle up, the easy way.</Card.Description>
 	</Card.Header>
 </Card.Root>

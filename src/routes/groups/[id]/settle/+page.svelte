@@ -136,11 +136,15 @@
 							class="bg-card flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
 						>
 							<span class="flex min-w-0 flex-1 items-center gap-2">
-								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" />
+								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" aria-hidden="true" />
 								<span class="min-w-0">
 									<span class="flex flex-wrap items-center gap-1.5 font-medium">
 										<span class="truncate">{s.fromDisplayName}</span>
-										<ArrowRightIcon class="text-muted-foreground size-4 shrink-0" />
+										<ArrowRightIcon
+											class="text-muted-foreground size-4 shrink-0"
+											aria-hidden="true"
+										/>
+										<span class="sr-only">pays</span>
 										<span class="truncate">{s.toDisplayName}</span>
 									</span>
 									<span class="text-muted-foreground block text-sm tabular-nums">

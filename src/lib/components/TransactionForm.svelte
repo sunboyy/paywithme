@@ -731,9 +731,11 @@
 			name="title"
 			type="text"
 			placeholder={$formData.type === 'transfer' ? 'Settle up' : 'Dinner'}
+			aria-invalid={$errors.title ? 'true' : undefined}
+			aria-describedby={$errors.title ? 'title-error' : undefined}
 			bind:value={$formData.title}
 		/>
-		{#if $errors.title}<p class="text-destructive text-sm">{$errors.title}</p>{/if}
+		{#if $errors.title}<p id="title-error" class="text-destructive text-sm">{$errors.title}</p>{/if}
 	</div>
 
 	<!-- Category picker (PLAN §7.3) — shadcn Select filtered by type. The hidden
@@ -741,7 +743,7 @@
 	<div class="space-y-2">
 		<Label>Category</Label>
 		<Select.Root type="single" bind:value={$formData.categoryId}>
-			<Select.Trigger class="w-full">
+			<Select.Trigger class="w-full" aria-label="Category">
 				<span class="flex items-center gap-2">
 					{#if $formData.categoryId}
 						<CategoryIcon
@@ -769,7 +771,7 @@
 	<div class="space-y-2">
 		<Label>Currency</Label>
 		<Select.Root type="single" value={entryCode} onValueChange={onCurrencyChange}>
-			<Select.Trigger class="w-full">{selectedCurrencyLabel}</Select.Trigger>
+			<Select.Trigger class="w-full" aria-label="Currency">{selectedCurrencyLabel}</Select.Trigger>
 			<Select.Content>
 				{#each currencyOptions as option (option.code)}
 					<Select.Item value={option.code} label={option.code}>
@@ -798,6 +800,8 @@
 						id="fx-rate"
 						inputmode="decimal"
 						placeholder="0.000000"
+						aria-invalid={$errors.exchangeRate ? 'true' : undefined}
+						aria-describedby={$errors.exchangeRate ? 'fx-error' : undefined}
 						value={fxDriver === 'rate' ? rateInput : (effectiveRate ?? '')}
 						oninput={(e) => onRateInput(e.currentTarget.value)}
 					/>
@@ -805,11 +809,13 @@
 				<div class="space-y-1">
 					<Label for="fx-total">Total in {currency.code}</Label>
 					<div class="flex items-center gap-1">
-						<span class="text-muted-foreground text-xs">{currency.symbol}</span>
+						<span class="text-muted-foreground text-xs" aria-hidden="true">{currency.symbol}</span>
 						<Input
 							id="fx-total"
 							inputmode="decimal"
 							placeholder="0.00"
+							aria-invalid={$errors.amountTotalSettlement ? 'true' : undefined}
+							aria-describedby={$errors.amountTotalSettlement ? 'fx-error' : undefined}
 							value={fxDriver === 'total'
 								? settlementTotalInput
 								: settlementPreview
@@ -825,11 +831,11 @@
 					{settlementPreview.txn} → {settlementPreview.settlement}
 				</p>
 			{/if}
-			{#if $errors.exchangeRate}
-				<p class="text-destructive text-sm">{$errors.exchangeRate}</p>
-			{/if}
-			{#if $errors.amountTotalSettlement}
-				<p class="text-destructive text-sm">{$errors.amountTotalSettlement}</p>
+			{#if $errors.exchangeRate || $errors.amountTotalSettlement}
+				<div id="fx-error" class="text-destructive space-y-1 text-sm">
+					{#if $errors.exchangeRate}<p>{$errors.exchangeRate}</p>{/if}
+					{#if $errors.amountTotalSettlement}<p>{$errors.amountTotalSettlement}</p>{/if}
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -846,17 +852,21 @@
 			</div>
 		{:else}
 			<div class="flex items-center gap-2">
-				<span class="text-muted-foreground text-sm">{entryCurrency.symbol}</span>
+				<span class="text-muted-foreground text-sm" aria-hidden="true">{entryCurrency.symbol}</span>
 				<Input
 					id="amountTotal"
 					inputmode="decimal"
 					placeholder="0.00"
+					aria-invalid={$errors.amountTotal ? 'true' : undefined}
+					aria-describedby={$errors.amountTotal ? 'amountTotal-error' : undefined}
 					bind:value={totalInput}
 					class="flex-1"
 				/>
 			</div>
 		{/if}
-		{#if $errors.amountTotal}<p class="text-destructive text-sm">{$errors.amountTotal}</p>{/if}
+		{#if $errors.amountTotal}<p id="amountTotal-error" class="text-destructive text-sm">
+				{$errors.amountTotal}
+			</p>{/if}
 	</div>
 
 	<!-- Paid by (member multi-select). Default = the acting user's member, paying
@@ -878,10 +888,13 @@
 					</label>
 					{#if isPayer && multiplePayers}
 						<div class="flex items-center gap-1">
-							<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
+							<span class="text-muted-foreground text-xs" aria-hidden="true"
+								>{entryCurrency.symbol}</span
+							>
 							<Input
 								inputmode="decimal"
 								placeholder="0.00"
+								aria-label="Amount paid by {member.displayName}"
 								value={paidInputValue(member.id)}
 								oninput={(e) => setPaid(member.id, e.currentTarget.value)}
 								class="h-10 w-24"
@@ -935,10 +948,13 @@
 						</label>
 						{#if isBeneficiary && $formData.splitMode === 'amount'}
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
+								<span class="text-muted-foreground text-xs" aria-hidden="true"
+									>{entryCurrency.symbol}</span
+								>
 								<Input
 									inputmode="decimal"
 									placeholder="0.00"
+									aria-label="Amount for {member.displayName}"
 									value={amountInputs[member.id] ?? ''}
 									oninput={(e) => setRawAmount(member.id, e.currentTarget.value)}
 									class="h-10 w-24"
@@ -948,6 +964,7 @@
 							<Input
 								inputmode="numeric"
 								placeholder="1"
+								aria-label="Shares for {member.displayName}"
 								value={$formData.beneficiaries.find((b) => b.memberId === member.id)?.shareWeight ??
 									1}
 								oninput={(e) => setShareWeight(member.id, e.currentTarget.value)}
@@ -977,6 +994,7 @@
 								id="item-{index}-label"
 								type="text"
 								placeholder="e.g. Pizza"
+								aria-label="Item {index + 1} name"
 								value={item.label}
 								oninput={(e) => setItemLabel(index, e.currentTarget.value)}
 							/>
@@ -984,11 +1002,14 @@
 						<div class="w-28 space-y-1">
 							<Label for="item-{index}-amount">Amount</Label>
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
+								<span class="text-muted-foreground text-xs" aria-hidden="true">
+									{entryCurrency.symbol}
+								</span>
 								<Input
 									id="item-{index}-amount"
 									inputmode="decimal"
 									placeholder="0.00"
+									aria-label="Item {index + 1} amount"
 									value={itemAmountInputs[index] ?? ''}
 									oninput={(e) => setItemAmount(index, e.currentTarget.value)}
 								/>
@@ -1001,7 +1022,7 @@
 							class="min-h-11"
 							onclick={() => removeItem(index)}
 							disabled={$formData.items.length <= 1}
-							aria-label="Remove item"
+							aria-label="Remove item {index + 1}"
 						>
 							Remove
 						</Button>
@@ -1036,10 +1057,13 @@
 								</label>
 								{#if isBeneficiary && item.splitMode === 'amount'}
 									<div class="flex items-center gap-1">
-										<span class="text-muted-foreground text-xs">{entryCurrency.symbol}</span>
+										<span class="text-muted-foreground text-xs" aria-hidden="true"
+											>{entryCurrency.symbol}</span
+										>
 										<Input
 											inputmode="decimal"
 											placeholder="0.00"
+											aria-label="Item {index + 1} amount for {member.displayName}"
 											value={itemMemberAmountInputs[`${index}:${member.id}`] ?? ''}
 											oninput={(e) => setItemRawAmount(index, member.id, e.currentTarget.value)}
 											class="h-10 w-24"
@@ -1049,6 +1073,7 @@
 									<Input
 										inputmode="numeric"
 										placeholder="1"
+										aria-label="Item {index + 1} shares for {member.displayName}"
 										value={itemShareWeightValue(index, member.id)}
 										oninput={(e) => setItemShareWeight(index, member.id, e.currentTarget.value)}
 										class="h-10 w-20"
@@ -1085,7 +1110,9 @@
 								value={charge.kind}
 								onValueChange={(v) => setChargeKind(index, v as ChargeInput['kind'])}
 							>
-								<Select.Trigger class="w-full">{chargeKindLabel(charge.kind)}</Select.Trigger>
+								<Select.Trigger class="w-full" aria-label="Charge {index + 1} type">
+									{chargeKindLabel(charge.kind)}
+								</Select.Trigger>
 								<Select.Content>
 									{#each CHARGE_KINDS as k (k.value)}
 										<Select.Item value={k.value} label={k.label}>{k.label}</Select.Item>
@@ -1098,7 +1125,7 @@
 							variant="ghost"
 							size="sm"
 							onclick={() => removeCharge(index)}
-							aria-label="Remove charge"
+							aria-label="Remove charge {index + 1}"
 							class="min-h-11"
 						>
 							Remove
@@ -1113,7 +1140,9 @@
 								value={charge.mode}
 								onValueChange={(v) => setChargeMode(index, v as ChargeInput['mode'])}
 							>
-								<Select.Trigger class="w-full">{chargeModeLabel(charge.mode)}</Select.Trigger>
+								<Select.Trigger class="w-full" aria-label="Charge {index + 1} mode">
+									{chargeModeLabel(charge.mode)}
+								</Select.Trigger>
 								<Select.Content>
 									{#each CHARGE_MODES as m (m.value)}
 										<Select.Item value={m.value} label={m.label}>{m.label}</Select.Item>
@@ -1124,13 +1153,14 @@
 						<div class="w-28 space-y-1">
 							<Label for="charge-{index}-value">Value</Label>
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs">
+								<span class="text-muted-foreground text-xs" aria-hidden="true">
 									{charge.mode === 'percent' ? '%' : entryCurrency.symbol}
 								</span>
 								<Input
 									id="charge-{index}-value"
 									inputmode="decimal"
 									placeholder={charge.mode === 'percent' ? '10' : '0.00'}
+									aria-label="Charge {index + 1} value"
 									value={chargeValueInputs[index] ?? ''}
 									oninput={(e) => setChargeValue(index, e.currentTarget.value)}
 								/>
@@ -1145,7 +1175,9 @@
 							value={charge.base}
 							onValueChange={(v) => setChargeBase(index, v as ChargeInput['base'])}
 						>
-							<Select.Trigger class="w-full">{chargeBaseLabel(charge.base)}</Select.Trigger>
+							<Select.Trigger class="w-full" aria-label="Charge {index + 1} applies to">
+								{chargeBaseLabel(charge.base)}
+							</Select.Trigger>
 							<Select.Content>
 								{#each CHARGE_BASES as b (b.value)}
 									<Select.Item value={b.value} label={b.label}>{b.label}</Select.Item>

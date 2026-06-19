@@ -40,7 +40,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">Create your account</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">Create your account</Card.Title>
 		<Card.Description>
 			Enter your email and a display name. We'll email you a single-use link to sign in — no
 			password needed.

@@ -84,7 +84,7 @@
 			</span>
 		</div>
 		<Button href={newPath} class="gap-1">
-			<PlusIcon class="size-4" />
+			<PlusIcon class="size-4" aria-hidden="true" />
 			Add
 		</Button>
 	</div>
@@ -177,6 +177,7 @@
 					>
 						<span
 							class="bg-muted text-muted-foreground flex size-10 shrink-0 items-center justify-center rounded-full"
+							aria-hidden="true"
 						>
 							<CategoryIcon name={txn.categoryIcon} class="size-5" />
 						</span>

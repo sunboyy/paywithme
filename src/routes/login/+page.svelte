@@ -76,7 +76,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">Sign in</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">Sign in</Card.Title>
 		<Card.Description>
 			Use your passkey for the fastest sign-in, or get a single-use link by email.
 		</Card.Description>

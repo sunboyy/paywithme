@@ -57,6 +57,15 @@
 	  by `use:enhance` when JS is present.
 -->
 <div class="bg-background text-foreground flex min-h-dvh flex-col">
+	<!-- Skip-to-content link (a11y, task 8.3): the first focusable element, visually
+	     hidden until focused, so keyboard / screen-reader users can jump past the
+	     header chrome straight to the page's <main> region. -->
+	<a
+		href="#main-content"
+		class="bg-background text-foreground focus:ring-ring sr-only z-50 rounded-md px-3 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:ring-2 focus:outline-none"
+	>
+		Skip to content
+	</a>
 	<div class="mx-auto flex w-full max-w-screen-sm flex-1 flex-col">
 		<header
 			class="bg-background/95 supports-backdrop-filter:bg-background/80 sticky top-0 z-10 border-b backdrop-blur"
@@ -109,6 +118,7 @@
 		<InstallPrompt />
 
 		<main
+			id="main-content"
 			class="flex-1 px-4 py-6"
 			style="padding-bottom: max(1.5rem, env(safe-area-inset-bottom));"
 		>

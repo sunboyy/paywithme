@@ -51,7 +51,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">Add a passkey</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">Add a passkey</Card.Title>
 		<Card.Description>
 			Add a passkey for faster, password-free sign-in next time — no email link to wait for.
 		</Card.Description>

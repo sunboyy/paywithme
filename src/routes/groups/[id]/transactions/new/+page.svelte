@@ -46,13 +46,13 @@
 		href={resolve('/groups/[id]/transactions', { id: data.group.id })}
 		class="gap-1"
 	>
-		<ArrowLeftIcon class="size-4" />
+		<ArrowLeftIcon class="size-4" aria-hidden="true" />
 		Back
 	</Button>
 
 	<Card.Root>
 		<Card.Header>
-			<Card.Title class="text-2xl">Add transaction</Card.Title>
+			<Card.Title role="heading" aria-level={1} class="text-2xl">Add transaction</Card.Title>
 			<Card.Description>{data.group.name}</Card.Description>
 		</Card.Header>
 		<Card.Content>

@@ -30,7 +30,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">What should we call you?</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">What should we call you?</Card.Title>
 		<Card.Description>
 			You're almost in. Pick a display name — it's how you'll show up to others in your groups.
 		</Card.Description>
