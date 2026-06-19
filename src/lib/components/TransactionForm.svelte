@@ -74,6 +74,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
+	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
 	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
 	import { network } from '$lib/pwa/online.svelte';
 	import { writeDisabled } from '$lib/pwa/offline-writes';
@@ -865,13 +866,13 @@
 		<div class="space-y-2">
 			{#each members as member (member.id)}
 				{@const isPayer = selectedPayerIds.has(member.id)}
-				<div class="flex items-center justify-between gap-2">
-					<label class="flex items-center gap-2 text-sm">
+				<div class="flex min-h-11 items-center justify-between gap-2">
+					<label class="flex flex-1 items-center gap-3 py-1 text-sm">
 						<input
 							type="checkbox"
 							checked={isPayer}
 							onchange={(e) => togglePayer(member.id, e.currentTarget.checked)}
-							class="size-4"
+							class="size-5"
 						/>
 						{member.displayName}
 					</label>
@@ -883,7 +884,7 @@
 								placeholder="0.00"
 								value={paidInputValue(member.id)}
 								oninput={(e) => setPaid(member.id, e.currentTarget.value)}
-								class="h-8 w-24"
+								class="h-10 w-24"
 							/>
 						</div>
 					{/if}
@@ -922,13 +923,13 @@
 			<div class="space-y-2">
 				{#each members as member (member.id)}
 					{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
-					<div class="flex items-center justify-between gap-2">
-						<label class="flex items-center gap-2 text-sm">
+					<div class="flex min-h-11 items-center justify-between gap-2">
+						<label class="flex flex-1 items-center gap-3 py-1 text-sm">
 							<input
 								type="checkbox"
 								checked={isBeneficiary}
 								onchange={(e) => toggleBeneficiary(member.id, e.currentTarget.checked)}
-								class="size-4"
+								class="size-5"
 							/>
 							{member.displayName}
 						</label>
@@ -940,7 +941,7 @@
 									placeholder="0.00"
 									value={amountInputs[member.id] ?? ''}
 									oninput={(e) => setRawAmount(member.id, e.currentTarget.value)}
-									class="h-8 w-24"
+									class="h-10 w-24"
 								/>
 							</div>
 						{:else if isBeneficiary && $formData.splitMode === 'share'}
@@ -950,7 +951,7 @@
 								value={$formData.beneficiaries.find((b) => b.memberId === member.id)?.shareWeight ??
 									1}
 								oninput={(e) => setShareWeight(member.id, e.currentTarget.value)}
-								class="h-8 w-20"
+								class="h-10 w-20"
 							/>
 						{/if}
 					</div>
@@ -997,6 +998,7 @@
 							type="button"
 							variant="ghost"
 							size="sm"
+							class="min-h-11"
 							onclick={() => removeItem(index)}
 							disabled={$formData.items.length <= 1}
 							aria-label="Remove item"
@@ -1021,14 +1023,14 @@
 					<div class="space-y-2">
 						{#each members as member (member.id)}
 							{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
-							<div class="flex items-center justify-between gap-2">
-								<label class="flex items-center gap-2 text-sm">
+							<div class="flex min-h-11 items-center justify-between gap-2">
+								<label class="flex flex-1 items-center gap-3 py-1 text-sm">
 									<input
 										type="checkbox"
 										checked={isBeneficiary}
 										onchange={(e) =>
 											toggleItemBeneficiary(index, member.id, e.currentTarget.checked)}
-										class="size-4"
+										class="size-5"
 									/>
 									{member.displayName}
 								</label>
@@ -1040,7 +1042,7 @@
 											placeholder="0.00"
 											value={itemMemberAmountInputs[`${index}:${member.id}`] ?? ''}
 											oninput={(e) => setItemRawAmount(index, member.id, e.currentTarget.value)}
-											class="h-8 w-24"
+											class="h-10 w-24"
 										/>
 									</div>
 								{:else if isBeneficiary && item.splitMode === 'share'}
@@ -1049,7 +1051,7 @@
 										placeholder="1"
 										value={itemShareWeightValue(index, member.id)}
 										oninput={(e) => setItemShareWeight(index, member.id, e.currentTarget.value)}
-										class="h-8 w-20"
+										class="h-10 w-20"
 									/>
 								{/if}
 							</div>
@@ -1058,7 +1060,9 @@
 				</div>
 			{/each}
 
-			<Button type="button" variant="outline" size="sm" onclick={addItem}>Add item</Button>
+			<Button type="button" variant="outline" size="sm" class="min-h-11" onclick={addItem}
+				>Add item</Button
+			>
 
 			{#if $errors.items?._errors}
 				<p class="text-destructive text-sm">{$errors.items._errors}</p>
@@ -1095,6 +1099,7 @@
 							size="sm"
 							onclick={() => removeCharge(index)}
 							aria-label="Remove charge"
+							class="min-h-11"
 						>
 							Remove
 						</Button>
@@ -1151,7 +1156,7 @@
 				</div>
 			{/each}
 
-			<Button type="button" variant="outline" size="sm" onclick={addCharge}>
+			<Button type="button" variant="outline" size="sm" class="min-h-11" onclick={addCharge}>
 				Add charge / discount
 			</Button>
 
@@ -1268,18 +1273,25 @@
 		<input type="hidden" name="charges[{i}].sortOrder" value={charge.sortOrder} />
 	{/each}
 
-	<Button
-		type="submit"
-		class="w-full"
-		disabled={write.disabled}
-		title={write.reason ?? undefined}
-		aria-describedby={write.reason ? 'offline-write-note' : undefined}
-	>
-		{$submitting ? 'Saving…' : submitLabel}
-	</Button>
-	{#if network.offline}
-		<p id="offline-write-note" class="text-muted-foreground text-sm" role="note">
-			{write.reason}
-		</p>
-	{/if}
+	<!-- Bottom-reachable primary action (PLAN #28, §10): this is the longest,
+	     most interaction-heavy screen, so the submit is anchored to the bottom of
+	     the viewport on phones (thumb-reachable, safe-area aware) and reverts to a
+	     normal inline block from `sm:` up. The REAL submit stays inside the real
+	     <form>, so progressive enhancement is unchanged. -->
+	<MobileActionBar>
+		<Button
+			type="submit"
+			class="h-11 w-full"
+			disabled={write.disabled}
+			title={write.reason ?? undefined}
+			aria-describedby={write.reason ? 'offline-write-note' : undefined}
+		>
+			{$submitting ? 'Saving…' : submitLabel}
+		</Button>
+		{#if network.offline}
+			<p id="offline-write-note" class="text-muted-foreground mt-2 text-sm" role="note">
+				{write.reason}
+			</p>
+		{/if}
+	</MobileActionBar>
 </form>

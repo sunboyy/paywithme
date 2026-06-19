@@ -158,15 +158,16 @@
 								<Button
 									type="button"
 									size="sm"
-									class="shrink-0"
+									class="min-h-11 shrink-0"
 									disabled
 									title={OFFLINE_WRITE_MESSAGE}
 								>
 									Settle up
 								</Button>
 							{:else}
+								{@const settleHref = settleUrl(s)}
 								<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-								<a href={settleUrl(s)} class={buttonVariants({ size: 'sm' }) + ' shrink-0'}>
+								<a href={settleHref} class={buttonVariants({ size: 'sm' }) + ' min-h-11 shrink-0'}>
 									Settle up
 								</a>
 							{/if}

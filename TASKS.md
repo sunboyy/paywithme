@@ -102,7 +102,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 ## Phase 8 — Polish (PLAN §10, §13, §14.8)
 
 - [x] 8.1 Empty states across screens @done deps:5.4,6.2
-- [ ] 8.2 Mobile UX pass (one-handed, bottom-reachable actions) — PLAN #28 @todo deps:8.1
+- [x] 8.2 Mobile UX pass (one-handed, bottom-reachable actions) — PLAN #28 @done deps:8.1
 - [ ] 8.3 Accessibility pass @todo deps:8.1
 - [ ] 8.4 Full e2e suite: create group → add tx → settle → balances zero; activity newest-first — PLAN §13 @todo deps:5.4,6.2
 - [ ] 8.5 Performance pass @todo deps:8.4

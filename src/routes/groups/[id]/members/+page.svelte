@@ -238,6 +238,7 @@
 									type="submit"
 									variant="outline"
 									size="sm"
+									class="min-h-11"
 									disabled={network.offline}
 									title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}>Rename</Button
 								>
@@ -252,6 +253,7 @@
 											type="submit"
 											variant="outline"
 											size="sm"
+											class="min-h-11"
 											disabled={$reactivating || network.offline}
 											title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
 										>
@@ -371,6 +373,7 @@
 									type="button"
 									variant="outline"
 									size="sm"
+									class="min-h-11"
 									onclick={() => copyInvite(invite.token)}
 								>
 									Copy link
