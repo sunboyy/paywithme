@@ -16,6 +16,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
@@ -112,15 +113,14 @@
 	<!-- §8.3/§8.4 Suggested settlements: minimal set of transfers. Each row prefills
 	     a Transfer at the add page. Empty state = all settled up. -->
 	{#if data.allSettled}
-		<Card.Root>
-			<Card.Content class="flex flex-col items-center gap-2 py-10 text-center">
-				<CheckCircle2Icon class="text-muted-foreground size-8" />
-				<p class="text-sm font-medium">All settled up</p>
-				<p class="text-muted-foreground text-sm">
-					Everyone's square — there's nothing to settle right now.
-				</p>
-			</Card.Content>
-		</Card.Root>
+		<!-- Deliberate cleared state (task 8.1): everyone's square. Uses the shared
+		     EmptyState so it reads consistently with the other screens; no CTA — the
+		     happy path here is "nothing to do". -->
+		<EmptyState
+			icon={CheckCircle2Icon}
+			title="All settled up"
+			description="Everyone's square — there's nothing to settle right now."
+		/>
 	{:else}
 		<Card.Root>
 			<Card.Header>

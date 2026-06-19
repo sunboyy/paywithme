@@ -7,17 +7,25 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { formatAmount, type CurrencyCode } from '$lib/money';
-	import * as Card from '$lib/components/ui/card';
 	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
 	import PlusIcon from '@lucide/svelte/icons/plus';
+	import ReceiptIcon from '@lucide/svelte/icons/receipt';
+	import FilterXIcon from '@lucide/svelte/icons/filter-x';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 
 	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
+
+	// Empty-state branching (task 8.1): distinguish "no transactions yet" (offer
+	// the create CTA) from "your filter matched nothing" (offer to clear it).
+	const filterActive = $derived(hasActiveFilter(data.filters.type, data.filters.category));
+	const emptyKind = $derived(emptyStateKind(data.transactions.length, filterActive));
 
 	// Categories shown in the filter depend on the active type filter (§7.3).
 	const filterCategories = $derived(
@@ -127,18 +135,34 @@
 		</Select.Root>
 	</div>
 
-	{#if data.transactions.length === 0}
-		<Card.Root>
-			<Card.Content class="py-10 text-center">
-				<p class="text-muted-foreground text-sm">
-					{#if data.filters.type || data.filters.category}
-						No transactions match these filters.
-					{:else}
-						No transactions yet. Add your first one to start splitting.
-					{/if}
-				</p>
-			</Card.Content>
-		</Card.Root>
+	{#if emptyKind === 'filtered-empty'}
+		<!-- Filtered-empty (task 8.1): the filter matched nothing → offer to clear
+		     it (a real link back to the unfiltered list, no-JS friendly). -->
+		<EmptyState
+			icon={FilterXIcon}
+			title="No transactions match these filters"
+			description="Nothing here for the current filter. Try a different type or category, or clear the filter to see everything."
+		>
+			{#snippet action()}
+				<!-- `filterUrl` returns a `resolve()`d path with an appended query string
+				     (already a resolved URL); Button's `href` is the same link control the
+				     filter buttons above use. -->
+				<Button variant="outline" href={filterUrl({ type: null, category: null })}>
+					Clear filter
+				</Button>
+			{/snippet}
+		</EmptyState>
+	{:else if emptyKind === 'nothing-yet'}
+		<!-- Nothing-yet (task 8.1): no transactions at all → the create CTA. -->
+		<EmptyState
+			icon={ReceiptIcon}
+			title="No transactions yet"
+			description="Add your first transaction to start splitting spending and tracking who owes who."
+		>
+			{#snippet action()}
+				<Button href={newPath}>Add transaction</Button>
+			{/snippet}
+		</EmptyState>
 	{:else}
 		<ul class="space-y-2">
 			{#each data.transactions as txn (txn.id)}

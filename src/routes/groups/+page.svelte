@@ -3,6 +3,8 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { buttonVariants } from '$lib/components/ui/button';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import UsersIcon from '@lucide/svelte/icons/users';
 	import { getCurrency } from '$lib/money/currencies';
 	import type { PageData } from './$types';
 
@@ -54,19 +56,18 @@
 			{/each}
 		</ul>
 	{:else}
-		<!-- Empty state (clean + clear; full polish is task 8.1). -->
-		<Card.Root>
-			<Card.Header class="text-center">
-				<Card.Title class="text-xl">No groups yet</Card.Title>
-				<Card.Description>
-					Create a group to start splitting spending and settling up with friends.
-				</Card.Description>
-			</Card.Header>
-			<Card.Content class="flex justify-center">
+		<!-- Nothing-yet empty state (task 8.1): the shared EmptyState with the
+		     obvious create CTA as a real link (progressive enhancement). -->
+		<EmptyState
+			icon={UsersIcon}
+			title="No groups yet"
+			description="Create a group to start splitting spending and settling up with friends."
+		>
+			{#snippet action()}
 				<a href={resolve('/groups/new')} class={buttonVariants({ variant: 'default' })}>
 					Create your first group
 				</a>
-			</Card.Content>
-		</Card.Root>
+			{/snippet}
+		</EmptyState>
 	{/if}
 </div>

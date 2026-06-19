@@ -26,6 +26,8 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
+	import UsersIcon from '@lucide/svelte/icons/users';
+	import LinkIcon from '@lucide/svelte/icons/link';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -176,7 +178,26 @@
 
 		<Card.Content class="space-y-4">
 			{#if data.members.length === 0}
-				<p class="text-muted-foreground text-sm">No members yet — add the first one below.</p>
+				<!-- Nothing-yet nudge (task 8.1): inline centred (the add-member form is
+				     the CTA just below the Separator), so it's not a nested card. -->
+				<div
+					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					data-testid="members-empty"
+				>
+					<span
+						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						aria-hidden="true"
+					>
+						<UsersIcon class="size-6" />
+					</span>
+					<div class="space-y-1">
+						<p class="text-foreground text-base font-medium">No members yet</p>
+						<p class="mx-auto max-w-prose text-sm text-pretty">
+							Add a participant for anyone splitting costs — they don't need an account. Start with
+							the form below.
+						</p>
+					</div>
+				</div>
 			{:else}
 				<ul class="divide-border divide-y" aria-label="Group members">
 					{#each data.members as member (member.id)}
@@ -306,7 +327,26 @@
 
 		<Card.Content class="space-y-4">
 			{#if data.invites.length === 0}
-				<p class="text-muted-foreground text-sm">No active invite links — create one below.</p>
+				<!-- Nothing-yet nudge (task 8.1): inline centred (the create-invite form
+				     is the CTA just below the Separator), so it's not a nested card. -->
+				<div
+					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					data-testid="invites-empty"
+				>
+					<span
+						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						aria-hidden="true"
+					>
+						<LinkIcon class="size-6" />
+					</span>
+					<div class="space-y-1">
+						<p class="text-foreground text-base font-medium">No active invite links</p>
+						<p class="mx-auto max-w-prose text-sm text-pretty">
+							Create a link to share so people can join this group. Links are reusable and expire
+							after 7 days.
+						</p>
+					</div>
+				</div>
 			{:else}
 				<ul class="divide-border divide-y" aria-label="Active invite links">
 					{#each data.invites as invite (invite.id)}

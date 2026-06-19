@@ -16,12 +16,21 @@
 	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
+	import HistoryIcon from '@lucide/svelte/icons/history';
+	import FilterXIcon from '@lucide/svelte/icons/filter-x';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 
 	const activityPath = $derived(resolve('/groups/[id]/activity', { id: data.group.id }));
+
+	// Empty-state branching (task 8.1): a filtered-empty feed offers to clear the
+	// filter; an unfiltered-empty feed is the rare "nothing has happened yet".
+	const filterActive = $derived(hasActiveFilter(data.filters.entity, data.filters.actor));
+	const emptyKind = $derived(emptyStateKind(data.entries.length, filterActive));
 
 	/** Build the feed URL for a given filter state, dropping empty params. */
 	function filterUrl(next: { entity?: string | null; actor?: string | null }): string {
@@ -109,18 +118,30 @@
 		{/if}
 	</div>
 
-	{#if data.entries.length === 0}
-		<Card.Root>
-			<Card.Content class="py-10 text-center">
-				<p class="text-muted-foreground text-sm">
-					{#if data.filters.entity || data.filters.actor}
-						No activity matches these filters.
-					{:else}
-						No activity yet. Actions in this group will appear here.
-					{/if}
-				</p>
-			</Card.Content>
-		</Card.Root>
+	{#if emptyKind === 'filtered-empty'}
+		<!-- Filtered-empty (task 8.1): clear the filter to see the full feed. -->
+		<EmptyState
+			icon={FilterXIcon}
+			title="No activity matches these filters"
+			description="Nothing here for the current filter. Try a different entity or person, or clear the filter to see everything."
+		>
+			{#snippet action()}
+				<!-- `filterUrl` returns a `resolve()`d path with an appended query string
+				     (already a resolved URL); Button's `href` is the same link control the
+				     filter buttons above use. -->
+				<Button variant="outline" href={filterUrl({ entity: null, actor: null })}>
+					Clear filter
+				</Button>
+			{/snippet}
+		</EmptyState>
+	{:else if emptyKind === 'nothing-yet'}
+		<!-- Nothing-yet (task 8.1): the feed is empty (rare — any mutation writes
+		     an audit row). No CTA: activity is a byproduct of using the group. -->
+		<EmptyState
+			icon={HistoryIcon}
+			title="No activity yet"
+			description="Actions in this group — transactions, members, settlements — will appear here, newest first."
+		/>
 	{:else}
 		<Card.Root>
 			<Card.Content class="divide-border divide-y p-0">
