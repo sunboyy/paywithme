@@ -108,10 +108,35 @@ export async function getLatestMagicLinkUrlFor(
 }
 
 /**
+ * Hard-delete every group CREATED by the test user (matched by email) so reruns
+ * stay isolated. Group `created_by` → user.id uses `restrict` (the default;
+ * PLAN §6.3: a user who authored ledger history can't be deleted out from under
+ * it), so a user who created any group can't be removed until their groups are
+ * gone first. Deleting the group cascades to its members, invites, transactions,
+ * and audit rows (those FKs are `onDelete: 'cascade'` to `group_id`), which in
+ * turn clears the only other `restrict` user references (transaction.created_by,
+ * audit_log.actor_user_id) — so `deleteUserByEmail` then succeeds.
+ *
+ * Used by the group-flow e2e (task 8.4), whose acting user DOES create groups
+ * (unlike the auth spec). Safe to call in `afterAll`; no rows is a no-op.
+ */
+export async function deleteGroupsCreatedBy(email: string): Promise<void> {
+	await withClient(async (client) => {
+		await client.query(
+			'DELETE FROM groups WHERE created_by IN (SELECT id FROM "user" WHERE email = $1)',
+			[email]
+		);
+	});
+}
+
+/**
  * Remove all auth rows for a test user (and their verification tokens) so reruns
  * stay isolated. Matches the user by email and cascades to session/account/
  * passkey via the FK relationships; `verification` rows key on the token, not the
  * user, so we clear those by the email embedded in `value` separately.
+ *
+ * NOTE: a user who CREATED groups must have those groups removed first (the
+ * `groups.created_by` FK is `restrict`) — see `deleteGroupsCreatedBy`.
  *
  * Safe to call in `afterAll`/`afterEach`; a missing user is a no-op.
  */
