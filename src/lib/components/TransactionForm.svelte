@@ -73,6 +73,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { Checkbox } from '$lib/components/ui/checkbox';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
 	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
@@ -893,11 +894,9 @@
 				{@const isPayer = selectedPayerIds.has(member.id)}
 				<div class="flex min-h-11 items-center justify-between gap-2">
 					<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-						<input
-							type="checkbox"
+						<Checkbox
 							checked={isPayer}
-							onchange={(e) => togglePayer(member.id, e.currentTarget.checked)}
-							class="size-5"
+							onCheckedChange={(v) => togglePayer(member.id, !!v)}
 						/>
 						{member.displayName}
 					</label>
@@ -953,11 +952,9 @@
 					{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
 					<div class="flex min-h-11 items-center justify-between gap-2">
 						<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-							<input
-								type="checkbox"
+							<Checkbox
 								checked={isBeneficiary}
-								onchange={(e) => toggleBeneficiary(member.id, e.currentTarget.checked)}
-								class="size-5"
+								onCheckedChange={(v) => toggleBeneficiary(member.id, !!v)}
 							/>
 							{member.displayName}
 						</label>
@@ -1061,12 +1058,10 @@
 							{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
 							<div class="flex min-h-11 items-center justify-between gap-2">
 								<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-									<input
-										type="checkbox"
+									<Checkbox
 										checked={isBeneficiary}
-										onchange={(e) =>
-											toggleItemBeneficiary(index, member.id, e.currentTarget.checked)}
-										class="size-5"
+										onCheckedChange={(v) =>
+											toggleItemBeneficiary(index, member.id, !!v)}
 									/>
 									{member.displayName}
 								</label>
