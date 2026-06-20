@@ -535,6 +535,13 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 				message: 'The amounts paid must add up to the transaction total',
 				path: ['payers']
 			})
+			// ── non-itemized total must be > 0: a zero-value spending/transfer is meaningless
+			//    (clutters the ledger). Itemized is exempt — a 100%-off discount legitimately
+			//    drives the total to 0 (PLAN §7.2.3); the itemized `>= 0` refine covers that. ─
+			.refine((tx) => tx.splitMode === 'itemized' || tx.amountTotal > 0, {
+				message: 'The transaction total must be greater than zero',
+				path: ['amountTotal']
+			})
 			// ── itemized is spending-only (PLAN §7.2.3). ─────────────────────────────
 			.refine((tx) => !(tx.type === 'transfer' && tx.splitMode === 'itemized'), {
 				message: 'Transfers cannot be itemized',

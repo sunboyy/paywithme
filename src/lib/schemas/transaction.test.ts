@@ -116,6 +116,57 @@ describe('buildTransactionSchema — structural rules (§7.4)', () => {
 		}
 	});
 
+	it('rejects a zero-total equal split (non-itemized must be > 0)', () => {
+		const parsed = thbSchema.safeParse(
+			baseSpending({
+				amountTotal: 0,
+				amountTotalSettlement: 0,
+				payers: [{ memberId: 'm1', amountPaid: 0 }]
+			})
+		);
+		expect(parsed.success).toBe(false);
+		if (!parsed.success) {
+			expect(
+				parsed.error.issues.some(
+					(i) =>
+						i.path.includes('amountTotal') &&
+						i.message === 'The transaction total must be greater than zero'
+				)
+			).toBe(true);
+		}
+	});
+
+	it('still accepts a normal positive total (zero-amount guard is not too strict)', () => {
+		expect(thbSchema.safeParse(baseSpending()).success).toBe(true);
+	});
+
+	it('rejects a zero-total transfer (non-itemized must be > 0)', () => {
+		const parsed = thbSchema.safeParse({
+			type: 'transfer',
+			title: 'Settle up',
+			categoryId: 'transfer-cash',
+			amountTotal: 0,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 0,
+			splitMode: 'equal',
+			payers: [{ memberId: 'm1', amountPaid: 0 }],
+			beneficiaries: [{ memberId: 'm2' }],
+			items: [],
+			charges: []
+		});
+		expect(parsed.success).toBe(false);
+		if (!parsed.success) {
+			expect(
+				parsed.error.issues.some(
+					(i) =>
+						i.path.includes('amountTotal') &&
+						i.message === 'The transaction total must be greater than zero'
+				)
+			).toBe(true);
+		}
+	});
+
 	it('rejects a category whose applies_to does not match the type', () => {
 		// transfer category on a spending transaction.
 		const res = thbSchema.safeParse(baseSpending({ categoryId: 'transfer-cash' }));

@@ -143,27 +143,34 @@ In `src/lib/schemas/transaction.ts`, add one `.refine()` to the chain inside
 `buildTransactionSchema` (alongside the existing refines, e.g. right after the
 "Σ amount_paid == amount_total" refine near line 537). The rule:
 
-- `amountTotal` must be strictly greater than 0.
+- For **non-itemized** splits (`equal` / `amount` / `share`, including transfers),
+  `amountTotal` must be strictly greater than 0.
+- **Itemized is EXEMPT** — an itemized transaction may legitimately total 0 via a
+  100%-off discount (PLAN §7.2.3: "100%-off bill resolves ALL final shares to 0").
+  That flow is tested (`src/lib/schemas/transaction.test.ts:414`,
+  `src/lib/transactions/resolve.test.ts:809`) and MUST keep passing. The existing
+  itemized `amount_total >= 0` refine already guards the itemized case.
 - Message: `The transaction total must be greater than zero`.
 - `path: ['amountTotal']`.
 
 Target shape (match the surrounding refines' formatting and comment style):
 
 ```ts
-// ── total must be > 0: a zero-value transaction is meaningless (clutters the
-//    ledger). minorUnitsField allows 0 for per-member lines, so enforce > 0 here. ─
-.refine((tx) => tx.amountTotal > 0, {
+// ── non-itemized total must be > 0: a zero-value spending/transfer is meaningless
+//    (clutters the ledger). Itemized is exempt — a 100%-off discount legitimately
+//    drives the total to 0 (PLAN §7.2.3); the itemized `>= 0` refine covers that. ─
+.refine((tx) => tx.splitMode === 'itemized' || tx.amountTotal > 0, {
 	message: 'The transaction total must be greater than zero',
 	path: ['amountTotal']
 })
 ```
 
-This covers itemized too (itemized's total equals items subtotal ± charges; a
-zero total is now rejected uniformly). The existing itemized `>= 0` refine stays
-as-is — it guards the discount-exceeds-base case and is still meaningful for
-totals `> 0`.
+> **Why not a blanket `amountTotal > 0`?** A first attempt at this plan used the
+> blanket form and it broke the two 100%-off-discount tests above. Itemized
+> zero-totals are an intended feature, so the guard is scoped to non-itemized.
 
-**Verify**: `pnpm check` → exit 0.
+**Verify**: `pnpm check` → exit 0, then `pnpm test:unit` → all pass (confirms the
+100%-off tests still pass).
 
 ### Step 2: Add tests
 
@@ -189,11 +196,14 @@ existing rejection block) with these cases, using the `baseSpending` helper and
    being too strict). One such positive case already exists; add an explicit one
    tied to this rule if it reads clearly, otherwise rely on the existing
    "accepts a valid equal-split spending" test.
-3. **Rejects a zero-total itemized transaction** (optional but preferred): build an
-   itemized input whose single item has `amount: 0` so the computed total is 0, and
-   assert `parsed.success === false`. If constructing a valid-but-zero itemized
-   input proves fiddly (other itemized refines fire first), SKIP this third case and
-   note it in your report rather than forcing it — cases 1 and 2 are the required ones.
+3. **Rejects a zero-total transfer** (non-itemized): build a `type: 'transfer'`
+   input with `amountTotal: 0` (single payer `amountPaid: 0`, single beneficiary)
+   and assert `parsed.success === false`. This confirms the guard covers transfers,
+   not just spending.
+
+Do NOT add a "reject zero-total itemized" case — itemized zero-totals are VALID
+(100%-off discount) and already covered by the existing accepting test at
+`transaction.test.ts:414`. Leave that test untouched.
 
 **Verify**: `pnpm test:unit -- transaction.test` → all pass, including the new cases.
 
@@ -210,7 +220,9 @@ existing rejection block) with these cases, using the `baseSpending` helper and
 - New tests live in `src/lib/schemas/transaction.test.ts`, modeled on the existing
   `buildTransactionSchema` rejection tests in that same file.
 - Cases: (a) zero-total equal split rejected with `path: ['amountTotal']`,
-  (b) positive total still accepted, (c) optional zero-total itemized rejected.
+  (b) positive total still accepted, (c) zero-total transfer rejected.
+- The existing itemized 100%-off-discount tests (`transaction.test.ts:414`,
+  `resolve.test.ts:809`) must keep passing unchanged — the guard exempts itemized.
 - Verification: `pnpm test:unit -- transaction.test` → all pass.
 
 ## Done criteria
