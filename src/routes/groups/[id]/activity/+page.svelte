@@ -70,6 +70,10 @@
 			<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
 				Settle up
 			</a>
+			·
+			<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
+				Settings
+			</a>
 		</span>
 	</div>
 

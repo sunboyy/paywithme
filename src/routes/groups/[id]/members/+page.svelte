@@ -155,6 +155,12 @@
 			>
 				Transactions
 			</a>
+			<a
+				href={resolve('/groups/[id]/settings', { id: data.group.id })}
+				class={buttonVariants({ variant: 'outline', size: 'sm' })}
+			>
+				Settings
+			</a>
 		</div>
 	</div>
 
