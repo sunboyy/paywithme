@@ -738,6 +738,21 @@
 		{#if $errors.title}<p id="title-error" class="text-destructive text-sm">{$errors.title}</p>{/if}
 	</div>
 
+	<!-- Date (PLAN §7.1) — the editable real-world date; may be backdated (e.g. an
+	     entry recorded the day after it happened). Native date input, no-JS friendly. -->
+	<div class="space-y-2">
+		<Label for="date">Date</Label>
+		<Input
+			id="date"
+			name="date"
+			type="date"
+			aria-invalid={$errors.date ? 'true' : undefined}
+			aria-describedby={$errors.date ? 'date-error' : undefined}
+			bind:value={$formData.date}
+		/>
+		{#if $errors.date}<p id="date-error" class="text-destructive text-sm">{$errors.date}</p>{/if}
+	</div>
+
 	<!-- Category picker (PLAN §7.3) — shadcn Select filtered by type. The hidden
 	     input above carries the value for no-JS; the Select drives it with JS. -->
 	<div class="space-y-2">

@@ -140,6 +140,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		? {
 				type: 'transfer' as const,
 				title: '',
+				// Editable real-world date (§7.1) — defaults to today (UTC); user can backdate.
+				date: new Date().toISOString().slice(0, 10),
 				categoryId: prefill.categoryId,
 				amountTotal: prefill.amount,
 				currency: settlementCurrency,
@@ -156,6 +158,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		: {
 				type: 'spending' as const,
 				title: '',
+				// Editable real-world date (§7.1) — defaults to today (UTC); user can backdate.
+				date: new Date().toISOString().slice(0, 10),
 				categoryId: categoriesFor('spending')[0]?.id ?? '',
 				amountTotal: 0,
 				currency: settlementCurrency,

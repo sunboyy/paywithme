@@ -89,6 +89,39 @@ describe('buildTransactionSchema — valid cases', () => {
 	});
 });
 
+describe('buildTransactionSchema — editable date (PLAN §7.1)', () => {
+	it('defaults the date to today (UTC) when omitted', () => {
+		// `baseSpending()` carries no `date` — the schema fills it with today.
+		const parsed = thbSchema.safeParse(baseSpending());
+		expect(parsed.success).toBe(true);
+		expect(parsed.data?.date).toBe(new Date().toISOString().slice(0, 10));
+	});
+
+	it('accepts a backdated date (the day-after-it-happened case)', () => {
+		const parsed = thbSchema.safeParse(baseSpending({ date: '2020-01-15' }));
+		expect(parsed.success).toBe(true);
+		expect(parsed.data?.date).toBe('2020-01-15');
+	});
+
+	it('accepts today', () => {
+		const today = new Date().toISOString().slice(0, 10);
+		expect(thbSchema.safeParse(baseSpending({ date: today })).success).toBe(true);
+	});
+
+	it('rejects a date in the future', () => {
+		const res = thbSchema.safeParse(baseSpending({ date: '2099-01-01' }));
+		expect(res.success).toBe(false);
+		expect(res.error?.issues.some((i) => i.path[0] === 'date')).toBe(true);
+	});
+
+	it.each(['2026/01/02', '02-01-2026', '2026-1-2', 'yesterday', '2026-13-01', '2026-02-31'])(
+		'rejects a malformed / impossible date: %s',
+		(date) => {
+			expect(thbSchema.safeParse(baseSpending({ date })).success).toBe(false);
+		}
+	);
+});
+
 describe('buildTransactionSchema — structural rules (§7.4)', () => {
 	it('rejects zero payers', () => {
 		const res = thbSchema.safeParse(baseSpending({ payers: [] }));

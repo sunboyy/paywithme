@@ -380,18 +380,18 @@ describe('createTransaction (PLAN §7.1, §7.2, §12.1)', () => {
 		expect(insertsTo('transactions')).toHaveLength(0);
 	});
 
-	it('sets created_at to the supplied real-world clock (PLAN §7.1)', async () => {
+	it('sets created_at from the editable date field, anchored at noon UTC (PLAN §7.1)', async () => {
 		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
-		const when = new Date('2026-01-02T03:04:05.000Z');
 		await createTransaction({
 			userId: 'u1',
 			groupId: 'g1',
-			input: equalInput(),
-			settlementCurrency: 'THB',
-			now: () => when
+			// The user backdated the entry to 2026-01-02 (the real-world date).
+			input: { ...equalInput(), date: '2026-01-02' },
+			settlementCurrency: 'THB'
 		});
 		const txnRow = insertsTo('transactions')[0].values;
-		expect(txnRow.createdAt).toBe(when);
+		// Stored at noon UTC of the picked day so the rendered local date matches it.
+		expect((txnRow.createdAt as Date).toISOString()).toBe('2026-01-02T12:00:00.000Z');
 		// occurred_at / updated_at are NOT set by the app (DB defaults, §7.1).
 		expect('occurredAt' in txnRow).toBe(false);
 		expect('updatedAt' in txnRow).toBe(false);
@@ -939,6 +939,8 @@ describe('getTransactionDetail — reconstruction round-trips (PLAN §7.2/§7.6)
 		expect(detail.input).toEqual({
 			type: 'spending',
 			title: 'Dinner',
+			// Reconstructed from created_at (the txnRow fixture's 2026-02-01) as a YYYY-MM-DD day.
+			date: '2026-02-01',
 			categoryId: 'spending-food-drink',
 			amountTotal: 9000,
 			currency: 'THB',
@@ -1157,7 +1159,7 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 			userId: 'u1',
 			groupId: 'g1',
 			txnId: 't1',
-			input: { ...equalInput(), title: 'Lunch' },
+			input: { ...equalInput(), title: 'Lunch', date: '2026-01-02' },
 			settlementCurrency: 'THB',
 			now: () => when
 		});
@@ -1166,8 +1168,9 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 		expect(txnUpdate).toHaveLength(1);
 		const set = txnUpdate[0].values;
 		expect(set.title).toBe('Lunch');
-		// created_at = the editable real-world date (from `now`); updated_at bumped too.
-		expect(set.createdAt).toBe(when);
+		// created_at = the editable real-world date (noon UTC of the picked day),
+		// DECOUPLED from updated_at which is the real edit-time `now()`.
+		expect((set.createdAt as Date).toISOString()).toBe('2026-01-02T12:00:00.000Z');
 		expect(set.updatedAt).toBe(when);
 		// occurred_at is IMMUTABLE — never written on edit (§7.1).
 		expect('occurredAt' in set).toBe(false);

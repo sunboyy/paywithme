@@ -38,8 +38,10 @@
 // groups.ts / members.ts).
 //
 // ── Timestamps (PLAN §7.1 — DELIBERATELY REVERSED) ────────────────────────────
-// `created_at` = the USER-SUPPLIED real-world date (default now). `occurred_at`
-// (immutable server insert time) and `updated_at` are left to the DB defaults.
+// `created_at` = the USER-EDITABLE real-world date (`data.date`, a calendar day;
+// defaults to today). `occurred_at` = the immutable server insert time (DB default,
+// the same-day sort tie-break). `updated_at` = real `now()`, bumped on every edit
+// (NOT the editable date — an edit's wall-clock time, decoupled from `created_at`).
 
 import { and, asc, desc, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
 import { z } from 'zod';
@@ -247,6 +249,19 @@ export async function createTransaction({
 }
 
 /**
+ * Map the validated `YYYY-MM-DD` editable date (§7.1) to the `created_at` instant.
+ * We anchor it at **noon UTC** of that calendar day: the column is a bare timestamp
+ * displayed via the viewer's locale (`toLocaleDateString`), and noon keeps the
+ * rendered day equal to the picked day across every realistic timezone (≈UTC-12..+11)
+ * — midnight would shift west-of-UTC viewers a day earlier. The precise insert time
+ * lives in the immutable `occurred_at` (the same-day sort tie-break), so `created_at`
+ * deliberately carries only a day.
+ */
+function dateOnlyToCreatedAt(day: string): Date {
+	return new Date(`${day}T12:00:00.000Z`);
+}
+
+/**
  * The SHARED "re-resolve + write the transaction row + replace all child rows"
  * engine that BOTH {@link createTransaction} and {@link updateTransaction} call, so
  * an edit re-resolves byte-identically to a create (PLAN §7.2/§7.6). It NEVER trusts
@@ -272,7 +287,7 @@ async function resolveAndWriteTransaction(
 		userId: string;
 		settlementCurrency: CurrencyCode;
 		data: TransactionInput;
-		/** Injectable clock — `created_at` (create + edit) and `updated_at` (edit). */
+		/** Injectable clock — the real `now`, used for `updated_at` on edit (tests). */
 		now: () => Date;
 	}
 ): Promise<{ amountTotalSettlement: number }> {
@@ -324,10 +339,12 @@ async function resolveAndWriteTransaction(
 	);
 	const settlementPaidByMember = new Map(settlementPaid.map((s) => [s.memberId, s.amountOwed]));
 
-	// 1) The transaction row. `created_at` = the user's real-world date (default now,
-	//    EDITABLE §7.1). On CREATE we INSERT; on EDIT we UPDATE IN PLACE — keeping the
-	//    immutable `occurred_at` untouched, setting `created_at` from the validated
-	//    user date, and bumping `updated_at` to now (§7.1, deliberately reversed).
+	// 1) The transaction row. `created_at` = the user's EDITABLE real-world date
+	//    (`data.date`, a calendar day → noon UTC §7.1). On CREATE we INSERT; on EDIT
+	//    we UPDATE IN PLACE — keeping the immutable `occurred_at` untouched, setting
+	//    `created_at` from the validated date, and bumping `updated_at` to the real
+	//    `now()` (an edit's wall-clock time, decoupled from the date — §7.1 reversed).
+	const createdAt = dateOnlyToCreatedAt(data.date);
 	if (args.mode === 'create') {
 		await exec.insert(transactions).values({
 			id: transactionId,
@@ -343,7 +360,7 @@ async function resolveAndWriteTransaction(
 			amountTotalSettlement,
 			splitMode: data.splitMode,
 			createdBy: userId,
-			createdAt: now()
+			createdAt
 			// `occurred_at` / `updated_at` left to the DB defaults (§7.1).
 		});
 	} else {
@@ -359,9 +376,9 @@ async function resolveAndWriteTransaction(
 				amountTotalSettlement,
 				splitMode: data.splitMode,
 				// `created_at` is the EDITABLE real-world date (§7.1) — set from the input.
-				createdAt: now(),
-				// `updated_at` bumped to now on every edit (§7.1). `occurred_at` is IMMUTABLE
-				// and deliberately NOT in this set — it is never touched on edit.
+				createdAt,
+				// `updated_at` bumped to the real `now()` on every edit (§7.1). `occurred_at`
+				// is IMMUTABLE and deliberately NOT in this set — it is never touched on edit.
 				updatedAt: now()
 			})
 			.where(eq(transactions.id, transactionId));
@@ -898,6 +915,10 @@ export async function getTransactionDetail({
 	const input: TransactionInput = {
 		type: txn.type as 'spending' | 'transfer',
 		title: txn.title,
+		// The editable real-world date (§7.1) as a `YYYY-MM-DD` day — seeds the edit
+		// form's date picker. `created_at` is stored at noon UTC, so the UTC day is
+		// the picked day.
+		date: txn.createdAt.toISOString().slice(0, 10),
 		categoryId: txn.categoryId,
 		amountTotal: txn.amountTotal,
 		currency: entryCurrency,
