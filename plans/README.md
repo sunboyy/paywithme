@@ -17,7 +17,7 @@ incremental improvements, not part of the original build loop.
 | ---- | ---------------------------------------------------- | -------- | ------ | ---------- | ------ |
 | 001  | Rewrite the stale scaffold README                    | P2       | S      | —          | DONE   |
 | 002  | Reject zero-amount transactions                      | P2       | S      | —          | DONE   |
-| 003  | Settlement-lifecycle integration test                | P1       | M      | —          | TODO   |
+| 003  | Settlement-lifecycle integration test                | P1       | M      | —          | DONE   |
 | 004  | Mark inactive members in the settle-up balances list | P3       | S      | —          | TODO   |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
