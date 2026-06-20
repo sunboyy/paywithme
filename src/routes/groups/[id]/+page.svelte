@@ -42,7 +42,10 @@
 		<div>
 			<h1 class="text-2xl font-semibold">{data.group.name}</h1>
 			<span class="text-muted-foreground text-sm">
-				<a href={resolve('/groups/[id]/transactions', { id: data.group.id })} class="hover:underline">
+				<a
+					href={resolve('/groups/[id]/transactions', { id: data.group.id })}
+					class="hover:underline"
+				>
 					Transactions
 				</a>
 				·

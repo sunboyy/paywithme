@@ -894,10 +894,7 @@
 				{@const isPayer = selectedPayerIds.has(member.id)}
 				<div class="flex min-h-11 items-center justify-between gap-2">
 					<label class="flex flex-1 items-center gap-3 text-sm">
-						<Checkbox
-							checked={isPayer}
-							onCheckedChange={(v) => togglePayer(member.id, !!v)}
-						/>
+						<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
 						{member.displayName}
 					</label>
 					{#if isPayer && multiplePayers}
@@ -1060,8 +1057,7 @@
 								<label class="flex flex-1 items-center gap-3 text-sm">
 									<Checkbox
 										checked={isBeneficiary}
-										onCheckedChange={(v) =>
-											toggleItemBeneficiary(index, member.id, !!v)}
+										onCheckedChange={(v) => toggleItemBeneficiary(index, member.id, !!v)}
 									/>
 									{member.displayName}
 								</label>
