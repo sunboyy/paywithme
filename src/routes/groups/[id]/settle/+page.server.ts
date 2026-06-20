@@ -51,6 +51,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const nameById = new Map(members.map((m) => [m.id, m.displayName]));
 	const displayName = (memberId: string): string => nameById.get(memberId) ?? memberId;
 
+	// memberId → is the member still active (not soft-deactivated, §6.3)? A
+	// deactivated member can still carry a balance, so the settle list marks them.
+	const isActiveById = new Map(members.map((m) => [m.id, m.deactivatedAt == null]));
+
 	// ── §8.2 "who should pay": order by balance ASCENDING (most negative first). ──
 	// Each row carries the raw signed balance (minor units) + a formatted display
 	// string in the settlement currency. `formatAmount` handles the sign, so a
@@ -64,7 +68,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		balanceFormatted: formatAmount(b.balance, settlementCurrency),
 		// Convenience flags for the prominent "who owes / who is owed" summary (§8.2).
 		isDebtor: b.balance < 0,
-		isCreditor: b.balance > 0
+		isCreditor: b.balance > 0,
+		// Whether the member is still active (§6.3). Default true defensively — a
+		// balance row with no matching roster entry is treated as active.
+		isActive: isActiveById.get(b.memberId) ?? true
 	}));
 
 	// ── §8.3 simplified settlements → §8.4 prefill rows. ─────────────────────────

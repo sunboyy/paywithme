@@ -94,6 +94,9 @@
 							{:else}
 								<Badge variant="outline">settled</Badge>
 							{/if}
+							{#if !row.isActive}
+								<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
+							{/if}
 						</span>
 						<span
 							class="shrink-0 font-medium tabular-nums {row.isDebtor
