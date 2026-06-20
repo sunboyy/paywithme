@@ -15,7 +15,7 @@ incremental improvements, not part of the original build loop.
 
 | Plan | Title                                                | Priority | Effort | Depends on | Status |
 | ---- | ---------------------------------------------------- | -------- | ------ | ---------- | ------ |
-| 001  | Rewrite the stale scaffold README                    | P2       | S      | —          | TODO   |
+| 001  | Rewrite the stale scaffold README                    | P2       | S      | —          | DONE   |
 | 002  | Reject zero-amount transactions                      | P2       | S      | —          | TODO   |
 | 003  | Settlement-lifecycle integration test                | P1       | M      | —          | TODO   |
 | 004  | Mark inactive members in the settle-up balances list | P3       | S      | —          | TODO   |

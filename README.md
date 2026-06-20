@@ -1,42 +1,45 @@
-# sv
+# PayWithMe
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+A shared-expense / bill-splitting progressive web app for tracking spending and settling up within groups.
 
-## Creating a project
+## What it does
 
-If you're seeing this, you've probably already done this step. Congrats!
+- Create **groups** of people to track shared spending and transfers.
+- Split bills by **equal**, **by amount**, **by share**, or **itemized** (with per-item charges & discounts).
+- Handle **multi-currency** expenses with manual FX rates.
+- **Settle up** with minimized suggested transfers.
+- Sign in **passwordless** via magic link or passkey.
+- Installable **PWA**, mobile-first and fully responsive.
 
-```sh
-# create a new project
-npx sv create my-app
-```
+## Tech stack
 
-To recreate this project with the same configuration:
+SvelteKit 2 + Svelte 5 (runes), Tailwind 4, shadcn-svelte, Drizzle ORM + Postgres, better-auth, and Zod. Deployed to Vercel (Node runtime).
 
-```sh
-# recreate this project
-npx sv@0.16.1 create --template minimal --types ts --no-install pwm-scaffold
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+## Getting started
 
 ```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+pnpm install
+cp .env.example .env   # then fill in the values documented in .env.example
+pnpm db:migrate        # apply migrations to your local Postgres (see docs/local-dev.md)
+pnpm dev               # http://localhost:5173
 ```
 
-## Building
+For local Postgres setup, see [`docs/local-dev.md`](./docs/local-dev.md) — the repo ships a `docker-compose.yml` to bring one up quickly.
 
-To create a production version of your app:
+## Common scripts
 
-```sh
-npm run build
-```
+| Command                 | Purpose                |
+| ----------------------- | ---------------------- |
+| `pnpm check`            | Type-check the project |
+| `pnpm lint`             | Lint with ESLint       |
+| `pnpm format`           | Format with Prettier   |
+| `pnpm test:unit`        | Run unit tests         |
+| `pnpm test:integration` | Run integration tests  |
+| `pnpm test:e2e`         | Run end-to-end tests   |
 
-You can preview the production build with `npm run preview`.
+## Docs
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+- [`PLAN.md`](./PLAN.md) — authoritative product spec.
+- [`CLAUDE.md`](./CLAUDE.md) — project conventions for contributors and agents.
+- [`docs/local-dev.md`](./docs/local-dev.md) — local Postgres + dev setup.
+- [`docs/autonomous-build.md`](./docs/autonomous-build.md) — how the build loop works.
