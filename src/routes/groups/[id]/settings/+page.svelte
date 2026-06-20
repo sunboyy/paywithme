@@ -38,10 +38,7 @@
 				{data.group.name}
 			</a>
 			·
-			<a
-				href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-				class="hover:underline"
-			>
+			<a href={resolve('/groups/[id]/transactions', { id: data.group.id })} class="hover:underline">
 				Transactions
 			</a>
 			·
