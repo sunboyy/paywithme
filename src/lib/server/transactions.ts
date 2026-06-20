@@ -582,11 +582,14 @@ export interface TransactionListItem {
 export async function listTransactions({
 	userId,
 	groupId,
-	filters = {}
+	filters = {},
+	limit
 }: {
 	userId: string;
 	groupId: string;
 	filters?: TransactionListFilters;
+	/** Cap the number of rows returned (newest first). Omit for no cap. */
+	limit?: number;
 }): Promise<TransactionListItem[]> {
 	await assertGroupAccess(userId, groupId);
 
@@ -607,7 +610,7 @@ export async function listTransactions({
 		conditions.push(eq(transactions.categoryId, filters.categoryId));
 	}
 
-	const rows = await db
+	const baseQuery = db
 		.select({
 			id: transactions.id,
 			type: transactions.type,
@@ -626,6 +629,9 @@ export async function listTransactions({
 		// Newest first by the real-world date (§7.1 `created_at`); `occurred_at` is
 		// the immutable insert-time tie-break.
 		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt));
+
+	// Apply caller-supplied cap (e.g. the overview page requests only 5).
+	const rows = limit !== undefined ? await baseQuery.limit(limit) : await baseQuery;
 
 	// `currency` is the ENTRY currency the row was recorded in (§7.6); it may differ
 	// from the group's `settlementCurrency`, which is what `amountTotalSettlement` is
