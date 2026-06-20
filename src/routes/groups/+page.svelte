@@ -36,13 +36,9 @@
 			{#each data.groups as group (group.id)}
 				<li>
 					<!-- Cards show name + settlement currency only. Net balances are
-					     Phase 5 (task 5.1) and are intentionally NOT shown here.
-					     INTERIM (task 3.5): link the card to the members page so the
-					     feature is reachable; the group overview route (`/groups/[id]`)
-					     doesn't exist yet, so we target `/members` directly. Retarget to
-					     the overview once that route lands. -->
+					     Phase 5 (task 5.1) and are intentionally NOT shown here. -->
 					<a
-						href={resolve('/groups/[id]/members', { id: group.id })}
+						href={resolve('/groups/[id]/settings', { id: group.id })}
 						class="focus-visible:ring-ring block rounded-xl focus-visible:ring-2 focus-visible:outline-none"
 					>
 						<Card.Root class="hover:bg-accent/50 transition-colors">

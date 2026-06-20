@@ -64,8 +64,16 @@
 					{data.group.name} · Transactions
 				</a>
 				·
+				<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
+					Members
+				</a>
+				·
 				<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
 					Activity
+				</a>
+				·
+				<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
+					Settings
 				</a>
 			</span>
 		</div>
