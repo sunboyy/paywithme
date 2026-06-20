@@ -140,7 +140,19 @@ export const transactions = pgTable(
 	},
 	(table) => [
 		// PLAN §9: transactions(group_id, occurred_at). Group ledger listing.
-		index('transactions_group_id_occurred_at_idx').on(table.groupId, table.occurredAt)
+		index('transactions_group_id_occurred_at_idx').on(table.groupId, table.occurredAt),
+		// PERF (task 8.5): the group transaction list (`listTransactions`) filters on
+		// `group_id` and sorts NEWEST-FIRST by `created_at DESC, occurred_at DESC` — the
+		// §7.1 real-world display/sort date, NOT `occurred_at`. The §9 index above is keyed
+		// on `occurred_at`, so it can't serve that sort; a group's whole ledger had to be
+		// sorted on every list load. This composite index matches the list's WHERE + ORDER
+		// BY exactly (group_id, then created_at DESC, occurred_at DESC tie-break), so the
+		// feed becomes an index scan instead of a filter-then-sort.
+		index('transactions_group_id_created_at_idx').on(
+			table.groupId,
+			table.createdAt.desc(),
+			table.occurredAt.desc()
+		)
 	]
 );
 

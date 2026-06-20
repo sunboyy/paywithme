@@ -50,6 +50,13 @@
       "when": 1781669707350,
       "tag": "0006_aspiring_stranger",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781918233926,
+      "tag": "0007_even_agent_brand",
+      "breakpoints": true
     }
   ]
 }

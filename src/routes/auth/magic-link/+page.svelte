@@ -15,7 +15,7 @@
 	<!-- Verification failed / link invalid (PLAN §12): show friendly copy + retry. -->
 	<Card.Root>
 		<Card.Header>
-			<Card.Title class="text-2xl">Sign-in link problem</Card.Title>
+			<Card.Title role="heading" aria-level={1} class="text-2xl">Sign-in link problem</Card.Title>
 		</Card.Header>
 		<Card.Content>
 			<p class="text-destructive text-sm" role="alert">{data.error}</p>

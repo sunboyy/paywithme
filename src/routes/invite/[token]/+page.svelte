@@ -40,7 +40,7 @@
 	{#if data.state === 'need_auth'}
 		{#if data.valid}
 			<Card.Header>
-				<Card.Title class="text-2xl">You've been invited</Card.Title>
+				<Card.Title role="heading" aria-level={1} class="text-2xl">You've been invited</Card.Title>
 				<Card.Description>
 					You've been invited to join <strong>{data.groupName}</strong>. Sign in to accept.
 				</Card.Description>
@@ -55,7 +55,7 @@
 			</Card.Content>
 		{:else}
 			<Card.Header>
-				<Card.Title class="text-2xl">Invite unavailable</Card.Title>
+				<Card.Title role="heading" aria-level={1} class="text-2xl">Invite unavailable</Card.Title>
 			</Card.Header>
 			<Card.Content>
 				<p class="text-muted-foreground text-sm">
@@ -65,7 +65,7 @@
 		{/if}
 	{:else if data.state === 'ready'}
 		<Card.Header>
-			<Card.Title class="text-2xl">Join {data.groupName}</Card.Title>
+			<Card.Title role="heading" aria-level={1} class="text-2xl">Join {data.groupName}</Card.Title>
 			<Card.Description>Choose how you'd like to join this group.</Card.Description>
 		</Card.Header>
 		<Card.Content class="space-y-4">
@@ -78,7 +78,7 @@
 		</Card.Content>
 	{:else}
 		<Card.Header>
-			<Card.Title class="text-2xl">Invite unavailable</Card.Title>
+			<Card.Title role="heading" aria-level={1} class="text-2xl">Invite unavailable</Card.Title>
 		</Card.Header>
 		<Card.Content class="space-y-4">
 			<p class="text-muted-foreground text-sm">This invite is invalid, expired, or was revoked.</p>

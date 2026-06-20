@@ -89,7 +89,7 @@
 
 <div class="mx-auto w-full max-w-lg space-y-4">
 	<Button variant="ghost" size="sm" href={listPath} class="gap-1">
-		<ArrowLeftIcon class="size-4" />
+		<ArrowLeftIcon class="size-4" aria-hidden="true" />
 		Back to transactions
 	</Button>
 
@@ -112,7 +112,7 @@
 						disabled={network.offline}
 						title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
 					>
-						<RotateCcwIcon class="size-4" />
+						<RotateCcwIcon class="size-4" aria-hidden="true" />
 						Restore
 					</Button>
 				</form>
@@ -149,11 +149,12 @@
 				<div class="flex items-start gap-3">
 					<span
 						class="bg-muted text-muted-foreground flex size-11 shrink-0 items-center justify-center rounded-full"
+						aria-hidden="true"
 					>
 						<CategoryIcon name={detail.categoryIcon} class="size-5" />
 					</span>
 					<div class="min-w-0 flex-1">
-						<Card.Title class="flex items-center gap-2 text-xl">
+						<Card.Title role="heading" aria-level={1} class="flex items-center gap-2 text-xl">
 							<span class="truncate">{detail.title}</span>
 							<Badge variant={detail.type === 'transfer' ? 'secondary' : 'outline'}>
 								{detail.type}
@@ -278,7 +279,7 @@
 						disabled={network.offline}
 						title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
 					>
-						<PencilIcon class="size-4" />
+						<PencilIcon class="size-4" aria-hidden="true" />
 						Edit
 					</Button>
 
@@ -295,7 +296,7 @@
 								title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
 								class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}
 							>
-								<Trash2Icon class="size-4" />
+								<Trash2Icon class="size-4" aria-hidden="true" />
 								Delete
 							</AlertDialog.Trigger>
 							<AlertDialog.Content>

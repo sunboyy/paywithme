@@ -16,6 +16,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
@@ -93,6 +94,9 @@
 							{:else}
 								<Badge variant="outline">settled</Badge>
 							{/if}
+							{#if !row.isActive}
+								<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
+							{/if}
 						</span>
 						<span
 							class="shrink-0 font-medium tabular-nums {row.isDebtor
@@ -112,15 +116,14 @@
 	<!-- §8.3/§8.4 Suggested settlements: minimal set of transfers. Each row prefills
 	     a Transfer at the add page. Empty state = all settled up. -->
 	{#if data.allSettled}
-		<Card.Root>
-			<Card.Content class="flex flex-col items-center gap-2 py-10 text-center">
-				<CheckCircle2Icon class="text-muted-foreground size-8" />
-				<p class="text-sm font-medium">All settled up</p>
-				<p class="text-muted-foreground text-sm">
-					Everyone's square — there's nothing to settle right now.
-				</p>
-			</Card.Content>
-		</Card.Root>
+		<!-- Deliberate cleared state (task 8.1): everyone's square. Uses the shared
+		     EmptyState so it reads consistently with the other screens; no CTA — the
+		     happy path here is "nothing to do". -->
+		<EmptyState
+			icon={CheckCircle2Icon}
+			title="All settled up"
+			description="Everyone's square — there's nothing to settle right now."
+		/>
 	{:else}
 		<Card.Root>
 			<Card.Header>
@@ -136,11 +139,15 @@
 							class="bg-card flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
 						>
 							<span class="flex min-w-0 flex-1 items-center gap-2">
-								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" />
+								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" aria-hidden="true" />
 								<span class="min-w-0">
 									<span class="flex flex-wrap items-center gap-1.5 font-medium">
 										<span class="truncate">{s.fromDisplayName}</span>
-										<ArrowRightIcon class="text-muted-foreground size-4 shrink-0" />
+										<ArrowRightIcon
+											class="text-muted-foreground size-4 shrink-0"
+											aria-hidden="true"
+										/>
+										<span class="sr-only">pays</span>
 										<span class="truncate">{s.toDisplayName}</span>
 									</span>
 									<span class="text-muted-foreground block text-sm tabular-nums">
@@ -158,15 +165,16 @@
 								<Button
 									type="button"
 									size="sm"
-									class="shrink-0"
+									class="min-h-11 shrink-0"
 									disabled
 									title={OFFLINE_WRITE_MESSAGE}
 								>
 									Settle up
 								</Button>
 							{:else}
+								{@const settleHref = settleUrl(s)}
 								<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-								<a href={settleUrl(s)} class={buttonVariants({ size: 'sm' }) + ' shrink-0'}>
+								<a href={settleHref} class={buttonVariants({ size: 'sm' }) + ' min-h-11 shrink-0'}>
 									Settle up
 								</a>
 							{/if}

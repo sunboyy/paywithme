@@ -68,7 +68,7 @@
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title class="text-2xl">New group</Card.Title>
+		<Card.Title role="heading" aria-level={1} class="text-2xl">New group</Card.Title>
 		<Card.Description>Name your group and pick the currency you'll settle up in.</Card.Description>
 	</Card.Header>
 

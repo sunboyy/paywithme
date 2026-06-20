@@ -11,6 +11,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
+	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
 	import { authClient } from '$lib/auth-client';
 	import type { PageData } from './$types';
 
@@ -96,7 +97,28 @@
 			{/if}
 
 			{#if data.passkeys.length === 0}
-				<p class="text-muted-foreground text-sm">No passkeys yet — add one for faster sign-in.</p>
+				<!-- Nothing-yet empty state (task 8.1). This block lives INSIDE the
+				     Passkeys card (the "Add a passkey" button is the primary CTA just
+				     below the Separator), so it's an inline centred nudge rather than a
+				     nested EmptyState card — same look, real text, decorative icon. -->
+				<div
+					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					data-testid="passkeys-empty"
+				>
+					<span
+						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						aria-hidden="true"
+					>
+						<KeyRoundIcon class="size-6" />
+					</span>
+					<div class="space-y-1">
+						<p class="text-foreground text-base font-medium">No passkeys yet</p>
+						<p class="mx-auto max-w-prose text-sm text-pretty">
+							Add a passkey to sign in faster next time — with Face ID, a fingerprint, or your
+							screen lock instead of an email link.
+						</p>
+					</div>
+				</div>
 			{:else}
 				<ul class="divide-border divide-y" aria-label="Your passkeys">
 					{#each data.passkeys as passkey (passkey.id)}

@@ -64,7 +64,7 @@
 		<AlertDialog.Root>
 			<AlertDialog.Trigger class="" disabled={disabled || undefined} aria-label={triggerLabel}>
 				{#snippet child({ props })}
-					<Button {...props} type="button" variant="outline" size="sm" {disabled}>
+					<Button {...props} type="button" variant="outline" size="sm" class="min-h-11" {disabled}>
 						{triggerLabel}
 					</Button>
 				{/snippet}
