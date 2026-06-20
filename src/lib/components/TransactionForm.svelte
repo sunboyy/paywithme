@@ -73,6 +73,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { Checkbox } from '$lib/components/ui/checkbox';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
 	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
@@ -888,16 +889,14 @@
 	     the whole total. With >1 payer, per-payer amounts show (Σ == total). -->
 	<fieldset class="space-y-2">
 		<legend class="text-sm font-medium">Paid by</legend>
-		<div class="space-y-2">
+		<div>
 			{#each members as member (member.id)}
 				{@const isPayer = selectedPayerIds.has(member.id)}
 				<div class="flex min-h-11 items-center justify-between gap-2">
-					<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-						<input
-							type="checkbox"
+					<label class="flex flex-1 items-center gap-3 text-sm">
+						<Checkbox
 							checked={isPayer}
-							onchange={(e) => togglePayer(member.id, e.currentTarget.checked)}
-							class="size-5"
+							onCheckedChange={(v) => togglePayer(member.id, !!v)}
 						/>
 						{member.displayName}
 					</label>
@@ -948,16 +947,14 @@
 		     split mode: none (equal), an amount (amount), a weight (share). -->
 		<fieldset class="space-y-2">
 			<legend class="text-sm font-medium">Split between</legend>
-			<div class="space-y-2">
+			<div>
 				{#each members as member (member.id)}
 					{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
 					<div class="flex min-h-11 items-center justify-between gap-2">
-						<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-							<input
-								type="checkbox"
+						<label class="flex flex-1 items-center gap-3 text-sm">
+							<Checkbox
 								checked={isBeneficiary}
-								onchange={(e) => toggleBeneficiary(member.id, e.currentTarget.checked)}
-								class="size-5"
+								onCheckedChange={(v) => toggleBeneficiary(member.id, !!v)}
 							/>
 							{member.displayName}
 						</label>
@@ -1056,17 +1053,15 @@
 					</Tabs.Root>
 
 					<!-- Per-item beneficiaries + the per-item-mode input. -->
-					<div class="space-y-2">
+					<div>
 						{#each members as member (member.id)}
 							{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
 							<div class="flex min-h-11 items-center justify-between gap-2">
-								<label class="flex flex-1 items-center gap-3 py-1 text-sm">
-									<input
-										type="checkbox"
+								<label class="flex flex-1 items-center gap-3 text-sm">
+									<Checkbox
 										checked={isBeneficiary}
-										onchange={(e) =>
-											toggleItemBeneficiary(index, member.id, e.currentTarget.checked)}
-										class="size-5"
+										onCheckedChange={(v) =>
+											toggleItemBeneficiary(index, member.id, !!v)}
 									/>
 									{member.displayName}
 								</label>
