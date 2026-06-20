@@ -38,7 +38,7 @@
 					<!-- Cards show name + settlement currency only. Net balances are
 					     Phase 5 (task 5.1) and are intentionally NOT shown here. -->
 					<a
-						href={resolve('/groups/[id]/settings', { id: group.id })}
+						href={resolve('/groups/[id]', { id: group.id })}
 						class="focus-visible:ring-ring block rounded-xl focus-visible:ring-2 focus-visible:outline-none"
 					>
 						<Card.Root class="hover:bg-accent/50 transition-colors">

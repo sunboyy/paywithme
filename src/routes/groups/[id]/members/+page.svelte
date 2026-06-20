@@ -144,6 +144,12 @@
 		</div>
 		<div class="flex gap-2">
 			<a
+				href={resolve('/groups/[id]', { id: data.group.id })}
+				class={buttonVariants({ variant: 'outline', size: 'sm' })}
+			>
+				Overview
+			</a>
+			<a
 				href={resolve('/groups/[id]/activity', { id: data.group.id })}
 				class={buttonVariants({ variant: 'outline', size: 'sm' })}
 			>

@@ -149,7 +149,8 @@ function mapActivityRow(r: ActivityRow): ActivityEntry {
 async function selectActivity(
 	executor: DbExecutor,
 	groupId: string,
-	where: ReturnType<typeof and>
+	where: ReturnType<typeof and>,
+	limit = ACTIVITY_LIMIT
 ): Promise<ActivityEntry[]> {
 	const rows = await executor
 		.select(ACTIVITY_SELECT)
@@ -161,8 +162,8 @@ async function selectActivity(
 		.where(where)
 		// Newest first — matches audit_log_group_id_occurred_at_idx (occurred_at DESC).
 		.orderBy(desc(auditLog.occurredAt))
-		// Bounded payload (no pagination in v1) — newest ACTIVITY_LIMIT rows.
-		.limit(ACTIVITY_LIMIT);
+		// Bounded payload (no pagination in v1) — newest `limit` rows.
+		.limit(limit);
 
 	return rows.map(mapActivityRow);
 }
@@ -180,11 +181,14 @@ export async function listGroupActivity({
 	userId,
 	groupId,
 	filters = {},
+	limit,
 	executor = db
 }: {
 	userId: string;
 	groupId: string;
 	filters?: ActivityFilters;
+	/** Cap the number of rows returned. Defaults to {@link ACTIVITY_LIMIT}. */
+	limit?: number;
 	/** Optional executor (an open tx handle) so this can join a larger transaction. */
 	executor?: DbExecutor;
 }): Promise<ActivityEntry[]> {
@@ -197,7 +201,7 @@ export async function listGroupActivity({
 	if (filters.entityType) conditions.push(eq(auditLog.entityType, filters.entityType));
 	if (filters.actorUserId) conditions.push(eq(auditLog.actorUserId, filters.actorUserId));
 
-	return selectActivity(executor, groupId, and(...conditions));
+	return selectActivity(executor, groupId, and(...conditions), limit);
 }
 
 /**
