@@ -169,6 +169,29 @@ describe('transactions drizzle table', () => {
 		expect(cols).toEqual(['group_id', 'occurred_at']);
 	});
 
+	// PERF (task 8.5): the newest-first list (`listTransactions`) sorts by
+	// `created_at DESC, occurred_at DESC` (the §7.1 real-world display date), which the
+	// §9 (group_id, occurred_at) index above cannot serve. This composite index matches
+	// that WHERE + ORDER BY exactly so the hot feed is an index scan, not a full sort.
+	// Pin its shape (columns + DESC order) so the optimization can't silently regress.
+	it('indexes (group_id, created_at DESC, occurred_at DESC) for the newest-first feed (task 8.5)', () => {
+		const { indexes } = getTableConfig(transactions);
+		const idx = indexes.find((i) => i.config.name === 'transactions_group_id_created_at_idx');
+		expect(idx).toBeDefined();
+		const cols = (idx?.config.columns ?? []) as { name?: string }[];
+		expect(cols.map((col) => col.name)).toEqual(['group_id', 'created_at', 'occurred_at']);
+		// created_at + occurred_at must be DESC to back the newest-first ORDER BY without a
+		// sort node (group_id is the equality predicate, so its direction is irrelevant).
+		const byName = new Map(cols.map((col) => [col.name, col as { name?: string }]));
+		const createdAt = byName.get('created_at') as { name?: string } & Record<string, unknown>;
+		const occurredAt = byName.get('occurred_at') as { name?: string } & Record<string, unknown>;
+		// Drizzle records the per-column order as `indexConfig.order` ('asc' | 'desc').
+		const orderOf = (c: Record<string, unknown>): unknown =>
+			(c.indexConfig as { order?: unknown } | undefined)?.order;
+		expect(orderOf(createdAt)).toBe('desc');
+		expect(orderOf(occurredAt)).toBe('desc');
+	});
+
 	it('is re-exported from the schema entry point', () => {
 		expect((schema as Record<string, unknown>).transactions).toBe(transactions);
 	});

@@ -1,0 +1,1 @@
+CREATE INDEX "transactions_group_id_created_at_idx" ON "transactions" USING btree ("group_id","created_at" DESC NULLS LAST,"occurred_at" DESC NULLS LAST);

@@ -105,7 +105,7 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 8.2 Mobile UX pass (one-handed, bottom-reachable actions) — PLAN #28 @done deps:8.1
 - [x] 8.3 Accessibility pass @done deps:8.1
 - [x] 8.4 Full e2e suite: create group → add tx → settle → balances zero; activity newest-first — PLAN §13 @done deps:5.4,6.2
-- [ ] 8.5 Performance pass @todo deps:8.4
+- [x] 8.5 Performance pass @done deps:8.4
 
 ---
 
