@@ -889,11 +889,11 @@
 	     the whole total. With >1 payer, per-payer amounts show (Σ == total). -->
 	<fieldset class="space-y-2">
 		<legend class="text-sm font-medium">Paid by</legend>
-		<div class="space-y-2">
+		<div>
 			{#each members as member (member.id)}
 				{@const isPayer = selectedPayerIds.has(member.id)}
 				<div class="flex min-h-11 items-center justify-between gap-2">
-					<label class="flex flex-1 items-center gap-3 py-1 text-sm">
+					<label class="flex flex-1 items-center gap-3 text-sm">
 						<Checkbox
 							checked={isPayer}
 							onCheckedChange={(v) => togglePayer(member.id, !!v)}
@@ -947,11 +947,11 @@
 		     split mode: none (equal), an amount (amount), a weight (share). -->
 		<fieldset class="space-y-2">
 			<legend class="text-sm font-medium">Split between</legend>
-			<div class="space-y-2">
+			<div>
 				{#each members as member (member.id)}
 					{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
 					<div class="flex min-h-11 items-center justify-between gap-2">
-						<label class="flex flex-1 items-center gap-3 py-1 text-sm">
+						<label class="flex flex-1 items-center gap-3 text-sm">
 							<Checkbox
 								checked={isBeneficiary}
 								onCheckedChange={(v) => toggleBeneficiary(member.id, !!v)}
@@ -1053,11 +1053,11 @@
 					</Tabs.Root>
 
 					<!-- Per-item beneficiaries + the per-item-mode input. -->
-					<div class="space-y-2">
+					<div>
 						{#each members as member (member.id)}
 							{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
 							<div class="flex min-h-11 items-center justify-between gap-2">
-								<label class="flex flex-1 items-center gap-3 py-1 text-sm">
+								<label class="flex flex-1 items-center gap-3 text-sm">
 									<Checkbox
 										checked={isBeneficiary}
 										onCheckedChange={(v) =>
