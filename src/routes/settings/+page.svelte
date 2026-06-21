@@ -13,6 +13,7 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
 	import { authClient } from '$lib/auth-client';
+	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -133,25 +134,17 @@
 								</p>
 							</div>
 
-							<!--
-								Server-action delete (works without JS): a real <form> carrying
-								the passkey id in a hidden field. A plain submit (no confirm
-								dialog) is intentional — deleting a passkey is reversible by
-								re-enrolling and recovery is the email magic link (PLAN §5.6), so
-								the lighter-weight, no-JS-friendly control is preferred.
-							-->
-							<form method="POST" action="?/delete" use:deleteEnhance>
-								<input type="hidden" name="id" value={passkey.id} />
-								<Button
-									type="submit"
-									variant="outline"
-									size="sm"
-									disabled={$deleting}
-									aria-label="Remove this passkey"
-								>
-									Remove
-								</Button>
-							</form>
+							<ConfirmSubmit
+								action="?/delete"
+								enhance={deleteEnhance}
+								hiddenName="id"
+								hiddenValue={passkey.id}
+								triggerLabel="Remove"
+								title="Remove this passkey?"
+								description="You can add it back any time, or sign in using your email."
+								confirmLabel="Remove passkey"
+								disabled={$deleting}
+							/>
 						</li>
 					{/each}
 				</ul>
