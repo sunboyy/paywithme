@@ -287,42 +287,47 @@
 					     PROGRESSIVE-ENHANCEMENT layer over a real `?/delete` form (the server
 					     re-validates + is the source of truth). With JS the trigger (type=button)
 					     only OPENS the confirmation, whose Action submits the form; WITHOUT JS the
-					     <noscript> button submits the same form directly — so delete always works. -->
-					<form method="POST" action="?/delete">
-						<AlertDialog.Root>
-							<AlertDialog.Trigger
-								type="button"
-								disabled={network.offline}
-								title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
-								class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}
-							>
-								<Trash2Icon class="size-4" aria-hidden="true" />
-								Delete
-							</AlertDialog.Trigger>
-							<AlertDialog.Content>
-								<AlertDialog.Header>
-									<AlertDialog.Title>Delete '{detail.title}'?</AlertDialog.Title>
-									<AlertDialog.Description>
-										This soft-deletes the transaction. It's hidden from the list but can be restored
-										later. This action is recorded in the group's history.
-									</AlertDialog.Description>
-								</AlertDialog.Header>
-								<AlertDialog.Footer>
-									<AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-									<AlertDialog.Action type="submit" variant="destructive">
-										Delete transaction
-									</AlertDialog.Action>
-								</AlertDialog.Footer>
-							</AlertDialog.Content>
-						</AlertDialog.Root>
-						<!-- No-JS fallback: the dialog needs JS to open, so without it this real
-						     submit button posts the same `?/delete` action (server-side guard stands). -->
-						<noscript>
-							<button type="submit" class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}>
-								Delete transaction
-							</button>
-						</noscript>
-					</form>
+					     <noscript> button submits the same form directly — so delete always works.
+					     NOTE: AlertDialog.Content is portalled outside the DOM tree, so the submit
+					     button uses the HTML5 `form` attribute to stay associated with the form. -->
+					<form id="delete-txn-form" method="POST" action="?/delete"></form>
+					<AlertDialog.Root>
+						<AlertDialog.Trigger
+							type="button"
+							disabled={network.offline}
+							title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+							class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}
+						>
+							<Trash2Icon class="size-4" aria-hidden="true" />
+							Delete
+						</AlertDialog.Trigger>
+						<AlertDialog.Content>
+							<AlertDialog.Header>
+								<AlertDialog.Title>Delete '{detail.title}'?</AlertDialog.Title>
+								<AlertDialog.Description>
+									This soft-deletes the transaction. It's hidden from the list but can be restored
+									later. This action is recorded in the group's history.
+								</AlertDialog.Description>
+							</AlertDialog.Header>
+							<AlertDialog.Footer>
+								<AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+								<AlertDialog.Action type="submit" form="delete-txn-form" variant="destructive">
+									Delete transaction
+								</AlertDialog.Action>
+							</AlertDialog.Footer>
+						</AlertDialog.Content>
+					</AlertDialog.Root>
+					<!-- No-JS fallback: the dialog needs JS to open, so without it this real
+					     submit button posts the same `?/delete` action (server-side guard stands). -->
+					<noscript>
+						<button
+							type="submit"
+							form="delete-txn-form"
+							class={buttonVariants({ variant: 'destructive' }) + ' gap-1'}
+						>
+							Delete transaction
+						</button>
+					</noscript>
 				</Card.Footer>
 			{/if}
 		</Card.Root>
