@@ -12,6 +12,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import ReceiptIcon from '@lucide/svelte/icons/receipt';
@@ -65,36 +66,16 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
-	<div class="flex items-center justify-between gap-2">
-		<div>
-			<h1 class="text-2xl font-semibold">Transactions</h1>
-			<span class="text-muted-foreground text-sm">
-				<a href={resolve('/groups/[id]', { id: data.group.id })} class="hover:underline">
-					{data.group.name}
-				</a>
-				·
-				<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
-					Members
-				</a>
-				·
-				<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
-					Settle up
-				</a>
-				·
-				<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
-					Activity
-				</a>
-				·
-				<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
-					Settings
-				</a>
-			</span>
+	<header class="space-y-3">
+		<div class="flex items-center justify-between gap-3">
+			<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+			<Button href={newPath} class="shrink-0 gap-1">
+				<PlusIcon class="size-4" aria-hidden="true" />
+				Add
+			</Button>
 		</div>
-		<Button href={newPath} class="gap-1">
-			<PlusIcon class="size-4" aria-hidden="true" />
-			Add
-		</Button>
-	</div>
+		<GroupNav groupId={data.group.id} current="transactions" />
+	</header>
 
 	<!-- Filters: type (links, no-JS friendly) + category (Select → navigate). -->
 	<div class="flex flex-wrap items-center gap-2">

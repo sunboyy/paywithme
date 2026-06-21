@@ -85,14 +85,21 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 		await page.getByRole('option', { name: /USD/ }).click();
 		await page.getByRole('button', { name: 'Create group' }).click();
 
-		// Create redirects to the groups list; open the new group (its card links to
-		// the members page).
+		// Create redirects to the groups list; open the new group — its card lands on
+		// the group overview.
 		await page.waitForURL(/\/groups\/?$/);
 		await page.getByRole('link', { name: GROUP_NAME }).click();
-		await page.waitForURL(/\/groups\/[^/]+\/members$/);
+		await page.waitForURL(/\/groups\/[^/]+$/);
 		// Capture the group id from the URL so the rest of the flow navigates directly.
 		const groupId = new URL(page.url()).pathname.split('/')[2];
 		expect(groupId).toBeTruthy();
+
+		// Reach the roster via the shared group navigation's "Members" tab.
+		await page
+			.getByRole('navigation', { name: 'Group sections' })
+			.getByRole('link', { name: 'Members' })
+			.click();
+		await page.waitForURL(/\/groups\/[^/]+\/members$/);
 
 		// The acting user is auto-added as a member (PLAN §6.1); the roster shows them
 		// with a "You" badge.
@@ -128,13 +135,18 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 
 		// Redirects to the transaction list; the new spend appears.
 		await page.waitForURL(`**/groups/${groupId}/transactions`);
-		await expect(page.getByRole('heading', { name: 'Transactions' })).toBeVisible();
+		// The shared GroupNav marks the current section with aria-current="page".
+		await expect(
+			page.locator('nav[aria-label="Group sections"] a[aria-current="page"]')
+		).toHaveText('Transactions');
 		const txLink = page.getByRole('link', { name: new RegExp(TX_TITLE) });
 		await expect(txLink).toBeVisible();
 
 		// ── Balances reflect who owes whom (settle page) ─────────────────────────────
 		await page.goto(`/groups/${groupId}/settle`);
-		await expect(page.getByRole('heading', { name: 'Settle up' })).toBeVisible();
+		await expect(
+			page.locator('nav[aria-label="Group sections"] a[aria-current="page"]')
+		).toHaveText('Settle up');
 
 		// Bob is the debtor ($5 owed); the acting user is owed $5. The balances list
 		// surfaces both an "owes" and an "is owed" badge (so it is NOT all-settled).
@@ -165,7 +177,9 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 
 		// ── Balances zero out: the settle page shows the cleared "All settled up" ────
 		await page.goto(`/groups/${groupId}/settle`);
-		await expect(page.getByRole('heading', { name: 'Settle up' })).toBeVisible();
+		await expect(
+			page.locator('nav[aria-label="Group sections"] a[aria-current="page"]')
+		).toHaveText('Settle up');
 		// The shared EmptyState cleared card (task 8.1) — assert by its visible text,
 		// not a brittle selector.
 		await expect(page.getByText('All settled up')).toBeVisible();
@@ -177,7 +191,9 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 
 		// ── Activity feed: newest-first, attributed to the right actor ───────────────
 		await page.goto(`/groups/${groupId}/activity`);
-		await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible();
+		await expect(
+			page.locator('nav[aria-label="Group sections"] a[aria-current="page"]')
+		).toHaveText('Activity');
 
 		// Every entry shows the acting user as the actor (they performed every action
 		// in this run). The <time> elements are rendered newest-first.

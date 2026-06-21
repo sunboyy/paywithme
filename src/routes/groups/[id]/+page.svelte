@@ -13,6 +13,7 @@
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { formatAmount, type CurrencyCode } from '$lib/money';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -38,39 +39,19 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
-	<div class="flex items-center justify-between gap-2">
-		<div>
-			<h1 class="text-2xl font-semibold">{data.group.name}</h1>
-			<span class="text-muted-foreground text-sm">
-				<a
-					href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-					class="hover:underline"
-				>
-					Transactions
-				</a>
-				·
-				<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
-					Members
-				</a>
-				·
-				<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
-					Settle up
-				</a>
-				·
-				<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
-					Activity
-				</a>
-				·
-				<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
-					Settings
-				</a>
-			</span>
+	<header class="space-y-3">
+		<div class="flex items-center justify-between gap-3">
+			<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+			<Button
+				href={resolve('/groups/[id]/transactions/new', { id: data.group.id })}
+				class="shrink-0 gap-1"
+			>
+				<PlusIcon class="size-4" aria-hidden="true" />
+				Add
+			</Button>
 		</div>
-		<Button href={resolve('/groups/[id]/transactions/new', { id: data.group.id })} class="gap-1">
-			<PlusIcon class="size-4" aria-hidden="true" />
-			Add
-		</Button>
-	</div>
+		<GroupNav groupId={data.group.id} current="overview" />
+	</header>
 
 	<!-- Balance summary: who owes / who is owed. Links to the full settle page. -->
 	<Card.Root>
