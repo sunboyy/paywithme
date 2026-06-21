@@ -4,7 +4,6 @@
 	// Mobile-first, server-first, progressively enhanced. The rename form pre-fills
 	// with the current group name and posts to the `rename` action; superForm
 	// `enhance` upgrades it for inline feedback without a full navigation.
-	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { renameGroupSchema } from '$lib/schemas/group';
@@ -13,6 +12,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -31,30 +31,10 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
-	<div>
-		<h1 class="text-2xl font-semibold">Settings</h1>
-		<span class="text-muted-foreground text-sm">
-			<a href={resolve('/groups/[id]', { id: data.group.id })} class="hover:underline">
-				{data.group.name}
-			</a>
-			·
-			<a href={resolve('/groups/[id]/transactions', { id: data.group.id })} class="hover:underline">
-				Transactions
-			</a>
-			·
-			<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
-				Members
-			</a>
-			·
-			<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
-				Settle up
-			</a>
-			·
-			<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
-				Activity
-			</a>
-		</span>
-	</div>
+	<header class="space-y-3">
+		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+		<GroupNav groupId={data.group.id} current="settings" />
+	</header>
 
 	{#if $message}
 		<p

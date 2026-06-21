@@ -17,6 +17,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
@@ -55,30 +56,10 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
-	<div>
-		<h1 class="text-2xl font-semibold">Activity</h1>
-		<span class="text-muted-foreground text-sm">
-			<a href={resolve('/groups/[id]', { id: data.group.id })} class="hover:underline">
-				{data.group.name}
-			</a>
-			·
-			<a href={resolve('/groups/[id]/transactions', { id: data.group.id })} class="hover:underline">
-				Transactions
-			</a>
-			·
-			<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
-				Members
-			</a>
-			·
-			<a href={resolve('/groups/[id]/settle', { id: data.group.id })} class="hover:underline">
-				Settle up
-			</a>
-			·
-			<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
-				Settings
-			</a>
-		</span>
-	</div>
+	<header class="space-y-3">
+		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+		<GroupNav groupId={data.group.id} current="activity" />
+	</header>
 
 	<!-- Filters: entity type (links, no-JS friendly) + actor (Select → navigate). -->
 	<div class="flex flex-wrap items-center gap-2">

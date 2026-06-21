@@ -11,7 +11,6 @@
 	//
 	// shadcn-svelte components are used from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored / edited here).
-	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { toast } from 'svelte-sonner';
@@ -22,10 +21,11 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
 	import { Badge } from '$lib/components/ui/badge';
-	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import UsersIcon from '@lucide/svelte/icons/users';
 	import LinkIcon from '@lucide/svelte/icons/link';
 	import type { PageData } from './$types';
@@ -136,39 +136,11 @@
 	<title>Members · {data.group.name} · Pay with me</title>
 </svelte:head>
 
-<div class="space-y-6">
-	<div class="flex items-start justify-between gap-2">
-		<div class="space-y-1">
-			<h1 class="text-2xl font-semibold tracking-tight">{data.group.name}</h1>
-			<p class="text-muted-foreground text-sm">Manage who's splitting in this group.</p>
-		</div>
-		<div class="flex gap-2">
-			<a
-				href={resolve('/groups/[id]', { id: data.group.id })}
-				class={buttonVariants({ variant: 'outline', size: 'sm' })}
-			>
-				Overview
-			</a>
-			<a
-				href={resolve('/groups/[id]/activity', { id: data.group.id })}
-				class={buttonVariants({ variant: 'outline', size: 'sm' })}
-			>
-				Activity
-			</a>
-			<a
-				href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-				class={buttonVariants({ variant: 'outline', size: 'sm' })}
-			>
-				Transactions
-			</a>
-			<a
-				href={resolve('/groups/[id]/settings', { id: data.group.id })}
-				class={buttonVariants({ variant: 'outline', size: 'sm' })}
-			>
-				Settings
-			</a>
-		</div>
-	</div>
+<div class="mx-auto w-full max-w-2xl space-y-6">
+	<header class="space-y-3">
+		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+		<GroupNav groupId={data.group.id} current="members" />
+	</header>
 
 	{#if statusMessage}
 		<p

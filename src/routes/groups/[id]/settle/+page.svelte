@@ -17,6 +17,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
@@ -53,35 +54,10 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
-	<div class="flex items-center justify-between gap-2">
-		<div>
-			<h1 class="text-2xl font-semibold">Settle up</h1>
-			<span class="text-muted-foreground text-sm">
-				<a href={resolve('/groups/[id]', { id: data.group.id })} class="hover:underline">
-					{data.group.name}
-				</a>
-				·
-				<a
-					href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-					class="hover:underline"
-				>
-					Transactions
-				</a>
-				·
-				<a href={resolve('/groups/[id]/members', { id: data.group.id })} class="hover:underline">
-					Members
-				</a>
-				·
-				<a href={resolve('/groups/[id]/activity', { id: data.group.id })} class="hover:underline">
-					Activity
-				</a>
-				·
-				<a href={resolve('/groups/[id]/settings', { id: data.group.id })} class="hover:underline">
-					Settings
-				</a>
-			</span>
-		</div>
-	</div>
+	<header class="space-y-3">
+		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+		<GroupNav groupId={data.group.id} current="settle" />
+	</header>
 
 	<!-- §8.2 "Who should pay": balances ordered most-negative-first, surfaced
 	     prominently. Signed settlement-currency amounts; debtors highlighted. -->
@@ -196,10 +172,4 @@
 			</Card.Content>
 		</Card.Root>
 	{/if}
-
-	<div>
-		<Button href={resolve('/groups/[id]/transactions', { id: data.group.id })} variant="outline">
-			Back to transactions
-		</Button>
-	</div>
 </div>
