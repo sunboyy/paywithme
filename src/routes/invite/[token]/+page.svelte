@@ -58,9 +58,7 @@
 				<Card.Title role="heading" aria-level={1} class="text-2xl">Invite unavailable</Card.Title>
 			</Card.Header>
 			<Card.Content>
-				<p class="text-muted-foreground text-sm">
-					This invite link is no longer available.
-				</p>
+				<p class="text-muted-foreground text-sm">This invite link is no longer available.</p>
 			</Card.Content>
 		{/if}
 	{:else if data.state === 'ready'}
