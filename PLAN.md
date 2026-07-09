@@ -1133,3 +1133,322 @@ init`, which also pulls in `@lucide/svelte`); add base components via the CLI;
   unit of the transaction currency (no FX API).
 - **Audit log** — append-only, immutable record of who performed which mutation
   (create/edit/delete/…) and when; shown per group, newest first (§12.1).
+- **API key** — a bearer secret that authenticates a programmatic caller to the
+  Public API (§16) as the user who minted it, inheriting that user's group
+  memberships; hashed at rest, revealed once on creation.
+- **Scope** — a key's permission level: `read` (GET only) or `write` (all
+  mutations, implies read). Set per key at creation (§16.3).
+- **Idempotency key** — a caller-supplied header on POST creates that lets a retry
+  replay the original response instead of creating a duplicate (§16.7).
+
+---
+
+## 16. Public API (REST, for AI agents)
+
+A **versioned REST/JSON HTTP API** under `/api/v1`, authenticated by **API keys**,
+so any agent framework or script can manage a user's transactions on their behalf.
+It is a **thin HTTP surface over the existing `lib/server` business logic** — it
+introduces no new domain rules, reuses the same access checks, money math, and
+audit-log discipline as the web app, and is versioned so a future v2 can live
+side-by-side.
+
+**Scope (v1).** _Read_ groups, transactions, balances, members; _write_
+transactions (create/update/delete/restore) and settle-up. **Group, member, and
+invite management are NOT exposed** — the smallest surface is the smallest attack
+surface. An MCP adapter and browser (CORS) access are out of scope for v1.
+
+**Principle.** Keep v1 tight: reuse existing patterns (`access.ts`,
+`buildTransactionSchema`, the `rate_limit`-style hand-authored tables, the
+`audit_log`), expose owned versioned DTOs (never internal types on the wire), and
+prefer a documented forward-add over a speculative feature.
+
+### 16.1 Key mechanism & data model
+
+- **Plugin: `@better-auth/api-key`, pinned `^1.6.18`** — a **separate package**
+  (like `@better-auth/passkey`, already a dependency) matching the installed
+  `better-auth@1.6.18` **exactly**; **no core upgrade**. It provides hashing at
+  rest (SHA-256), one-time plaintext reveal on create, a display `start` prefix,
+  per-key expiry, `lastRequest`/`requestCount`, `permissions` (scopes), per-key
+  rate-limit fields, and the full `auth.api.{createApiKey,verifyApiKey,getApiKey,
+updateApiKey,deleteApiKey,listApiKeys,deleteAllExpiredApiKeys}` server API.
+  `apiKey({...})` is added to the `plugins` array in `src/lib/server/auth.ts`
+  **before** `sveltekitCookies` (which stays last). `enableSessionForAPIKeys`
+  stays **off** (the plugin flags it not-for-production); the API resolves keys
+  explicitly (§16.4). The plugin's own HTTP endpoints (`/api/auth/api-key/*`) are
+  **not** the public API — the app calls the server API from its own routes.
+- **The Drizzle `api_key` table is HAND-AUTHORED** in its own file (e.g.
+  `src/lib/server/db/api-key-schema.ts`, exported under key `apikey` for the
+  adapter) — the same constraint as `rate_limit` (the better-auth CLI can't
+  resolve the `$app/server` import). Columns follow the plugin's `apikey` model:
+  `id` (pk), `configId` (notNull default `'default'`, indexed), `name`, `start`,
+  `prefix`, `key` (the hash, notNull, indexed), `referenceId` (= userId, notNull,
+  indexed), `refillInterval`, `refillAmount`, `lastRefillAt`, `enabled`,
+  `rateLimitEnabled`, `rateLimitTimeWindow`, `rateLimitMax`, `requestCount`,
+  `remaining`, `lastRequest`, `expiresAt`, `createdAt`, `updatedAt`, `metadata`,
+  `permissions`. **The ms-duration fields `rateLimitTimeWindow` and
+  `refillInterval` MUST be `bigint({ mode: 'number' })`, not `integer`** (windows
+  can exceed int32) — following the `rate_limit` precedent; date fields use
+  `timestamp` as in `auth-schema.ts`.
+- **Key prefixes** `pwm_test_` / `pwm_live_` are **our policy**, not a plugin
+  freebie: env-scoped keys via the plugin's `defaultPrefix` (or its multi-config
+  array). The display surface is prefix-agnostic — it renders whatever `start` a
+  key carries.
+
+### 16.2 Authorization & scoping (§12 extension)
+
+- **A key acts _as_ its creating user**, inheriting **all** that user's current,
+  active group memberships **live** — there is **no key→group binding**. The
+  per-endpoint authorization check is unchanged from the web app:
+  `userHasGroupAccess(key.userId, groupId)`, reached through the existing
+  `access.ts` / `requireGroupAccess` path (adapted to resolve the principal from
+  the key instead of a session cookie). No new access primitive.
+- **Two scopes: `read` and `write` (write ⊇ read)**, stored in the plugin's
+  per-key `permissions`. Enforcement = one shared guard on every mutating
+  endpoint: `if scope !== 'write' → 403 forbidden_scope`. A read key can hit the
+  GET surface but **physically cannot move money** (the high-value affordance
+  against a leaked or prompt-injected read key). No finer-grained resource scopes
+  in v1.
+- **Lifecycle — explicit non-behaviors (do NOT add cascade logic):**
+  - User loses membership / group is soft-deleted → **no key-specific behavior**;
+    the existing `isNull(deactivatedAt)` / `isNull(groups.deletedAt)` filters make
+    the key 404 on that group automatically, exactly like the user's own session.
+  - **Non-expiring by default**, with an **optional per-key TTL** at creation
+    (plugin `keyExpiration`). No forced rotation in v1.
+  - **Revoke** = delete → the key returns an immediate `401`.
+  - **Account deletion** is **N/A in v1** (no such feature exists). Forward-looking
+    note only: _if account deletion is ever added, key revocation must be part of
+    the same teardown transaction._
+- **Audit actor (zero schema change).** `audit_log.actorUserId` stays the **user
+  id** (the key carries no independent authority). "Which key" is provenance,
+  recorded in the existing nullable `metadata` jsonb as
+  `{ viaKey: "<keyId>", keyName: "<label>" }`, and the durable `summary` gets a
+  **"(via API key '<name>')" suffix**. A dedicated `actor_key_id` column is
+  **rejected** (a Postgres expression index on `(metadata->>'viaKey')` covers
+  indexed per-key lookups later without altering the append-only table).
+
+### 16.3 Transport, routing & conventions
+
+- **Version = URL path prefix** `/api/v1/…`. A future **v2 lives side-by-side**;
+  **no** header/media-type versioning, no unversioned alias.
+- **Routes** live at `src/routes/api/v1/<resource>/+server.ts` (e.g.
+  `transactions/+server.ts`, `transactions/[id]/+server.ts`), mirroring the
+  existing `/api/auth/[...all]` mount.
+- **Auth guard = a second `handle` composed via SvelteKit `sequence()`** in
+  `hooks.server.ts` (`sequence(resolveSession, apiV1Guard)`). For `/api/v1/*` it:
+  (1) **skips** the cookie `getSession` call (agents send no cookie); (2) extracts
+  the key and calls `auth.api.verifyApiKey({ body: { key } })`; (3) on
+  missing/invalid/expired/revoked key **short-circuits with the 401 envelope**
+  before the route runs; (4) attaches the resolved principal to `locals.apiKey`.
+  **Authentication (401) is cross-cutting in the hook; authorization (403 scope)
+  is per-route** in the handler (reusing the §16.2 write-guard).
+- **Transport = `Authorization: Bearer <key>`.** The hook strips the `Bearer `
+  scheme and passes the raw key to `verifyApiKey` (which reads no headers, so the
+  plugin's `x-api-key` default is bypassed). No clash with the cookie session or
+  the disabled `bearer` plugin.
+- **JSON only.** Every response is `application/json`; unparseable request JSON →
+  `400`. **Trailing slash** = SvelteKit default `'never'`.
+- **Error coverage (pragmatic).** The `{error:{…}}` envelope (§16.5) is guaranteed
+  for: all handler-raised errors; **unknown `/api/v1/*` paths** → 404 via a single
+  catch-all fallback route `src/routes/api/v1/[...unknown]/+server.ts`; and
+  **uncaught 500s** normalized in a `handleError`-style seam. SvelteKit's native
+  **405** (wrong verb on a real route, with its `Allow` header) is **accepted
+  as-is**.
+- **CORS = closed.** No `Access-Control-*` headers — server-to-server only;
+  browser cross-origin reads are blocked by design (keeps secret keys out of
+  browser bundles). Independent of `AUTH_TRUSTED_ORIGINS` (that governs only
+  `/api/auth/*` cookie/CSRF flows).
+
+### 16.4 Resources & endpoints
+
+- **Owned `v1` DTOs**, sited in a new `src/lib/server/api/v1/` layer (DTO +
+  mapper + tests per resource), mapped from the `lib/server` read models and
+  **dropping UI-only / internal fields** — notably `TransactionDetail.input` (the
+  edit-form seed) and `Group.deletedAt`. The `/v1/` promise is meaningless if the
+  payload is an unversioned internal type; this seam enforces "smallest surface."
+- **Money on the wire = `{ amount: <int minor units>, currency: <ISO code> }`** —
+  no per-value `exponent`, no pre-formatted `display`. Exponent/symbol discovery is
+  via the `GET /api/v1/currencies` reference endpoint (the static §7.5.1 table).
+- **Write payload = the full internal `TransactionInput` verbatim** (reuse
+  `buildTransactionSchema` — no separate write DTO). Consequence:
+  `amountTotalSettlement` is a **caller-supplied required field**, validated to
+  equal the round-half-up §7.6 conversion of `amountTotal`; a mismatch is a
+  **`422`** (docs publish the exact §7.6 formula). Same-currency stays trivial
+  (rate `1`, `amountTotalSettlement == amountTotal`).
+- **`PUT` (not PATCH) for update** — the body is the _complete_ `TransactionInput`
+  (full replacement, the honest idempotent verb), not a partial merge.
+- **Pagination = cursor (keyset) on the transactions list only** — default **50**,
+  max **100**, opaque cursor over the existing total order
+  `(createdAt DESC, occurredAt DESC, id)`, stable under concurrent inserts. Other
+  collections are **unpaginated** (bounded, small). _Impl:_ extend internal
+  `listTransactions` to accept an `after` cursor + date-range filter (neither
+  exists today).
+- **Settle-up = a dedicated sugar endpoint** `POST …/settle-up` taking
+  `{ from, to, amount }` — a thin façade that builds the single-payer /
+  single-beneficiary Transfer (currency = settlement at rate 1, category
+  "Debt settlement") and delegates to `createTransaction`. No new domain logic.
+
+**Endpoint table.** All paths under `/api/v1`. Every endpoint requires a valid
+key. **R** = any valid key; **W** = requires `write` scope. `{gid}` = group id,
+`{txid}` = transaction id.
+
+| Method | Path                                        | Scope | Maps to (`lib/server`)         | Success | Response DTO                                                |
+| ------ | ------------------------------------------- | ----- | ------------------------------ | ------- | ----------------------------------------------------------- |
+| GET    | `/currencies`                               | R     | §7.5.1 table                   | 200     | `Currency[]` `{code,exponent,symbol}`                       |
+| GET    | `/groups`                                   | R     | `listGroupsForUser`            | 200     | `Group[]`                                                   |
+| GET    | `/groups/{gid}`                             | R     | `getGroupForUser`              | 200     | `Group`                                                     |
+| GET    | `/groups/{gid}/members`                     | R     | `listMembers`                  | 200     | `Member[]`                                                  |
+| GET    | `/groups/{gid}/balances`                    | R     | `getGroupBalances`             | 200     | `Balance[]` `{memberId,balance,currency}`                   |
+| GET    | `/groups/{gid}/transactions`                | R     | `listTransactions`             | 200     | `{ data: TransactionListItem[], nextCursor: string\|null }` |
+| GET    | `/groups/{gid}/transactions/{txid}`         | R     | `getTransactionDetail`         | 200     | `TransactionDetail` (minus `input`)                         |
+| POST   | `/groups/{gid}/transactions`                | W     | `createTransaction`            | 201     | `TransactionDetail`                                         |
+| PUT    | `/groups/{gid}/transactions/{txid}`         | W     | `updateTransaction`            | 200     | `TransactionDetail`                                         |
+| DELETE | `/groups/{gid}/transactions/{txid}`         | W     | `softDeleteTransaction`        | 200     | `TransactionDetail` (`deletedAt` set)                       |
+| POST   | `/groups/{gid}/transactions/{txid}/restore` | W     | `restoreTransaction`           | 200     | `TransactionDetail` (`deletedAt` null)                      |
+| POST   | `/groups/{gid}/settle-up`                   | W     | `createTransaction` (transfer) | 201     | `TransactionDetail`                                         |
+
+Query params on `GET …/transactions`: `limit` (≤100, default 50), `cursor`,
+`type`, `categoryId`, `from`/`to` (inclusive date range on `createdAt`, the §7.1
+real-world display/sort date).
+
+### 16.5 Error envelope
+
+Every error is `{ "error": { "code": <stable string>, "message": <human>,
+"details"?: <structured> } }`:
+
+- **400** `bad_request` — unparseable request.
+- **401** `unauthorized` — missing/invalid/expired/revoked key. **All** non-rate-
+  limit `verifyApiKey` failures (`INVALID_API_KEY`, `KEY_DISABLED`, `KEY_EXPIRED`,
+  `KEY_NOT_FOUND`) **collapse to this one generic code/message** — never forward
+  the plugin's internal code (no enumeration signal).
+- **403** `forbidden_scope` — a read key attempting a write.
+- **404** `not_found` — absent **or** no access (**conflated**, never leaks
+  existence; reuses the `access.ts` not-found discipline).
+- **422** `validation_error` — a Zod rule failure; `details` carries **field-level**
+  errors so an agent can self-correct.
+- **429** `rate_limited` — see §16.7.
+- **500** `internal_error`.
+
+### 16.6 Idempotency & write safety
+
+- **`Idempotency-Key` header** on POST creates (`…/transactions`, `…/settle-up`),
+  **optional but strongly recommended** (documented as such). Backed by a
+  **hand-authored store table** (same pattern as `rate_limit` / `api_key`) mapping
+  _(calling API-key id + Idempotency-Key + request fingerprint) → stored
+  response_, **24h TTL** + cleanup, scoped to the **calling key**. Semantics:
+  - same key + same request → **replay the stored response**, re-executing
+    nothing → no duplicate transaction, **no duplicate `audit_log` row**;
+  - same key + different body → **409 conflict**;
+  - row inserted **pending-first under a unique constraint** → concurrent retries
+    race safely, the loser gets **409 (request in progress)**;
+  - no header → at-least-once (a retry may create a duplicate; documented).
+    The idempotency key is the **sole** dedup guard (no fuzzy dedup, no client id).
+- **Concurrency = last-write-wins in v1** — `PUT`/`DELETE`/restore carry **no
+  version column, no `ETag`/`If-Match`**. These ops are already idempotent, a lost
+  update is rare and low-stakes, and `audit_log` records every change so any
+  clobber is visible and recoverable. **Accepted, documented risk:** a stale
+  full-object `PUT` silently reverts intervening changes. **Forward fix:** optional
+  `If-Match`/`ETag` (from `updated_at`, 412 on mismatch) — non-breaking to add.
+- **Audit records state transitions only.** No-op mutations (delete an
+  already-deleted txn; restore a live one) → **idempotent success (200) with NO
+  new audit row** — gate the audit write in `softDeleteTransaction` /
+  `restoreTransaction` on **rows-affected > 0**. Idempotency replays write no audit
+  row (they re-run nothing).
+
+### 16.7 Rate limiting & abuse control (§12 extension)
+
+The existing IP+path limiter in `auth.ts` **does not run for `/api/v1` traffic**
+(the guard calls `verifyApiKey` as a server-side function, bypassing
+`auth.handler`) and can't be keyed per-key. So: **two tiers, per key.**
+
+- **Tier 1 (backstop, free)** — the plugin's built-in per-key limiter
+  (`rateLimitEnabled/Max/TimeWindow`), set on every key at creation to a generous
+  **150 req / 60s combined**. Fires inside the `verifyApiKey` call the guard
+  already makes; it's one counter per key (can't split read/write) so it's sized
+  above the tier-2 burst and only trips if tier 2 is bypassed or buggy.
+- **Tier 2 (primary, class-aware)** — a **new small table
+  `api_key_class_rate_limit`** mirroring `rate_limit`'s shape (`id` pk, `key`
+  unique text, `count` int, `lastRequest` bigint-ms), keyed
+  `` `${apiKeyId}:${class}` `` where `class` ∈ {`read`,`write`} using the §16.2
+  scope classification. Enforced in the route layer after `verifyApiKey` and the
+  403 scope check, with the same atomic conditional-increment / window-reset
+  pattern the plugin uses. **Limits: read 100/60s, write 20/60s (per key)**; the
+  two counters are independent (a request increments exactly one). 60s windows
+  match the `auth.ts` convention.
+- **429 shape:** `{error:{code:'rate_limited', message, details:{scope, limit,
+windowSeconds, retryAfterSeconds}}}` **plus a `Retry-After: <seconds>` header**
+  (`Math.ceil`). The hook maps the plugin's internal `RATE_LIMITED` code (tier 1)
+  to this same shape; `RATE_LIMITED` is the **one** `verifyApiKey` failure that is
+  **not** collapsed into the generic 401.
+- **Abuse (accepted v1 residual, documented).** 64-char / ≈52⁶⁴ keyspace + SHA-256
+  - indexed exact-match lookup make brute force infeasible; rate limiting engages
+    **only after a successful key match**, so invalid guesses are never throttled
+    (entropy is the defense; platform/edge DDoS protection is the flood backstop).
+    Because all auth failures collapse to one generic 401 (§16.5), **no enumeration
+    signal leaks** — the only outcome-varying code is 429, which requires already
+    holding a valid key.
+
+### 16.8 Key-management UX
+
+An **API-keys section under `src/routes/settings`**, sibling to passkey
+management, reusing `EmptyState.svelte`, the passkey card layout, `ConfirmSubmit.svelte`,
+and existing shadcn `dialog`/`select`/`input`/`label`.
+
+- **Create = a dedicated route** `/settings/api-keys/new` (not a dialog),
+  **server-first with full progressive enhancement** (a `form action` creates the
+  key and redirects to the reveal screen; works with JS disabled).
+- **Scope selector = radio cards** (`read` vs `write`), explaining the money-safety
+  difference inline (§16.2).
+- **Expiry** = **Never (default)** + `30 / 90 / 365`-day presets + a custom option
+  (§16.2 optional TTL).
+- **Secret reveal = inline masked banner** on the post-create redirect (no-JS
+  friendly): show/copy toggle + a "shown once — you won't see this again" warning.
+- **List / manage:** name, scope badge, the `start` prefix (safe to show), created,
+  last-used (plugin `lastRequest`), expiry, and a per-row **Revoke** via
+  `ConfirmSubmit.svelte` (the passkey-delete confirmation pattern; immediate 401).
+  Expired keys shown distinctly. Mobile: all fields visible (no collapsing).
+- **Empty / first-run:** two equal-weight buttons — **Create key** + **View API
+  docs** (→ `/docs/api`, §16.9).
+- **Audit:** key create and revoke each write an `audit_log` row (actor = user,
+  key id in `metadata` per §16.2).
+
+### 16.9 Documentation deliverable
+
+- **Single source of truth = a hand-written OpenAPI 3.1 spec**,
+  `static/api/v1/openapi.yaml` (served verbatim by SvelteKit) **and** `.json`,
+  covering every `/api/v1/*` operation with per-operation examples and reusable
+  component schemas for the error envelope and money object. `servers` = the
+  relative base path `/api/v1` only (host-agnostic). **No generation** — only write
+  inputs are Zod; read DTOs have no schema to generate from.
+- **Kept honest by a contract test** (§16.10): live endpoint responses validate
+  against the spec's component schemas — the anti-rot mechanism.
+- **Rendering = "both, minimal":** the raw spec is fetchable at
+  `/api/v1/openapi.yaml` and `/api/v1/openapi.json` (agents ingest directly), plus
+  a **server-rendered `/docs/api`** prose route (`+page.server.ts` +
+  `+page.svelte`) carrying a **quickstart + the §16 conventions**, ending in a
+  prominent link to the raw spec. **No JS API-explorer dependency** in v1 (named as
+  a non-breaking forward add).
+- **Quickstart = one copy-pasteable read+write worked example** — mint a key in
+  Settings → `curl` list groups (read) → `curl` create a transaction (write),
+  showing `Authorization: Bearer`, `Idempotency-Key`, and the exact money JSON →
+  the success envelope + one error envelope. Per-endpoint shapes are **spec-only**
+  (no prose drift); the quickstart's curl bodies are **shape-checked** by the
+  contract/docs test.
+- **Discoverability:** `/docs/api` linked from §16.8's empty-state button and an
+  "API docs" link in the api-keys section header; a README **"Public API"** section
+  (one sentence, base path `/api/v1`, links to `/docs/api` and the raw spec).
+
+### 16.10 Testing (extends §13)
+
+- **Integration (Vitest):** each endpoint exercised with a real key — auth (missing
+  / invalid / expired / revoked → generic 401), scope (read key → 403 on writes),
+  404 conflation (no-access = absent), cursor pagination stability, the
+  `amountTotalSettlement` §7.6 mismatch → 422 with field-level `details`, settle-up
+  building the correct Transfer, and the full audit trail (create/update/delete/
+  restore write exactly one row each, no-op delete/restore write none, actor = user
+  with `viaKey` provenance).
+- **Idempotency & rate limits (Vitest):** same key + same body replays with no
+  duplicate txn/audit; same key + different body → 409; read 100/60s & write 20/60s
+  windows return the `rate_limited` envelope + `Retry-After`.
+- **Contract test:** live responses validate against the OpenAPI component schemas;
+  the quickstart curl request bodies are shape-checked. (A runnable end-to-end
+  curl smoke test is a forward add, not v1.)

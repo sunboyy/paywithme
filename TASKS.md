@@ -107,6 +107,27 @@ A `[ ]`/`[x]` checkbox mirrors done-ness for quick scanning.
 - [x] 8.4 Full e2e suite: create group → add tx → settle → balances zero; activity newest-first — PLAN §13 @done deps:5.4,6.2
 - [x] 8.5 Performance pass @done deps:8.4
 
+## Phase 9 — Public API for AI agents (PLAN §16)
+
+> A versioned REST/JSON API under `/api/v1`, authenticated by API keys, as a thin
+> HTTP surface over existing `lib/server` logic. Work top-to-bottom; `9.1`/`9.2`
+> gate everything. The DTO layer (`9.5`) precedes the endpoints that return it.
+
+- [ ] 9.1 Install `@better-auth/api-key@^1.6.18`; add `apiKey({...})` to `auth.ts` plugins **before** `sveltekitCookies`; `enableSessionForAPIKeys` off — PLAN §16.1 @todo deps:2.1
+- [ ] 9.2 Hand-author `db/api-key-schema.ts` (`apikey` model, table `api_key`; `rateLimitTimeWindow`/`refillInterval` as `bigint`) + migration; `pwm_test_`/`pwm_live_` prefix policy — PLAN §16.1 @todo deps:9.1
+- [ ] 9.3 `hooks.server.ts`: `sequence(resolveSession, apiV1Guard)` — for `/api/v1/*` skip cookie session, verify `Authorization: Bearer` via `verifyApiKey`, short-circuit generic 401, attach `locals.apiKey` — PLAN §16.3 @todo deps:9.2
+- [ ] 9.4 Error envelope helper + `handleError` 500-normalization + catch-all `api/v1/[...unknown]/+server.ts` (404 envelope); scopes: `read`/`write` in `permissions` + shared `scope==='write'` write-guard (403); reuse `access.ts` for 404 conflation — PLAN §16.2/§16.5 @todo deps:9.3
+- [ ] 9.5 `src/lib/server/api/v1/` DTO + mapper layer (drop `TransactionDetail.input`, `Group.deletedAt`); money-on-wire `{amount,currency}`; unit tests — PLAN §16.4 @todo deps:9.4
+- [ ] 9.6 Extend internal `listTransactions` with keyset `after` cursor over `(createdAt DESC, occurredAt DESC, id)` + `from`/`to` date-range filter + tests — PLAN §16.4 @todo deps:4.11
+- [ ] 9.7 Read endpoints: `GET /currencies`, `/groups`, `/groups/{gid}`, `/members`, `/balances`, `/transactions` (cursor+filters), `/transactions/{txid}` — PLAN §16.4 @todo deps:9.5,9.6
+- [ ] 9.8 Write endpoints: `POST`/`PUT`/`DELETE`/restore transactions (body = full `TransactionInput` via `buildTransactionSchema`; `amountTotalSettlement` mismatch → 422) + `POST …/settle-up` Transfer façade — PLAN §16.4 @todo deps:9.7
+- [ ] 9.9 Idempotency: hand-authored store table (key-scoped, 24h TTL, pending-first unique constraint), replay/409 semantics on POST creates; gate audit write on rows-affected > 0 for no-op delete/restore + tests — PLAN §16.6 @todo deps:9.8
+- [ ] 9.10 Rate limiting: tier-1 plugin backstop (150/60s at creation) + tier-2 `api_key_class_rate_limit` table (read 100/60s, write 20/60s); 429 envelope + `Retry-After`; map plugin `RATE_LIMITED` → `rate_limited` + tests — PLAN §16.7 @todo deps:9.8
+- [ ] 9.11 Audit provenance: write `{viaKey,keyName}` metadata + "(via API key '…')" summary suffix on API-driven mutations (zero schema change) — PLAN §16.2 @todo deps:9.8
+- [ ] 9.12 Key-management UX under `/settings`: `/settings/api-keys/new` (server-first, scope radio-cards, expiry presets, masked one-time reveal), list w/ revoke via `ConfirmSubmit`; create/revoke audited — PLAN §16.8 @todo deps:9.2
+- [ ] 9.13 Hand-written OpenAPI 3.1 spec `static/api/v1/openapi.yaml`(+`.json`); `/docs/api` prose route (quickstart + conventions); README "Public API" section + in-app doc links — PLAN §16.9 @todo deps:9.8
+- [ ] 9.14 Integration tests (auth/scope/404-conflation/pagination/settle-up/audit) + contract test (live responses vs OpenAPI schemas; quickstart curl shape-check) — PLAN §16.10 @todo deps:9.9,9.10,9.11,9.13
+
 ---
 
 ## Blocked / NEEDS-INPUT register
