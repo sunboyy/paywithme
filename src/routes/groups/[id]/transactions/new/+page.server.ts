@@ -139,7 +139,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	const defaults = prefill
 		? {
 				type: 'transfer' as const,
-				title: '',
+				// Settle-up prefill (§8.4): seed the title so the required field is filled
+				// and reads meaningfully. "Debt settlement" mirrors the transfer category;
+				// still fully editable/clearable by the user.
+				title: 'Debt settlement',
 				// Editable real-world date (§7.1) — defaults to today (UTC); user can backdate.
 				date: new Date().toISOString().slice(0, 10),
 				categoryId: prefill.categoryId,

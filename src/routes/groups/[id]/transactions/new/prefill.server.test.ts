@@ -45,6 +45,7 @@ type SeededForm = {
 	form: {
 		data: {
 			type: string;
+			title: string;
 			categoryId: string;
 			amountTotal: number;
 			amountTotalSettlement: number;
@@ -85,6 +86,8 @@ describe('/groups/[id]/transactions/new load — settle prefill (§8.4)', () => 
 		const data = result.form.data;
 
 		expect(data.type).toBe('transfer');
+		// Settle-up prefill seeds a meaningful default title (still user-editable).
+		expect(data.title).toBe('Debt settlement');
 		expect(data.categoryId).toBe('transfer-debt-settlement');
 		expect(data.splitMode).toBe('equal');
 		// payer = debtor pays the whole amount.
@@ -101,6 +104,8 @@ describe('/groups/[id]/transactions/new load — settle prefill (§8.4)', () => 
 		const result = (await load(makeLoadEvent())) as SeededForm;
 		const data = result.form.data;
 		expect(data.type).toBe('spending');
+		// Blank default keeps an empty title (the "Debt settlement" seed is prefill-only).
+		expect(data.title).toBe('');
 		expect(data.amountTotal).toBe(0);
 		// Default beneficiaries = all active members (m1, m2); m3 is deactivated.
 		expect(data.beneficiaries.map((b) => b.memberId)).toEqual(['m1', 'm2']);

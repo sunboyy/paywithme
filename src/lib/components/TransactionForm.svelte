@@ -731,7 +731,7 @@
 			id="title"
 			name="title"
 			type="text"
-			placeholder={$formData.type === 'transfer' ? 'Settle up' : 'Dinner'}
+			placeholder={$formData.type === 'transfer' ? 'Debt settlement' : 'Dinner'}
 			aria-invalid={$errors.title ? 'true' : undefined}
 			aria-describedby={$errors.title ? 'title-error' : undefined}
 			bind:value={$formData.title}
