@@ -131,19 +131,47 @@ describe('auth instance wiring', () => {
 		expect(auth.options).toBeDefined();
 	});
 
-	it('registers exactly the magic-link, passkey, and sveltekit-cookies plugins', async () => {
+	it('registers exactly the magic-link, passkey, api-key, and sveltekit-cookies plugins', async () => {
 		const { auth } = await import('./auth');
 		const pluginIds = (auth.options.plugins ?? []).map((p) => p.id);
 		expect(pluginIds).toContain('magic-link');
 		expect(pluginIds).toContain('passkey');
+		// `api-key` (PLAN §16.1) exposes the server-side key API for later tickets.
+		expect(pluginIds).toContain('api-key');
 		// `sveltekit-cookies` (added in task 2.10) makes server-side `auth.api.*`
 		// calls route their Set-Cookie through SvelteKit so cleared/refreshed
 		// session cookies reach the browser (e.g. logout). It MUST stay last.
 		expect(pluginIds).toContain('sveltekit-cookies');
-		// Exactly these three — asserting the exact set still catches an accidental
+		// Exactly these four — asserting the exact set still catches an accidental
 		// extra plugin such as a forbidden social provider (PLAN §5.1).
-		expect(pluginIds).toHaveLength(3);
-		expect(new Set(pluginIds)).toEqual(new Set(['magic-link', 'passkey', 'sveltekit-cookies']));
+		expect(pluginIds).toHaveLength(4);
+		expect(new Set(pluginIds)).toEqual(
+			new Set(['magic-link', 'passkey', 'api-key', 'sveltekit-cookies'])
+		);
+	});
+
+	it('registers the api-key plugin BEFORE sveltekit-cookies, with sveltekit-cookies last (PLAN §16.1)', async () => {
+		const { auth } = await import('./auth');
+		const pluginIds = (auth.options.plugins ?? []).map((p) => p.id);
+		const apiKeyIndex = pluginIds.indexOf('api-key');
+		const cookiesIndex = pluginIds.indexOf('sveltekit-cookies');
+		expect(apiKeyIndex).toBeGreaterThanOrEqual(0);
+		// api-key comes before sveltekit-cookies…
+		expect(apiKeyIndex).toBeLessThan(cookiesIndex);
+		// …and sveltekit-cookies stays LAST (better-auth requirement).
+		expect(cookiesIndex).toBe(pluginIds.length - 1);
+	});
+
+	it('keeps enableSessionForAPIKeys OFF (not-for-production — PLAN §16.1)', async () => {
+		// A valid API key must NOT auto-mock a session; the app resolves keys
+		// explicitly (§16.4). The option is absent-or-false either way, so assert it
+		// is not truthy on the registered plugin's serialized options.
+		const { auth } = await import('./auth');
+		const apiKeyPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'api-key');
+		expect(apiKeyPlugin).toBeDefined();
+		// The plugin default is false; we also pass it explicitly. Either way it must
+		// never serialize as enabled.
+		expect(JSON.stringify(apiKeyPlugin)).not.toContain('"enableSessionForAPIKeys":true');
 	});
 
 	it('disables email/password and configures no social providers', async () => {

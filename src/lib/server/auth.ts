@@ -26,6 +26,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { magicLink } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { passkey } from '@better-auth/passkey';
+import { apiKey } from '@better-auth/api-key';
 import { getRequestEvent } from '$app/server';
 import { building } from '$app/environment';
 import { env } from '$env/dynamic/private';
@@ -306,6 +307,28 @@ export const auth = betterAuth({
 			// WebAuthn origin = the app's canonical origin (BETTER_AUTH_URL),
 			// resolved strictly per environment by `resolveAuthEnv`.
 			origin
+		}),
+		// API-key plugin (PLAN §16.1). Registered BEFORE `sveltekitCookies` (which
+		// stays last). It provides the server-side key API
+		// (`auth.api.{createApiKey,verifyApiKey,getApiKey,updateApiKey,deleteApiKey,
+		// listApiKeys,deleteAllExpiredApiKeys}`) that later tickets call from the
+		// app's own routes — hashing at rest (SHA-256), one-time plaintext reveal on
+		// create, a display `start` prefix, per-key expiry, `lastRequest`/
+		// `requestCount`, `permissions`, and per-key rate-limit fields.
+		//
+		// `enableSessionForAPIKeys` stays OFF (the plugin flags it not-for-production):
+		// the app resolves keys explicitly (§16.4) rather than having a valid key
+		// mock a session. The plugin's own HTTP endpoints (`/api/auth/api-key/*`) are
+		// NOT the public API.
+		//
+		// Coupling: the backing `api_key` table is HAND-AUTHORED in its own file
+		// (`db/api-key-schema.ts`, exported under the adapter key `apikey`) by a
+		// SEPARATE ticket (#13). Registering the plugin here is construction-time
+		// only and does not touch the DB, so the config builds and the gate stays
+		// green before that schema exists; any server API call that hits the store
+		// will need the #13 table.
+		apiKey({
+			enableSessionForAPIKeys: false
 		}),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
 		// its cookie handler in an `after` hook, so every server-side `auth.api.*`
