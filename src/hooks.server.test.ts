@@ -13,7 +13,7 @@ vi.mock('$lib/server/auth', () => ({
 }));
 
 // Imported after the mock is registered.
-import { handle, resolveSession, apiV1Guard, extractBearerKey } from './hooks.server';
+import { handle, handleError, resolveSession, apiV1Guard, extractBearerKey } from './hooks.server';
 
 /**
  * Minimal fake RequestEvent: only the bits the hooks touch (`request`, `url`,
@@ -332,5 +332,37 @@ describe('composed handle (sequence)', () => {
 		expect(verifyApiKey).not.toHaveBeenCalled();
 		expect(routeResolve).not.toHaveBeenCalled();
 		expect(response.status).toBe(401);
+	});
+});
+
+describe('handleError (uncaught-error normalizer)', () => {
+	/** Minimal error-hook args: only `event.url.pathname` and `message` are read. */
+	function makeArgs(path: string, error: unknown = new Error('boom')) {
+		return {
+			error,
+			event: makeEvent(path),
+			status: 500,
+			message: 'Internal Error'
+		} as unknown as Parameters<typeof handleError>[0];
+	}
+
+	it('returns the internal_error envelope for an /api/v1/* error and logs it', () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const result = handleError(makeArgs('/api/v1/groups'));
+		expect(result).toEqual({ error: { code: 'internal_error', message: expect.any(String) } });
+		expect(errorSpy).toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	it('never leaks the original error message for an /api/v1/* error', () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const result = handleError(makeArgs('/api/v1/groups', new Error('secret leak here')));
+		expect(JSON.stringify(result)).not.toContain('secret leak here');
+		errorSpy.mockRestore();
+	});
+
+	it('preserves the default { message } shape for non-api routes', () => {
+		const result = handleError(makeArgs('/groups'));
+		expect(result).toEqual({ message: 'Internal Error' });
 	});
 });

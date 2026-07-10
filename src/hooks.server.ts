@@ -27,7 +27,8 @@
 
 import { auth } from '$lib/server/auth';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
-import { json, type Handle } from '@sveltejs/kit';
+import { apiErrorEnvelope } from '$lib/server/api/errors';
+import { json, type Handle, type HandleServerError } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 
 // The public API version prefix (PLAN §16.3). A request is an API-v1 request when
@@ -167,6 +168,39 @@ const apiV1Guard: Handle = async ({ event, resolve }) => {
 // `resolve` is `apiV1Guard`, whose `resolve` is the real route handler — so a
 // non-api request is byte-for-byte unaffected (the guard is a no-op for it).
 export const handle: Handle = sequence(resolveSession, apiV1Guard);
+
+/**
+ * Uncaught-error normalizer (PLAN §16.3, §16.5).
+ *
+ * SvelteKit invokes `handleError` for any UNEXPECTED error thrown while serving a
+ * request (an `error()`/`redirect()` control-flow throw is handled separately and
+ * never reaches here). The object we return becomes `App.Error`, which SvelteKit
+ * serializes as the JSON body of the error response for a data/JSON request.
+ *
+ *   - For `/api/v1/*` we return the stable `internal_error` 500 envelope
+ *     (PLAN §16.5) and log the original error server-side — nothing internal
+ *     leaks to the client.
+ *   - Every other route returns `{ message }`, byte-identical to SvelteKit's
+ *     default, so browser error behavior is unchanged.
+ *
+ * IMPORTANT — this hook is DEFENCE-IN-DEPTH, not the primary producer of the API
+ * 500 envelope. SvelteKit only serializes this object as JSON when the request is
+ * a data request OR content-negotiates to `application/json`; a client sending
+ * `Accept: text/html` would instead get the static error page. The reliable
+ * producer of the JSON envelope is the route-level seam
+ * (`withApiErrorHandling` / `handleApiError` in `$lib/server/api/errors`), which
+ * the resource handlers (#17–#19) wrap around their logic so the envelope is
+ * emitted regardless of `Accept`. This hook catches anything that escapes that
+ * seam (or an unwrapped route) and still shapes it as the envelope.
+ */
+export const handleError: HandleServerError = ({ error, event, message }) => {
+	if (isApiV1Request(event.url.pathname)) {
+		console.error('[hooks.server] uncaught /api/v1 error', error);
+		return apiErrorEnvelope('internal_error');
+	}
+	// Non-api routes: preserve SvelteKit's default `{ message }` shape exactly.
+	return { message };
+};
 
 // Exported for focused unit coverage of the guard in isolation.
 export { resolveSession, apiV1Guard };
