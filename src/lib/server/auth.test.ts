@@ -119,6 +119,21 @@ describe('resolveAuthEnv (strict per environment — PLAN §12)', () => {
 	});
 });
 
+describe('resolveApiKeyPrefix (env-scoped key prefix — PLAN §16.1)', () => {
+	// Pure function: we pass the `isProduction` flag directly, so these tests never
+	// touch the real env. The trailing underscore is the plugin's identifiable-prefix
+	// convention.
+	it('uses the `pwm_live_` prefix in production', async () => {
+		const { resolveApiKeyPrefix } = await import('./auth');
+		expect(resolveApiKeyPrefix({ isProduction: true })).toBe('pwm_live_');
+	});
+
+	it('uses the `pwm_test_` prefix in dev/test/preview', async () => {
+		const { resolveApiKeyPrefix } = await import('./auth');
+		expect(resolveApiKeyPrefix({ isProduction: false })).toBe('pwm_test_');
+	});
+});
+
 describe('auth instance wiring', () => {
 	afterEach(() => {
 		vi.restoreAllMocks();

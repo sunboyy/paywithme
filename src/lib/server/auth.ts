@@ -36,6 +36,16 @@ import { sendMagicLinkEmail } from './email';
 // rpName is the constant the OS passkey prompt shows (PLAN §5.2) — not an env var.
 const RP_NAME = 'Pay with me';
 
+// API-key prefixes (PLAN §16.1). These are OUR env-scoping policy, not a plugin
+// freebie: keys minted against a live database carry `pwm_live_`, everything else
+// (dev/test/preview) carries `pwm_test_`, so a test key is never mistaken for a
+// production credential. The prefix is baked into the plaintext key and its stored
+// `start`, so the display surface stays prefix-agnostic (it renders whatever
+// `start` a key carries). The trailing underscore is the plugin's recommended
+// convention for making a prefix identifiable.
+const API_KEY_PREFIX_LIVE = 'pwm_live_';
+const API_KEY_PREFIX_TEST = 'pwm_test_';
+
 // Magic-link token lifetime. PLAN §5.3 wants tokens "single-use, short-lived";
 // each token is also consumed atomically on first verification by the plugin.
 // 10 minutes balances email-delivery latency against the short-lived goal.
@@ -233,6 +243,19 @@ export function resolveAuthEnv({
 }
 
 /**
+ * Resolve the env-scoped API-key prefix (PLAN §16.1).
+ *
+ * PURE and unit-testable — takes the same `isProduction` flag `resolveAuthEnv`
+ * uses (rather than reading global state) so it can be exercised without building
+ * `auth`. Production keys get `pwm_live_`; dev/test/preview get `pwm_test_`. This
+ * feeds the plugin's `defaultPrefix`, which stamps the prefix into every minted
+ * key's plaintext and its stored `start`.
+ */
+export function resolveApiKeyPrefix({ isProduction }: { isProduction: boolean }): string {
+	return isProduction ? API_KEY_PREFIX_LIVE : API_KEY_PREFIX_TEST;
+}
+
+/**
  * `sendMagicLink` callback wired into the `magicLink` plugin below.
  *
  * Routes the single-use, short-lived link (PLAN §5.3) through the swappable
@@ -271,6 +294,13 @@ const { baseURL, secret, rpID, origin, trustedOrigins } = resolveAuthEnv({
 		AUTH_RP_ID: env.AUTH_RP_ID,
 		AUTH_TRUSTED_ORIGINS: env.AUTH_TRUSTED_ORIGINS
 	},
+	isProduction: env.NODE_ENV === 'production' && !building
+});
+
+// Env-scoped API-key prefix (PLAN §16.1). Resolved with the SAME `isProduction`
+// signal as the auth env above so live keys carry `pwm_live_` and everything else
+// carries `pwm_test_`. Feeds the `apiKey` plugin's `defaultPrefix` below.
+const apiKeyPrefix = resolveApiKeyPrefix({
 	isProduction: env.NODE_ENV === 'production' && !building
 });
 
@@ -328,7 +358,12 @@ export const auth = betterAuth({
 		// green before that schema exists; any server API call that hits the store
 		// will need the #13 table.
 		apiKey({
-			enableSessionForAPIKeys: false
+			enableSessionForAPIKeys: false,
+			// Env-scoped prefix policy (PLAN §16.1): `pwm_live_` in production,
+			// `pwm_test_` everywhere else. The plugin stamps this into every minted
+			// key's plaintext and its stored `start`, so the display surface stays
+			// prefix-agnostic. See `resolveApiKeyPrefix` / `apiKeyPrefix` above.
+			defaultPrefix: apiKeyPrefix
 		}),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
 		// its cookie handler in an `after` hook, so every server-side `auth.api.*`
