@@ -41,4 +41,4 @@ Respond with **exactly one** verdict:
   (file:line where possible), ordered by severity. Be precise so the implementer
   can fix without guessing.
 
-Do not edit files, commit, or change `TASKS.md`. Review only.
+Do not edit files, commit, or change issue status. Review only.

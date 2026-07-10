@@ -7,7 +7,10 @@ implement → review → test → commit loop.
 - **How the build runs:** [`docs/autonomous-build.md`](./docs/autonomous-build.md)
   — the orchestrator loop, gates, commit format, resume contract, and phase
   checkpoints. Follow it exactly.
-- **Progress:** [`TASKS.md`](./TASKS.md) — single source of truth for task status.
+- **Progress:** **GitHub Issues** — a map/spec issue with sub-issues (native
+  `blocked_by` edges) is the single source of truth for task status. See
+  `docs/agents/issue-tracker.md`. (`TASKS.md` is retired; it remains only as a
+  historical record of earlier phases and is no longer read by the loop.)
 
 Run (or resume) the build with:
 
