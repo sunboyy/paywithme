@@ -129,10 +129,20 @@ export const transactions = pgTable(
 			.references(() => user.id),
 		// IMMUTABLE server insert time (§7.1). NOTE the reversed naming: this is NOT
 		// the real-world date — that's `created_at` below.
-		occurredAt: timestamp('occurred_at').defaultNow().notNull(),
+		// `precision: 3` (millisecond) is DELIBERATE (§16.4): this column is the
+		// same-day keyset tie-break, and the opaque pagination cursor round-trips it
+		// through JS `Date.toISOString()` (millisecond resolution). Postgres's default
+		// `timestamp` is MICROSECOND, so `defaultNow()`'s sub-millisecond entropy would
+		// be truncated by the cursor — a concurrently-inserted row landing in that lost
+		// sub-ms window could be silently skipped across a page boundary. Quantizing the
+		// stored value to millisecond makes it round-trip losslessly; ms is still ample
+		// to order distinct inserts (the `id` tie-break covers exact ms collisions).
+		occurredAt: timestamp('occurred_at', { precision: 3 }).defaultNow().notNull(),
 		// REAL-WORLD transaction date (§7.1). User-editable / backdatable; defaults
-		// to now on first entry; the date shown and sorted in lists.
-		createdAt: timestamp('created_at').defaultNow().notNull(),
+		// to now on first entry; the date shown and sorted in lists. `precision: 3`
+		// for the same §16.4 cursor round-trip reason as `occurred_at` (it's the
+		// primary keyset sort key); a real-world date needs nowhere near sub-ms anyway.
+		createdAt: timestamp('created_at', { precision: 3 }).defaultNow().notNull(),
 		// Bumped on every edit.
 		updatedAt: timestamp('updated_at').defaultNow().notNull(),
 		// Soft-delete (§9): nullable.

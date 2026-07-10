@@ -43,7 +43,7 @@
 // the same-day sort tie-break). `updated_at` = real `now()`, bumped on every edit
 // (NOT the editable date — an edit's wall-clock time, decoupled from `created_at`).
 
-import { and, asc, desc, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, isNotNull, lt, lte, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from './db';
 import {
@@ -540,12 +540,172 @@ async function assertCategoryExists(categoryId: string, executor: DbExecutor): P
 	}
 }
 
-/** Filters for {@link listTransactions} (PLAN §10 list filters). */
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyset pagination cursor (PLAN §16.4).
+//
+// The transactions list is the ONLY paginated collection. Its total order is
+// `(createdAt DESC, occurredAt DESC, id DESC)` — the §7.1 real-world date first,
+// the immutable insert time as the same-day tie-break, and `id` as the FINAL
+// tie-break so the order is TOTAL (no two rows compare equal) and therefore STABLE
+// under concurrent inserts: a keyset over a total order can never skip or duplicate
+// a row when new rows land between page fetches.
+//
+// The cursor is OPAQUE: base64url of the JSON tuple `[createdAtISO, occurredAtISO,
+// id]` — the full sort key of the last row on the previous page. Callers must treat
+// it as a blob; a malformed/undecodable cursor raises {@link TransactionCursorError}
+// (the API layer turns this into a 400/422 rather than silently ignoring it).
+//
+// `id` DIRECTION: DESC, matching the two timestamps, so the whole key is ordered
+// uniformly. "Strictly after the cursor" is then the single lexicographic tuple
+// comparison `(createdAt, occurredAt, id) < (c, o, i)` — see `keysetAfterCondition`
+// (the SQL half) and `rowIsAfterCursor` (its pure mirror, used by tests).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The full sort key of a transaction row under the §16.4 total order. */
+export interface TransactionCursorKey {
+	/** §7.1 real-world display/sort date (primary sort key, DESC). */
+	createdAt: Date;
+	/** Immutable insert time (same-day tie-break, DESC). */
+	occurredAt: Date;
+	/** Row id (final tie-break, DESC) — makes the order total. */
+	id: string;
+}
+
+/**
+ * A pagination `after` cursor could not be decoded (not base64url, not the expected
+ * `[createdAtISO, occurredAtISO, id]` tuple, or carries invalid dates/id). The API
+ * layer surfaces this as a 400/422 — a bad cursor is a client error, never silently
+ * ignored (which would restart pagination from page 1 and hide the bug).
+ */
+export class TransactionCursorError extends Error {
+	readonly code = 'transaction_cursor_invalid' as const;
+	constructor(message = 'Invalid pagination cursor') {
+		super(message);
+		this.name = 'TransactionCursorError';
+	}
+}
+
+/**
+ * Encode a row's sort key into an OPAQUE base64url cursor. PURE. The inverse of
+ * {@link decodeTransactionCursor}; the API layer calls this on the LAST row of a
+ * page to mint the `after` cursor for the next page.
+ */
+export function encodeTransactionCursor(key: TransactionCursorKey): string {
+	const tuple = [key.createdAt.toISOString(), key.occurredAt.toISOString(), key.id];
+	return Buffer.from(JSON.stringify(tuple), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode an OPAQUE `after` cursor back into its sort key. PURE. Throws
+ * {@link TransactionCursorError} on anything malformed — never returns a partial or
+ * a silently-defaulted key.
+ */
+export function decodeTransactionCursor(cursor: string): TransactionCursorKey {
+	let json: string;
+	try {
+		json = Buffer.from(cursor, 'base64url').toString('utf8');
+	} catch {
+		throw new TransactionCursorError();
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(json);
+	} catch {
+		throw new TransactionCursorError();
+	}
+	if (!Array.isArray(parsed) || parsed.length !== 3) {
+		throw new TransactionCursorError();
+	}
+	const [createdAtRaw, occurredAtRaw, id] = parsed;
+	if (typeof createdAtRaw !== 'string' || typeof occurredAtRaw !== 'string') {
+		throw new TransactionCursorError();
+	}
+	if (typeof id !== 'string' || id.length === 0) {
+		throw new TransactionCursorError();
+	}
+	const createdAt = new Date(createdAtRaw);
+	const occurredAt = new Date(occurredAtRaw);
+	if (Number.isNaN(createdAt.getTime()) || Number.isNaN(occurredAt.getTime())) {
+		throw new TransactionCursorError();
+	}
+	return { createdAt, occurredAt, id };
+}
+
+/**
+ * PURE mirror of the SQL {@link keysetAfterCondition}: is `row` strictly AFTER
+ * `cursor` in the `(createdAt DESC, occurredAt DESC, id DESC)` total order? i.e. does
+ * the lexicographic tuple `(createdAt, occurredAt, id)` compare STRICTLY LESS than
+ * the cursor's? Exists so the pagination boundary math is unit-testable without a
+ * live DB; the SQL builder below must stay structurally identical to it.
+ */
+export function rowIsAfterCursor(row: TransactionCursorKey, cursor: TransactionCursorKey): boolean {
+	const rc = row.createdAt.getTime();
+	const cc = cursor.createdAt.getTime();
+	if (rc !== cc) return rc < cc;
+	const ro = row.occurredAt.getTime();
+	const co = cursor.occurredAt.getTime();
+	if (ro !== co) return ro < co;
+	return row.id < cursor.id;
+}
+
+/**
+ * PURE mirror of the `from`/`to` SQL conditions (`gte`/`lte` on `createdAt`): is
+ * `createdAt` within the INCLUSIVE `[from, to]` range? Either bound may be omitted
+ * (open on that side). Exists so the inclusivity boundary is unit-testable without a
+ * live DB; `listTransactions` implements exactly this with `gte`/`lte`.
+ */
+export function createdAtInRange(createdAt: Date, from?: Date, to?: Date): boolean {
+	if (from && createdAt.getTime() < from.getTime()) return false;
+	if (to && createdAt.getTime() > to.getTime()) return false;
+	return true;
+}
+
+/**
+ * SQL half of the keyset predicate: rows STRICTLY AFTER `cursor` in the
+ * `(createdAt DESC, occurredAt DESC, id DESC)` total order — the lexicographic
+ * expansion of `(createdAt, occurredAt, id) < (c, o, i)`. Must stay structurally
+ * identical to the pure {@link rowIsAfterCursor} (which the tests exercise). `id` is
+ * a `text` column, so `<` is Postgres's default lexicographic collation — a total,
+ * stable order on the unique ids.
+ */
+function keysetAfterCondition(cursor: TransactionCursorKey) {
+	return or(
+		lt(transactions.createdAt, cursor.createdAt),
+		and(
+			eq(transactions.createdAt, cursor.createdAt),
+			lt(transactions.occurredAt, cursor.occurredAt)
+		),
+		and(
+			eq(transactions.createdAt, cursor.createdAt),
+			eq(transactions.occurredAt, cursor.occurredAt),
+			lt(transactions.id, cursor.id)
+		)
+	);
+}
+
+/** Filters for {@link listTransactions} (PLAN §10 list filters + §16.4 pagination). */
 export interface TransactionListFilters {
 	/** Restrict to a transaction `type` ('spending' | 'transfer'). */
 	type?: 'spending' | 'transfer';
 	/** Restrict to a category id. */
 	categoryId?: string;
+	/**
+	 * §16.4 keyset cursor: return only rows STRICTLY AFTER this one in the total
+	 * order. Opaque — mint it with {@link encodeTransactionCursor}. A malformed value
+	 * raises {@link TransactionCursorError}.
+	 */
+	after?: string;
+	/**
+	 * Inclusive lower bound on `createdAt` (the §7.1 real-world date). A `Date` —
+	 * matched against the `timestamp` column directly. Rows with
+	 * `createdAt >= from` pass.
+	 */
+	from?: Date;
+	/**
+	 * Inclusive upper bound on `createdAt` (the §7.1 real-world date). A `Date`. Rows
+	 * with `createdAt <= to` pass.
+	 */
+	to?: Date;
 }
 
 /** The shape the list page renders per transaction row. */
@@ -572,12 +732,24 @@ export interface TransactionListItem {
 	isForeign: boolean;
 	/** The real-world date (PLAN §7.1 `created_at`), ISO string — the display/sort date. */
 	createdAt: string;
+	/**
+	 * The immutable insert time (PLAN §7.1 `occurred_at`), ISO string — the same-day
+	 * sort tie-break. Exposed so the API layer (#18) can reconstruct this row's full
+	 * §16.4 sort key `(createdAt, occurredAt, id)` and mint the next-page `after`
+	 * cursor via {@link encodeTransactionCursor}. Not a UI field.
+	 */
+	occurredAt: string;
 }
 
 /**
  * List a group's non-soft-deleted transactions, newest first by `created_at` (the
  * §7.1 display/sort date), with category name/icon + the settlement total.
- * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10).
+ * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10), an
+ * inclusive `from`/`to` date range on `createdAt`, and a §16.4 keyset `after`
+ * cursor. Rows are returned in the total order `(createdAt DESC, occurredAt DESC,
+ * id DESC)`; `limit` caps them (NO default/max clamp here — that's the API layer's
+ * job, #18; this internal function honours whatever cap the caller passes and
+ * returns all rows when `limit` is omitted).
  */
 export async function listTransactions({
 	userId,
@@ -609,6 +781,21 @@ export async function listTransactions({
 	if (filters.categoryId) {
 		conditions.push(eq(transactions.categoryId, filters.categoryId));
 	}
+	// Inclusive date range on the §7.1 real-world date (both bounds `>= from` /
+	// `<= to`).
+	if (filters.from) {
+		conditions.push(gte(transactions.createdAt, filters.from));
+	}
+	if (filters.to) {
+		conditions.push(lte(transactions.createdAt, filters.to));
+	}
+	// §16.4 keyset: decode the opaque cursor (throws TransactionCursorError on a bad
+	// value — never silently ignored) and keep only rows strictly after it.
+	if (filters.after !== undefined) {
+		const cursor = decodeTransactionCursor(filters.after);
+		const afterCondition = keysetAfterCondition(cursor);
+		if (afterCondition) conditions.push(afterCondition);
+	}
 
 	const baseQuery = db
 		.select({
@@ -621,14 +808,17 @@ export async function listTransactions({
 			amountTotal: transactions.amountTotal,
 			amountTotalSettlement: transactions.amountTotalSettlement,
 			currency: transactions.currency,
-			createdAt: transactions.createdAt
+			createdAt: transactions.createdAt,
+			occurredAt: transactions.occurredAt
 		})
 		.from(transactions)
 		.innerJoin(categories, eq(transactions.categoryId, categories.id))
 		.where(and(...conditions))
-		// Newest first by the real-world date (§7.1 `created_at`); `occurred_at` is
-		// the immutable insert-time tie-break.
-		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt));
+		// The §16.4 TOTAL order: newest first by the real-world date (§7.1
+		// `created_at`), then the immutable `occurred_at` insert-time tie-break, then
+		// `id` as the FINAL tie-break so the keyset cursor is unambiguous and stable
+		// under concurrent inserts. All three DESC (see `keysetAfterCondition`).
+		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt), desc(transactions.id));
 
 	// Apply caller-supplied cap (e.g. the overview page requests only 5).
 	const rows = limit !== undefined ? await baseQuery.limit(limit) : await baseQuery;
@@ -651,7 +841,8 @@ export async function listTransactions({
 			amountTotalSettlement: r.amountTotalSettlement,
 			settlementCurrency,
 			isForeign: entryCurrency !== settlementCurrency,
-			createdAt: r.createdAt.toISOString()
+			createdAt: r.createdAt.toISOString(),
+			occurredAt: r.occurredAt.toISOString()
 		};
 	});
 }

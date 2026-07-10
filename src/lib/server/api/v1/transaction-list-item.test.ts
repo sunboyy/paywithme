@@ -20,6 +20,7 @@ function makeItem(overrides: Partial<TransactionListItem> = {}): TransactionList
 		settlementCurrency: 'THB',
 		isForeign: false,
 		createdAt: '2026-05-01T10:00:00.000Z',
+		occurredAt: '2026-05-01T10:00:00.000Z',
 		...overrides
 	};
 }

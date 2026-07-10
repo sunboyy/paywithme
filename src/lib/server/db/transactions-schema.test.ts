@@ -126,6 +126,23 @@ describe('transactions drizzle table', () => {
 		expect(c.deletedAt.notNull).toBe(false);
 	});
 
+	it('pins created_at + occurred_at to MILLISECOND precision so the §16.4 cursor round-trips losslessly', () => {
+		// REGRESSION GUARD (#17): Postgres's default `timestamp` is MICROSECOND, but the
+		// opaque keyset cursor serialises the sort key via JS `Date.toISOString()`
+		// (millisecond). If these columns stored sub-millisecond entropy, `defaultNow()`
+		// values would be TRUNCATED by the cursor and a concurrently-inserted row landing
+		// in the lost sub-ms window could be silently SKIPPED across a page boundary —
+		// breaking the "no row skipped, stable under concurrent inserts" guarantee. The
+		// columns MUST therefore be quantised to millisecond (`{ precision: 3 }`).
+		const c = getTableColumns(transactions);
+		const createdAt = c.createdAt as unknown as { precision?: number };
+		const occurredAt = c.occurredAt as unknown as { precision?: number };
+		expect(createdAt.precision).toBe(3);
+		expect(occurredAt.precision).toBe(3);
+		expect(c.createdAt.getSQLType()).toBe('timestamp (3)');
+		expect(c.occurredAt.getSQLType()).toBe('timestamp (3)');
+	});
+
 	it('declares the required columns with the right nullability', () => {
 		const c = getTableColumns(transactions);
 		expect(c.id.primary).toBe(true);

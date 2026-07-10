@@ -123,7 +123,13 @@ import {
 	restoreTransaction,
 	TransactionValidationError,
 	TransactionNotFoundError,
-	TransactionDeletedError
+	TransactionDeletedError,
+	TransactionCursorError,
+	encodeTransactionCursor,
+	decodeTransactionCursor,
+	rowIsAfterCursor,
+	createdAtInRange,
+	type TransactionCursorKey
 } from './transactions';
 import { GroupAccessError } from './groups';
 import { resolveShares, resolveItemizedWithCharges } from '$lib/transactions/resolve';
@@ -802,7 +808,8 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotal: 9000,
 			amountTotalSettlement: 9000,
 			currency: 'THB',
-			createdAt: now
+			createdAt: now,
+			occurredAt: now
 		},
 		{
 			id: 't2',
@@ -814,7 +821,8 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotal: 5000, // CN¥50.00 (entry currency)
 			amountTotalSettlement: 24250, // ฿242.50 @4.85
 			currency: 'CNY',
-			createdAt: now
+			createdAt: now,
+			occurredAt: now
 		}
 	];
 
@@ -843,7 +851,8 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotalSettlement: 9000,
 			settlementCurrency: 'THB',
 			isForeign: false,
-			createdAt: now.toISOString()
+			createdAt: now.toISOString(),
+			occurredAt: now.toISOString()
 		});
 		// Foreign row: original CNY amount kept; settlement total denominated in THB.
 		expect(result[1]).toEqual({
@@ -858,7 +867,8 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotalSettlement: 24250,
 			settlementCurrency: 'THB',
 			isForeign: true,
-			createdAt: now.toISOString()
+			createdAt: now.toISOString(),
+			occurredAt: now.toISOString()
 		});
 	});
 
@@ -873,6 +883,198 @@ describe('listTransactions (PLAN §7, §10)', () => {
 		});
 		expect(result).toHaveLength(2);
 		expect(result[0].type).toBe('spending');
+	});
+
+	it('surfaces occurredAt (ISO) so the API layer can mint the next-page cursor (§16.4)', async () => {
+		const occurred = new Date('2026-03-01T00:00:05.000Z');
+		const rows = [{ ...ROWS[0], occurredAt: occurred }];
+		queueSelects(ACCESS_OK, SETTLEMENT_ROW, rows);
+		const result = await listTransactions({ userId: 'u1', groupId: 'g1' });
+		expect(result[0].occurredAt).toBe(occurred.toISOString());
+		// The full §16.4 sort key round-trips through the opaque cursor.
+		const cursor = encodeTransactionCursor({
+			createdAt: new Date(result[0].createdAt),
+			occurredAt: new Date(result[0].occurredAt),
+			id: result[0].id
+		});
+		expect(decodeTransactionCursor(cursor)).toEqual({
+			createdAt: new Date(result[0].createdAt),
+			occurredAt: new Date(result[0].occurredAt),
+			id: result[0].id
+		});
+	});
+
+	it('rejects a malformed `after` cursor with TransactionCursorError (→400/422), not silently', async () => {
+		// Access + settlement selects succeed; the decode happens while building the
+		// WHERE, so it throws from inside the real listTransactions path.
+		queueSelects(ACCESS_OK, SETTLEMENT_ROW);
+		await expect(
+			listTransactions({ userId: 'u1', groupId: 'g1', filters: { after: 'not-a-cursor!!' } })
+		).rejects.toBeInstanceOf(TransactionCursorError);
+	});
+
+	it('accepts a valid `after` + from/to filters and still shapes rows (builder wiring)', async () => {
+		queueSelects(ACCESS_OK, SETTLEMENT_ROW, ROWS);
+		const after = encodeTransactionCursor({
+			createdAt: new Date('2026-03-02T00:00:00.000Z'),
+			occurredAt: new Date('2026-03-02T00:00:00.000Z'),
+			id: 't9'
+		});
+		const result = await listTransactions({
+			userId: 'u1',
+			groupId: 'g1',
+			filters: {
+				after,
+				from: new Date('2026-01-01T00:00:00.000Z'),
+				to: new Date('2026-12-31T23:59:59.999Z')
+			}
+		});
+		expect(result).toHaveLength(2);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §16.4 keyset pagination — cursor codec + ordering/range boundary math.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('transaction cursor codec (PLAN §16.4)', () => {
+	const key: TransactionCursorKey = {
+		createdAt: new Date('2026-03-01T00:00:00.000Z'),
+		occurredAt: new Date('2026-03-01T08:30:00.000Z'),
+		id: 'txn_abc'
+	};
+
+	it('round-trips a sort key through encode → decode', () => {
+		expect(decodeTransactionCursor(encodeTransactionCursor(key))).toEqual(key);
+	});
+
+	it('produces an OPAQUE cursor (base64url; does not leak the raw id/dates)', () => {
+		const cursor = encodeTransactionCursor(key);
+		// URL-safe base64: no raw payload, no `+`/`/`/`=` padding chars.
+		expect(cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+		expect(cursor).not.toContain('txn_abc');
+	});
+
+	it.each([
+		['empty', ''],
+		['non-base64url junk', 'not a cursor !!!'],
+		['base64 of non-JSON', Buffer.from('hello', 'utf8').toString('base64url')],
+		['base64 of a non-array', Buffer.from('{"a":1}', 'utf8').toString('base64url')],
+		[
+			'wrong tuple length',
+			Buffer.from('["2026-03-01T00:00:00.000Z"]', 'utf8').toString('base64url')
+		],
+		[
+			'invalid date',
+			Buffer.from('["nope","2026-03-01T00:00:00.000Z","id"]', 'utf8').toString('base64url')
+		],
+		[
+			'empty id',
+			Buffer.from('["2026-03-01T00:00:00.000Z","2026-03-01T00:00:00.000Z",""]', 'utf8').toString(
+				'base64url'
+			)
+		],
+		[
+			'non-string id',
+			Buffer.from('["2026-03-01T00:00:00.000Z","2026-03-01T00:00:00.000Z",5]', 'utf8').toString(
+				'base64url'
+			)
+		]
+	])('throws TransactionCursorError on a malformed cursor (%s)', (_label, bad) => {
+		expect(() => decodeTransactionCursor(bad)).toThrow(TransactionCursorError);
+	});
+});
+
+describe('keyset pagination boundary (PLAN §16.4 — no dup/skip, id tie-break)', () => {
+	// A fixture spanning the tricky cases: distinct dates, a same-`createdAt`/
+	// different-`occurredAt` pair, AND two rows sharing BOTH createdAt+occurredAt
+	// (only `id` separates them — the reason `id` must be in the total order).
+	const D = (s: string) => new Date(s);
+	const universe: TransactionCursorKey[] = [
+		{ createdAt: D('2026-03-03T00:00:00Z'), occurredAt: D('2026-03-03T09:00:00Z'), id: 'a' },
+		{ createdAt: D('2026-03-02T00:00:00Z'), occurredAt: D('2026-03-02T10:00:00Z'), id: 'b' },
+		{ createdAt: D('2026-03-02T00:00:00Z'), occurredAt: D('2026-03-02T08:00:00Z'), id: 'c' },
+		// Tie on BOTH timestamps — distinguished only by id (DESC: 'e' before 'd').
+		{ createdAt: D('2026-03-01T00:00:00Z'), occurredAt: D('2026-03-01T12:00:00Z'), id: 'e' },
+		{ createdAt: D('2026-03-01T00:00:00Z'), occurredAt: D('2026-03-01T12:00:00Z'), id: 'd' },
+		{ createdAt: D('2026-02-28T00:00:00Z'), occurredAt: D('2026-02-28T00:00:00Z'), id: 'f' }
+	];
+
+	/** The canonical §16.4 total order: createdAt DESC, occurredAt DESC, id DESC. */
+	function totalOrder(rows: TransactionCursorKey[]): TransactionCursorKey[] {
+		return [...rows].sort((x, y) => {
+			if (x.createdAt.getTime() !== y.createdAt.getTime())
+				return y.createdAt.getTime() - x.createdAt.getTime();
+			if (x.occurredAt.getTime() !== y.occurredAt.getTime())
+				return y.occurredAt.getTime() - x.occurredAt.getTime();
+			return x.id < y.id ? 1 : x.id > y.id ? -1 : 0;
+		});
+	}
+
+	/** Simulate a keyset page: rows strictly after `cursor`, in order, capped at `limit`. */
+	function page(cursor: TransactionCursorKey | null, limit: number): TransactionCursorKey[] {
+		const ordered = totalOrder(universe);
+		const eligible = cursor ? ordered.filter((r) => rowIsAfterCursor(r, cursor)) : ordered;
+		return eligible.slice(0, limit);
+	}
+
+	it('ordered universe places the id tie-break rows in DESC id order (e before d)', () => {
+		const ids = totalOrder(universe).map((r) => r.id);
+		expect(ids).toEqual(['a', 'b', 'c', 'e', 'd', 'f']);
+	});
+
+	it('paginating page-by-page covers every row exactly once (no gap, no duplicate)', () => {
+		const LIMIT = 2;
+		const seen: string[] = [];
+		let cursor: TransactionCursorKey | null = null;
+		// Bound the loop defensively so a bug can't spin forever.
+		for (let guard = 0; guard < 100; guard++) {
+			const rows = page(cursor, LIMIT);
+			if (rows.length === 0) break;
+			seen.push(...rows.map((r) => r.id));
+			const last = rows[rows.length - 1];
+			// Mint the next cursor exactly as the API layer will: from the last row's key.
+			cursor = decodeTransactionCursor(encodeTransactionCursor(last));
+		}
+		// Every id, once, in the exact total order — the id tie-break pair (e,d) crosses
+		// a page boundary here (page 2 = [c, e], page 3 = [d, f]) yet neither repeats
+		// nor is skipped.
+		expect(seen).toEqual(['a', 'b', 'c', 'e', 'd', 'f']);
+		expect(new Set(seen).size).toBe(seen.length);
+	});
+
+	it('the cursor at an id-tie row advances PAST it without re-emitting its tie-mate', () => {
+		// Cursor sits on 'e' (the first of the createdAt+occurredAt tie pair). The next
+		// page must start at 'd' (its lower-id tie-mate), never re-include 'e'.
+		const e = universe.find((r) => r.id === 'e')!;
+		const next = page(e, 10).map((r) => r.id);
+		expect(next).toEqual(['d', 'f']);
+		expect(next).not.toContain('e');
+	});
+});
+
+describe('from/to date-range inclusivity (PLAN §16.4 / §7.1 createdAt)', () => {
+	const from = new Date('2026-03-01T00:00:00.000Z');
+	const to = new Date('2026-03-31T23:59:59.999Z');
+
+	it('includes a row exactly on the `from` bound (inclusive lower)', () => {
+		expect(createdAtInRange(new Date(from), from, to)).toBe(true);
+	});
+
+	it('includes a row exactly on the `to` bound (inclusive upper)', () => {
+		expect(createdAtInRange(new Date(to), from, to)).toBe(true);
+	});
+
+	it('excludes a row 1ms before `from` and 1ms after `to`', () => {
+		expect(createdAtInRange(new Date(from.getTime() - 1), from, to)).toBe(false);
+		expect(createdAtInRange(new Date(to.getTime() + 1), from, to)).toBe(false);
+	});
+
+	it('treats each bound as independently optional (open-ended range)', () => {
+		const d = new Date('2020-01-01T00:00:00.000Z');
+		expect(createdAtInRange(d, undefined, undefined)).toBe(true);
+		expect(createdAtInRange(d, from, undefined)).toBe(false); // below open `from`
+		expect(createdAtInRange(d, undefined, to)).toBe(true); // under open `to`
 	});
 });
 
