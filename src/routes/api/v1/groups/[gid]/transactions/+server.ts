@@ -35,11 +35,15 @@ import { json } from '@sveltejs/kit';
 import { z } from 'zod';
 import {
 	listTransactions,
+	createTransaction,
+	getTransactionDetail,
 	encodeTransactionCursor,
 	type TransactionListFilters
 } from '$lib/server/transactions';
-import { toTransactionListItemDto } from '$lib/server/api/v1';
+import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
+import { requireWriteScope } from '$lib/server/api/scope';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
 
 /** Default page size when `limit` is omitted (§16.4). */
@@ -135,4 +139,45 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 			: null;
 
 	return json({ data, nextCursor });
+});
+
+// POST /api/v1/groups/{gid}/transactions — create a transaction (PLAN §16.4). A
+// WRITE endpoint: the scope guard runs FIRST (a read key → 403 `forbidden_scope`,
+// §16.2). The body is the FULL internal `TransactionInput` verbatim (reuse of the
+// shared `buildTransactionSchema` — no separate write DTO): `createTransaction`
+// re-validates it server-side against the group's settlement currency + active
+// members (which OWNS the §7.6 `amountTotalSettlement` equality rule, so a
+// caller-supplied mismatch surfaces as a 422 via the wrapper). The settlement
+// currency is GROUP CONTEXT loaded by the service from the group row — NEVER
+// trusted from the payload. On success we re-read the persisted detail and return
+// the SAME `TransactionDetail` DTO the GET routes serve (§16.4), 201 Created.
+export const POST = withWriteErrorHandling(async ({ locals, params, request }) => {
+	const principal = locals.apiKey;
+	if (!principal) return unauthorized();
+	// §16.2 write-guard FIRST: a read key can never move money (→ 403).
+	const denied = requireWriteScope(principal);
+	if (denied) return denied;
+
+	const { gid } = params;
+	if (!gid) return notFound();
+
+	// Unparseable body → JsonBodyError → 400 (mapped by the wrapper). The parsed
+	// value is handed to the service VERBATIM as the full internal input.
+	const input = await parseJsonBody(request);
+
+	// Throws TransactionValidationError (→ 422 field-level), GroupAccessError (→ 404),
+	// all mapped by the wrapper. Settlement currency loaded server-side from the group.
+	const txnId = await createTransaction({
+		userId: principal.userId,
+		groupId: gid,
+		input
+	});
+
+	// Re-read the persisted detail to build the 201 response DTO (§16.4).
+	const detail = await getTransactionDetail({
+		userId: principal.userId,
+		groupId: gid,
+		txnId
+	});
+	return json(toTransactionDetailDto(detail), { status: 201 });
 });

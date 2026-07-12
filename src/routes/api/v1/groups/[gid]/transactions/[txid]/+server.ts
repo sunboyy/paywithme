@@ -11,9 +11,15 @@
 // (marked via `deletedAt`). Any valid key suffices (an `R` endpoint).
 
 import { json } from '@sveltejs/kit';
-import { getTransactionDetail } from '$lib/server/transactions';
+import {
+	getTransactionDetail,
+	updateTransaction,
+	softDeleteTransaction
+} from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
+import { requireWriteScope } from '$lib/server/api/scope';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
 export const GET = withReadErrorHandling(async ({ locals, params }) => {
@@ -24,6 +30,73 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 	if (!gid || !txid) return notFound();
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
+	const detail = await getTransactionDetail({
+		userId: principal.userId,
+		groupId: gid,
+		txnId: txid
+	});
+	return json(toTransactionDetailDto(detail));
+});
+
+// PUT /api/v1/groups/{gid}/transactions/{txid} — FULL REPLACE of a transaction
+// (PLAN §16.4: PUT, not PATCH — the body is the COMPLETE `TransactionInput`). A
+// WRITE endpoint: scope guard FIRST (read key → 403). `updateTransaction`
+// re-validates the whole input server-side (§7.6 `amountTotalSettlement` mismatch →
+// 422 via the wrapper), refuses a soft-deleted txn (TransactionDeletedError → 422
+// "restore first"), and 404s an absent / other-group id (conflated). On success we
+// re-read the persisted detail and return the `TransactionDetail` DTO, 200.
+export const PUT = withWriteErrorHandling(async ({ locals, params, request }) => {
+	const principal = locals.apiKey;
+	if (!principal) return unauthorized();
+	const denied = requireWriteScope(principal);
+	if (denied) return denied;
+
+	const { gid, txid } = params;
+	if (!gid || !txid) return notFound();
+
+	// Unparseable body → 400. The parsed value is the full internal input verbatim.
+	const input = await parseJsonBody(request);
+
+	// Throws TransactionValidationError (→ 422), TransactionDeletedError (→ 422),
+	// GroupAccessError / TransactionNotFoundError (→ 404) — all mapped by the wrapper.
+	await updateTransaction({
+		userId: principal.userId,
+		groupId: gid,
+		txnId: txid,
+		input,
+		actorUserId: principal.userId
+	});
+
+	const detail = await getTransactionDetail({
+		userId: principal.userId,
+		groupId: gid,
+		txnId: txid
+	});
+	return json(toTransactionDetailDto(detail));
+});
+
+// DELETE /api/v1/groups/{gid}/transactions/{txid} — SOFT delete (PLAN §16.4, §9).
+// A WRITE endpoint: scope guard FIRST. `softDeleteTransaction` is IDEMPOTENT (a
+// no-op on an already-deleted txn) and 404s an absent / other-group id. We return
+// the still-served detail with `deletedAt` now set (200), so the caller sees the
+// resulting state (§16.4 response table).
+export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
+	const principal = locals.apiKey;
+	if (!principal) return unauthorized();
+	const denied = requireWriteScope(principal);
+	if (denied) return denied;
+
+	const { gid, txid } = params;
+	if (!gid || !txid) return notFound();
+
+	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
+	await softDeleteTransaction({
+		userId: principal.userId,
+		groupId: gid,
+		txnId: txid,
+		actorUserId: principal.userId
+	});
+
 	const detail = await getTransactionDetail({
 		userId: principal.userId,
 		groupId: gid,

@@ -15,17 +15,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GroupAccessError } from '$lib/server/groups';
 
-const { listTransactions } = vi.hoisted(() => ({ listTransactions: vi.fn() }));
+const { listTransactions, createTransaction, getTransactionDetail } = vi.hoisted(() => ({
+	listTransactions: vi.fn(),
+	createTransaction: vi.fn(),
+	getTransactionDetail: vi.fn()
+}));
 vi.mock('$lib/server/transactions', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/transactions')>();
-	return { ...actual, listTransactions };
+	return { ...actual, listTransactions, createTransaction, getTransactionDetail };
 });
 
-import { GET } from './+server';
+import { GET, POST } from './+server';
 import {
 	createdAtInRange,
 	decodeTransactionCursor,
-	TransactionCursorError
+	TransactionCursorError,
+	TransactionValidationError
 } from '$lib/server/transactions';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
@@ -33,6 +38,13 @@ const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
+};
+
+/** A write-scoped principal (§16.2 `write ⊇ read`). */
+const writePrincipal: ApiKeyPrincipal = {
+	keyId: 'key_w',
+	userId: 'user_1',
+	permissions: { api: ['read', 'write'] }
 };
 
 function makeEvent(query = '', gid = 'g1') {
@@ -44,6 +56,53 @@ function makeEvent(query = '', gid = 'g1') {
 		params: { gid }
 	} as unknown as Parameters<typeof GET>[0];
 }
+
+/** A POST event with a JSON (or raw) body + a chosen principal (defaults write). */
+function makePostEvent(
+	body: unknown,
+	{
+		gid = 'g1',
+		apiKey = writePrincipal,
+		raw
+	}: { gid?: string; apiKey?: ApiKeyPrincipal; raw?: string } = {}
+) {
+	const url = new URL(`http://localhost/api/v1/groups/${gid}/transactions`);
+	const request = new Request(url, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: raw ?? JSON.stringify(body)
+	});
+	return {
+		locals: { apiKey },
+		url,
+		request,
+		params: { gid }
+	} as unknown as Parameters<typeof POST>[0];
+}
+
+/** A minimal persisted detail the create path re-reads for its 201 DTO. */
+const createdDetail = {
+	id: 't_new',
+	groupId: 'g1',
+	type: 'spending' as const,
+	title: 'Dinner',
+	categoryId: 'spending-food-drink',
+	categoryName: 'Food',
+	categoryIcon: 'utensils',
+	amountTotal: 9000,
+	currency: 'THB' as const,
+	amountTotalSettlement: 9000,
+	settlementCurrency: 'THB' as const,
+	isForeign: false,
+	splitMode: 'equal' as const,
+	createdAt: '2026-01-02T12:00:00.000Z',
+	deletedAt: null,
+	payers: [{ memberId: 'm1', amountPaid: 9000 }],
+	shares: [{ memberId: 'm1', amountOwed: 9000 }],
+	items: [],
+	charges: [],
+	input: { type: 'spending', title: 'Dinner', secret: 'internal' }
+};
 
 async function read(res: Response) {
 	return { status: res.status, body: await res.json() };
@@ -167,6 +226,92 @@ describe('GET /api/v1/groups/{gid}/transactions', () => {
 	it('no access (GroupAccessError) → 404 not_found (conflated)', async () => {
 		listTransactions.mockRejectedValue(new GroupAccessError());
 		const { status, body } = await read((await GET(makeEvent())) as Response);
+		expect(status).toBe(404);
+		expect(body.error.code).toBe('not_found');
+	});
+});
+
+describe('POST /api/v1/groups/{gid}/transactions', () => {
+	const validInput = {
+		type: 'spending',
+		title: 'Dinner',
+		categoryId: 'spending-food-drink',
+		amountTotal: 9000,
+		currency: 'THB',
+		exchangeRate: '1',
+		amountTotalSettlement: 9000,
+		splitMode: 'equal',
+		payers: [{ memberId: 'm1', amountPaid: 9000 }],
+		beneficiaries: [{ memberId: 'm1' }],
+		items: [],
+		charges: []
+	};
+
+	it('happy path → 201 with the detail DTO; forwards the raw input; drops `input`', async () => {
+		createTransaction.mockResolvedValue('t_new');
+		getTransactionDetail.mockResolvedValue(createdDetail);
+
+		const { status, body } = await read((await POST(makePostEvent(validInput))) as Response);
+		expect(status).toBe(201);
+		// The FULL internal input is forwarded verbatim (no separate write DTO); the
+		// settlement currency is NOT taken from the payload (service loads it).
+		expect(createTransaction).toHaveBeenCalledWith({
+			userId: 'user_1',
+			groupId: 'g1',
+			input: validInput
+		});
+		expect(getTransactionDetail).toHaveBeenCalledWith({
+			userId: 'user_1',
+			groupId: 'g1',
+			txnId: 't_new'
+		});
+		expect(body.amount).toEqual({ amount: 9000, currency: 'THB' });
+		expect(body).not.toHaveProperty('input');
+	});
+
+	it('read key → 403 forbidden_scope; the service is never called', async () => {
+		const { status, body } = await read(
+			(await POST(makePostEvent(validInput, { apiKey: principal }))) as Response
+		);
+		expect(status).toBe(403);
+		expect(body.error.code).toBe('forbidden_scope');
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('amountTotalSettlement mismatch → 422 with field-level details', async () => {
+		// The service re-validates via the shared schema; a §7.6 mismatch throws
+		// TransactionValidationError carrying the offending field.
+		createTransaction.mockRejectedValue(
+			new TransactionValidationError([
+				{
+					code: 'custom',
+					path: ['amountTotalSettlement'],
+					message: 'The settlement total must equal the converted transaction total'
+				} as never
+			])
+		);
+		const { status, body } = await read(
+			(await POST(makePostEvent({ ...validInput, amountTotalSettlement: 8888 }))) as Response
+		);
+		expect(status).toBe(422);
+		expect(body.error.code).toBe('validation_error');
+		expect(body.error.details.fieldErrors.amountTotalSettlement).toEqual([
+			'The settlement total must equal the converted transaction total'
+		]);
+	});
+
+	it('unparseable JSON body → 400 bad_request', async () => {
+		const { status, body } = await read(
+			(await POST(makePostEvent(null, { raw: '{not json' }))) as Response
+		);
+		expect(status).toBe(400);
+		expect(body.error.code).toBe('bad_request');
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('no access (GroupAccessError) → 404 not_found (conflated)', async () => {
+		createTransaction.mockRejectedValue(new GroupAccessError());
+		const { status, body } = await read((await POST(makePostEvent(validInput))) as Response);
 		expect(status).toBe(404);
 		expect(body.error.code).toBe('not_found');
 	});
