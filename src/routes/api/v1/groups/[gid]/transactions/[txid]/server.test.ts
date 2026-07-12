@@ -20,6 +20,10 @@ vi.mock('$lib/server/transactions', async (importOriginal) => {
 	return { ...actual, getTransactionDetail, updateTransaction, softDeleteTransaction };
 });
 
+// §16.7 tier-2 limiter: stubbed to allow (logic covered in api/rate-limit.test.ts).
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { GET, PUT, DELETE } from './+server';
 import {
 	TransactionNotFoundError,
@@ -123,7 +127,10 @@ const detail = {
 	input: { type: 'spending', title: 'Dinner', secret: 'internal' }
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	requireRateLimit.mockResolvedValue(null);
+});
 
 describe('GET /api/v1/groups/{gid}/transactions/{txid}', () => {
 	it('200 with the detail DTO; forwards { userId, groupId, txnId }; drops `input`', async () => {

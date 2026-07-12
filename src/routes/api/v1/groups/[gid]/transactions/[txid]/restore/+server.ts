@@ -13,6 +13,7 @@ import { getTransactionDetail, restoreTransaction } from '$lib/server/transactio
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withWriteErrorHandling } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
 export const POST = withWriteErrorHandling(async ({ locals, params }) => {
@@ -24,6 +25,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params }) => {
 
 	const { gid, txid } = params;
 	if (!gid || !txid) return notFound();
+
+	// TIER-2 write limiter (§16.7): 20/60s per key, AFTER the scope guard so a read
+	// key gets 403 (not 429) and never consumes this counter.
+	const limited = await requireRateLimit(principal, 'write');
+	if (limited) return limited;
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
 	await restoreTransaction({

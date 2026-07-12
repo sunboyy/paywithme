@@ -200,6 +200,54 @@ describe('apiV1Guard (/api/v1 auth gate)', () => {
 		expect(serialized).not.toContain('expired');
 	});
 
+	it('maps the plugin RATE_LIMITED (tier-1) to a 429 envelope + Retry-After — NOT collapsed to 401', async () => {
+		// The tier-1 backstop tripped inside verifyApiKey. `tryAgainIn` is MILLISECONDS.
+		verifyApiKey.mockResolvedValue({
+			valid: false,
+			error: {
+				code: 'RATE_LIMITED',
+				message: 'Rate limit exceeded.',
+				details: { tryAgainIn: 30_000 }
+			},
+			key: null
+		});
+
+		const event = makeEvent('/api/v1/groups', { authorization: 'Bearer pwm_test_busy' });
+		const resolve = vi.fn();
+
+		const response = await apiV1Guard({ event, resolve });
+
+		expect(resolve).not.toHaveBeenCalled();
+		const { status, contentType, body } = await readEnvelope(response);
+		expect(status).toBe(429);
+		expect(contentType).toContain('application/json');
+		expect(body.error.code).toBe('rate_limited');
+		// Combined tier-1 counter → scope 'key', limit 150, 60s window; ceil(30000/1000)=30.
+		expect(body.error.details).toEqual({
+			scope: 'key',
+			limit: 150,
+			windowSeconds: 60,
+			retryAfterSeconds: 30
+		});
+		expect(response.headers.get('Retry-After')).toBe('30');
+	});
+
+	it('rounds a fractional tryAgainIn UP for both the body and the Retry-After header', async () => {
+		verifyApiKey.mockResolvedValue({
+			valid: false,
+			error: { code: 'RATE_LIMITED', message: 'slow down', details: { tryAgainIn: 1_500 } },
+			key: null
+		});
+
+		const event = makeEvent('/api/v1/groups', { authorization: 'Bearer pwm_test_busy' });
+		const response = await apiV1Guard({ event, resolve: vi.fn() });
+
+		expect(response.status).toBe(429);
+		const body = await response.json();
+		expect(body.error.details.retryAfterSeconds).toBe(2); // ceil(1500/1000)
+		expect(response.headers.get('Retry-After')).toBe('2');
+	});
+
 	it('returns a generic 401 (not a 500) when verifyApiKey throws', async () => {
 		verifyApiKey.mockRejectedValue(new Error('db blip'));
 		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

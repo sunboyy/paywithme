@@ -17,6 +17,10 @@ vi.mock('$lib/server/transactions', async (importOriginal) => {
 	return { ...actual, restoreTransaction, getTransactionDetail };
 });
 
+// §16.7 tier-2 write limiter: stubbed to allow (logic covered in api/rate-limit.test.ts).
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { POST } from './+server';
 import { TransactionNotFoundError } from '$lib/server/transactions';
 import { GroupAccessError } from '$lib/server/groups';
@@ -71,7 +75,10 @@ const liveDetail = {
 	input: { type: 'spending', title: 'Dinner', secret: 'internal' }
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	requireRateLimit.mockResolvedValue(null);
+});
 
 describe('POST /api/v1/groups/{gid}/transactions/{txid}/restore', () => {
 	it('happy path → 200 with the detail DTO carrying `deletedAt` null', async () => {

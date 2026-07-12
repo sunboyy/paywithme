@@ -15,6 +15,7 @@ import { getGroupForUser } from '$lib/server/groups';
 import { getGroupBalances } from '$lib/server/balances';
 import { toBalanceDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
 export const GET = withReadErrorHandling(async ({ locals, params }) => {
@@ -23,6 +24,10 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 
 	const { gid } = params;
 	if (!gid) return notFound();
+
+	// TIER-2 read limiter (§16.7): 100/60s per key, enforced AFTER auth (the hook).
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
 
 	// The group row gives us the settlement currency the balance integers are
 	// denominated in AND serves as the access gate (`null` = absent/no-access → 404).

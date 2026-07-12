@@ -12,6 +12,8 @@
 import { json } from '@sveltejs/kit';
 import { CURRENCIES } from '$lib/money';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
+import { unauthorized } from '$lib/server/api/errors';
 
 /** The wire shape of one currency (§16.4): the reference triple only. */
 interface CurrencyDto {
@@ -20,7 +22,16 @@ interface CurrencyDto {
 	readonly symbol: string;
 }
 
-export const GET = withReadErrorHandling(async () => {
+export const GET = withReadErrorHandling(async ({ locals }) => {
+	// Static reference data, but still an authenticated `R` endpoint: the hook
+	// guarantees a principal (401 otherwise). Guard defensively, then apply the
+	// TIER-2 read limiter (§16.7): 100/60s per key.
+	const principal = locals.apiKey;
+	if (!principal) return unauthorized();
+
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
+
 	const data: CurrencyDto[] = CURRENCIES.map((c) => ({
 		code: c.code,
 		exponent: c.exponent,

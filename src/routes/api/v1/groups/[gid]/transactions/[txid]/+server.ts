@@ -20,6 +20,7 @@ import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
 export const GET = withReadErrorHandling(async ({ locals, params }) => {
@@ -28,6 +29,10 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 
 	const { gid, txid } = params;
 	if (!gid || !txid) return notFound();
+
+	// TIER-2 read limiter (§16.7): 100/60s per key, enforced AFTER auth (the hook).
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
 	const detail = await getTransactionDetail({
@@ -53,6 +58,11 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 
 	const { gid, txid } = params;
 	if (!gid || !txid) return notFound();
+
+	// TIER-2 write limiter (§16.7): 20/60s per key, AFTER the scope guard so a read
+	// key gets 403 (not 429) and never consumes this counter.
+	const limited = await requireRateLimit(principal, 'write');
+	if (limited) return limited;
 
 	// Unparseable body → 400. The parsed value is the full internal input verbatim.
 	const input = await parseJsonBody(request);
@@ -88,6 +98,11 @@ export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
 
 	const { gid, txid } = params;
 	if (!gid || !txid) return notFound();
+
+	// TIER-2 write limiter (§16.7): 20/60s per key, AFTER the scope guard so a read
+	// key gets 403 (not 429) and never consumes this counter.
+	const limited = await requireRateLimit(principal, 'write');
+	if (limited) return limited;
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
 	await softDeleteTransaction({

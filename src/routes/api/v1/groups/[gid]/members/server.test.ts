@@ -10,6 +10,10 @@ import { GroupAccessError } from '$lib/server/groups';
 const { listMembers } = vi.hoisted(() => ({ listMembers: vi.fn() }));
 vi.mock('$lib/server/members', () => ({ listMembers }));
 
+// §16.7 tier-2 read limiter: stubbed to allow (logic covered in api/rate-limit.test.ts).
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { GET } from './+server';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
@@ -33,7 +37,10 @@ async function read(res: Response) {
 	return { status: res.status, body: await res.json() };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	requireRateLimit.mockResolvedValue(null);
+});
 
 describe('GET /api/v1/groups/{gid}/members', () => {
 	it('200 with member DTO rows; forwards { userId, groupId }', async () => {

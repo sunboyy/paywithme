@@ -11,6 +11,7 @@ import { json } from '@sveltejs/kit';
 import { listGroupsForUser } from '$lib/server/groups';
 import { toGroupDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { unauthorized } from '$lib/server/api/errors';
 
 export const GET = withReadErrorHandling(async ({ locals }) => {
@@ -18,6 +19,10 @@ export const GET = withReadErrorHandling(async ({ locals }) => {
 	// defensively so a misconfigured route can never read `null.userId`.
 	const principal = locals.apiKey;
 	if (!principal) return unauthorized();
+
+	// TIER-2 read limiter (§16.7): 100/60s per key, enforced AFTER auth (the hook).
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
 
 	const groups = await listGroupsForUser(principal.userId);
 	return json(groups.map(toGroupDto));

@@ -10,6 +10,7 @@ import { json } from '@sveltejs/kit';
 import { getGroupForUser } from '$lib/server/groups';
 import { toGroupDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
 export const GET = withReadErrorHandling(async ({ locals, params }) => {
@@ -18,6 +19,10 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 
 	const { gid } = params;
 	if (!gid) return notFound();
+
+	// TIER-2 read limiter (§16.7): 100/60s per key, enforced AFTER auth (the hook).
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
 
 	const group = await getGroupForUser(principal.userId, gid);
 	// `null` = absent OR no-access — one indistinguishable 404 (§16.5 / §12).

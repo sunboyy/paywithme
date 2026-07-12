@@ -21,6 +21,7 @@ import { createTransaction, getTransactionDetail } from '$lib/server/transaction
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
 import type { CurrencyCode } from '$lib/money';
@@ -59,6 +60,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 
 	const { gid } = params;
 	if (!gid) return notFound();
+
+	// TIER-2 write limiter (§16.7): 20/60s per key, AFTER the scope guard so a read
+	// key gets 403 (not 429) and never consumes this counter.
+	const limited = await requireRateLimit(principal, 'write');
+	if (limited) return limited;
 
 	// Read the raw body ONCE (for the §16.6 fingerprint) and parse it. Unparseable →
 	// 400 (via the wrapper). Then validate the {from,to,amount} shape → 422 with

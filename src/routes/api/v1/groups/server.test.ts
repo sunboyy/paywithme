@@ -10,7 +10,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { listGroupsForUser } = vi.hoisted(() => ({ listGroupsForUser: vi.fn() }));
 vi.mock('$lib/server/groups', () => ({ listGroupsForUser }));
 
+// §16.7 tier-2 read limiter: stubbed to allow by default (its own logic is covered
+// in `api/rate-limit.test.ts`); flipped to 429 in one test to prove the wiring.
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { GET } from './+server';
+import { rateLimited } from '$lib/server/api/errors';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
@@ -45,7 +51,10 @@ function groupRow(over: Partial<Record<string, unknown>> = {}) {
 	};
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	requireRateLimit.mockResolvedValue(null);
+});
 
 describe('GET /api/v1/groups', () => {
 	it('200 with DTO rows; forwards the principal userId', async () => {
@@ -73,5 +82,29 @@ describe('GET /api/v1/groups', () => {
 		const { status, body } = await read((await GET(makeEvent(null))) as Response);
 		expect(status).toBe(401);
 		expect(body.error.code).toBe('unauthorized');
+	});
+
+	it('429 rate_limited (tier-2 read) short-circuits before the read runs', async () => {
+		requireRateLimit.mockResolvedValueOnce(
+			rateLimited(
+				'Rate limit exceeded.',
+				{ scope: 'read', limit: 100, windowSeconds: 60, retryAfterSeconds: 42 },
+				42
+			)
+		);
+		const res = (await GET(makeEvent())) as Response;
+		expect(res.status).toBe(429);
+		expect(res.headers.get('Retry-After')).toBe('42');
+		const body = await res.json();
+		expect(body.error.code).toBe('rate_limited');
+		expect(body.error.details).toEqual({
+			scope: 'read',
+			limit: 100,
+			windowSeconds: 60,
+			retryAfterSeconds: 42
+		});
+		// Enforced AFTER auth, BEFORE the read: the service is never called.
+		expect(requireRateLimit).toHaveBeenCalledWith(principal, 'read');
+		expect(listGroupsForUser).not.toHaveBeenCalled();
 	});
 });

@@ -13,6 +13,10 @@ const { getGroupBalances } = vi.hoisted(() => ({ getGroupBalances: vi.fn() }));
 vi.mock('$lib/server/groups', () => ({ getGroupForUser }));
 vi.mock('$lib/server/balances', () => ({ getGroupBalances }));
 
+// §16.7 tier-2 read limiter: stubbed to allow (logic covered in api/rate-limit.test.ts).
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { GET } from './+server';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
@@ -45,7 +49,10 @@ const group = {
 	deletedAt: null
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	requireRateLimit.mockResolvedValue(null);
+});
 
 describe('GET /api/v1/groups/{gid}/balances', () => {
 	it('200 with balances nested as settlement-currency money', async () => {

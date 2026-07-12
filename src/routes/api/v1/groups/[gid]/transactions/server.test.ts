@@ -76,7 +76,13 @@ vi.mock('$lib/server/api/idempotency', async (importOriginal) => {
 	return { ...actual, createDbIdempotencyStore: () => memoryStore };
 });
 
+// §16.7 tier-2 limiter: stubbed to allow by default (logic covered in
+// `api/rate-limit.test.ts`); flipped to 429 to prove the read/write wiring + order.
+const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
+vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
+
 import { GET, POST } from './+server';
+import { rateLimited } from '$lib/server/api/errors';
 import {
 	createdAtInRange,
 	decodeTransactionCursor,
@@ -184,6 +190,7 @@ function items(n: number) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	memoryStore.rows.clear();
+	requireRateLimit.mockResolvedValue(null);
 });
 
 describe('GET /api/v1/groups/{gid}/transactions', () => {
@@ -332,6 +339,33 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 		);
 		expect(status).toBe(403);
 		expect(body.error.code).toBe('forbidden_scope');
+		expect(createTransaction).not.toHaveBeenCalled();
+		// §16.7: a read key hitting a write endpoint gets 403, NOT 429, and never
+		// consumes the write counter (the scope guard runs before requireRateLimit).
+		expect(requireRateLimit).not.toHaveBeenCalled();
+	});
+
+	it('429 rate_limited (tier-2 write) short-circuits AFTER the scope check, before the create', async () => {
+		requireRateLimit.mockResolvedValueOnce(
+			rateLimited(
+				'Rate limit exceeded.',
+				{ scope: 'write', limit: 20, windowSeconds: 60, retryAfterSeconds: 12 },
+				12
+			)
+		);
+		const res = (await POST(makePostEvent(validInput))) as Response;
+		expect(res.status).toBe(429);
+		expect(res.headers.get('Retry-After')).toBe('12');
+		const body = await res.json();
+		expect(body.error.code).toBe('rate_limited');
+		expect(body.error.details).toEqual({
+			scope: 'write',
+			limit: 20,
+			windowSeconds: 60,
+			retryAfterSeconds: 12
+		});
+		// The write counter is consumed with the 'write' class; the create never runs.
+		expect(requireRateLimit).toHaveBeenCalledWith(writePrincipal, 'write');
 		expect(createTransaction).not.toHaveBeenCalled();
 	});
 

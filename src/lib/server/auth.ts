@@ -363,7 +363,26 @@ export const auth = betterAuth({
 			// `pwm_test_` everywhere else. The plugin stamps this into every minted
 			// key's plaintext and its stored `start`, so the display surface stays
 			// prefix-agnostic. See `resolveApiKeyPrefix` / `apiKeyPrefix` above.
-			defaultPrefix: apiKeyPrefix
+			defaultPrefix: apiKeyPrefix,
+			// TIER-1 rate-limit BACKSTOP (PLAN §16.7). These config-level defaults are
+			// stamped onto EVERY key at creation (the plugin's `createApiKey` reads
+			// `rateLimitMax ?? opts.rateLimit.maxRequests`, `rateLimitTimeWindow ??
+			// opts.rateLimit.timeWindow`, `rateLimitEnabled ?? opts.rateLimit.enabled`),
+			// so no per-key creation UX (#23) is needed to satisfy the "set on every
+			// key" requirement. The plugin's built-in per-key limiter fires INSIDE the
+			// `verifyApiKey` call the `/api/v1` guard already makes (`hooks.server.ts`).
+			//
+			// It is ONE combined counter per key (it can't split read/write), so it is
+			// deliberately sized ABOVE the tier-2 burst (read 100/60s + write 20/60s):
+			// a generous 150 req / 60s. Tier 2 (the primary, class-aware limiter in
+			// `api/rate-limit.ts`) does the real per-class enforcement; this tier only
+			// trips if tier 2 is bypassed or buggy. On a trip the plugin surfaces
+			// `RATE_LIMITED`, which the guard maps to the 429 envelope (§16.7).
+			rateLimit: {
+				enabled: true,
+				timeWindow: 60_000,
+				maxRequests: 150
+			}
 		}),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
 		// its cookie handler in an `after` hook, so every server-side `auth.api.*`

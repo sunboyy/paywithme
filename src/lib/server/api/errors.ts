@@ -144,9 +144,25 @@ export const forbiddenScope = (message?: string): Response => apiError('forbidde
  */
 export const notFound = (message?: string): Response => apiError('not_found', message);
 
-/** 429 `rate_limited` — see §16.7 (later ticket). `details` carries the window. */
-export const rateLimited = (message?: string, details?: unknown): Response =>
-	apiError('rate_limited', message, details);
+/**
+ * 429 `rate_limited` (PLAN §16.7). `details` carries the window context
+ * (`{ scope, limit, windowSeconds, retryAfterSeconds }` for tier 2; a tier-1 shape
+ * for the plugin backstop). When `retryAfterSeconds` is provided, the standard
+ * `Retry-After: <seconds>` header is set ALONGSIDE the JSON envelope so a
+ * well-behaved client can back off without parsing the body (§16.7). Omitting it
+ * keeps the bare `rateLimited()` shape unchanged for existing callers/tests.
+ */
+export const rateLimited = (
+	message?: string,
+	details?: unknown,
+	retryAfterSeconds?: number
+): Response => {
+	const res = apiError('rate_limited', message, details);
+	if (retryAfterSeconds !== undefined) {
+		res.headers.set('Retry-After', String(retryAfterSeconds));
+	}
+	return res;
+};
 
 /**
  * 409 `conflict` — an idempotency conflict (§16.6). Use `details.reason` to name

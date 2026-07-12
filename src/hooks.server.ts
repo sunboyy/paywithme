@@ -27,7 +27,7 @@
 
 import { auth } from '$lib/server/auth';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
-import { apiErrorEnvelope } from '$lib/server/api/errors';
+import { apiErrorEnvelope, rateLimited } from '$lib/server/api/errors';
 import { json, type Handle, type HandleServerError } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 
@@ -72,6 +72,36 @@ function unauthorized(): Response {
 	return json(
 		{ error: { code: 'unauthorized', message: 'Authentication required.' } },
 		{ status: 401 }
+	);
+}
+
+// TIER-1 backstop limits (PLAN §16.7). The plugin's built-in per-key counter is a
+// single COMBINED bucket (it can't split read/write), configured at 150 req / 60s
+// in `auth.ts`. When it trips, `verifyApiKey` returns `code: 'RATE_LIMITED'` — the
+// ONE failure code the guard does NOT collapse into the generic 401 (§16.7).
+const TIER1_LIMIT = 150;
+const TIER1_WINDOW_SECONDS = 60;
+
+/**
+ * Map the plugin's internal `RATE_LIMITED` (tier 1) onto the SAME 429 envelope the
+ * tier-2 route limiter emits (PLAN §16.7): `{ scope: 'key', limit, windowSeconds,
+ * retryAfterSeconds }` plus a `Retry-After` header. The plugin surfaces the retry
+ * budget at `error.details.tryAgainIn` in MILLISECONDS remaining; we `Math.ceil`
+ * it to whole seconds for both the header and the body. The tier-1 counter is
+ * COMBINED (not per-class), so the scope is `'key'`.
+ */
+function tier1RateLimited(tryAgainInMs: unknown): Response {
+	const ms = typeof tryAgainInMs === 'number' && tryAgainInMs > 0 ? tryAgainInMs : 0;
+	const retryAfterSeconds = Math.ceil(ms / 1000);
+	return rateLimited(
+		'Rate limit exceeded.',
+		{
+			scope: 'key',
+			limit: TIER1_LIMIT,
+			windowSeconds: TIER1_WINDOW_SECONDS,
+			retryAfterSeconds
+		},
+		retryAfterSeconds
 	);
 }
 
@@ -144,8 +174,20 @@ const apiV1Guard: Handle = async ({ event, resolve }) => {
 		return unauthorized();
 	}
 
-	// Any invalid/expired/revoked/unknown key → the SAME generic 401. The plugin's
-	// internal `result.error.code` is deliberately never forwarded (no enumeration).
+	// TIER-1 rate limit (PLAN §16.7): the plugin's per-key backstop tripped. This is
+	// the ONE non-valid outcome that is NOT collapsed into the generic 401 — a client
+	// already HOLDS a valid key (rate limiting only engages after a successful match),
+	// so surfacing 429 here leaks no enumeration signal. Map it to the shared 429
+	// envelope + `Retry-After` (details from `error.details.tryAgainIn`, ms remaining).
+	if (!result.valid && result.error?.code === 'RATE_LIMITED') {
+		return tier1RateLimited(
+			(result.error as { details?: { tryAgainIn?: unknown } }).details?.tryAgainIn
+		);
+	}
+
+	// Any OTHER invalid/expired/revoked/unknown key → the SAME generic 401. The
+	// plugin's internal `result.error.code` is deliberately never forwarded (no
+	// enumeration).
 	if (!result.valid || !result.key) {
 		return unauthorized();
 	}

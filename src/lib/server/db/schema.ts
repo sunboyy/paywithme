@@ -45,6 +45,11 @@
 //     (calling api_key id + client `Idempotency-Key` + request fingerprint) → the
 //     stored response, pending-first under a UNIQUE `(key_id, idempotency_key)` so
 //     concurrent retries race safely; 24h TTL via `expires_at`.
+//   - api_key_class_rate_limit (task #21) → re-exported from
+//     `api-key-class-rate-limit-schema.ts`, hand-authored (PLAN §16.7): the TIER-2
+//     per-key, class-aware `/api/v1` rate-limit counters. Mirrors `rate_limit`'s
+//     4-column shape, keyed `${apiKeyId}:${class}` (class ∈ read|write) with two
+//     independent counters (read 100/60s, write 20/60s).
 
 export * from './auth-schema';
 export * from './api-key-schema';
@@ -54,3 +59,4 @@ export * from './currencies-schema';
 export * from './transactions-schema';
 export * from './audit-schema';
 export * from './idempotency-schema';
+export * from './api-key-class-rate-limit-schema';

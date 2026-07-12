@@ -189,6 +189,22 @@ describe('auth instance wiring', () => {
 		expect(JSON.stringify(apiKeyPlugin)).not.toContain('"enableSessionForAPIKeys":true');
 	});
 
+	it('stamps the §16.7 TIER-1 rate-limit backstop (150 req / 60s) onto every key at creation', async () => {
+		// The plugin threads the config-level `rateLimit` defaults into its `apikey`
+		// schema field defaults (`rateLimitMax.defaultValue` / `rateLimitTimeWindow.
+		// defaultValue`), which `createApiKey` writes onto each key
+		// (`rateLimitMax ?? opts.rateLimit.maxRequests`, etc.). Asserting the schema
+		// defaults proves the backstop is applied at creation WITHOUT touching a DB.
+		const { auth } = await import('./auth');
+		const apiKeyPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'api-key') as {
+			schema?: { apikey?: { fields?: Record<string, { defaultValue?: unknown }> } };
+		};
+		const fields = apiKeyPlugin.schema?.apikey?.fields ?? {};
+		// Combined 150/60s (§16.7): sized ABOVE the tier-2 read 100 + write 20 burst.
+		expect(fields.rateLimitMax?.defaultValue).toBe(150);
+		expect(fields.rateLimitTimeWindow?.defaultValue).toBe(60_000);
+	});
+
 	it('disables email/password and configures no social providers', async () => {
 		const { auth } = await import('./auth');
 		expect(auth.options.emailAndPassword?.enabled).toBe(false);

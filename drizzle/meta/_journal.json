@@ -78,6 +78,13 @@
       "when": 1783859626118,
       "tag": "0010_familiar_nemesis",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783861046803,
+      "tag": "0011_petite_blindfold",
+      "breakpoints": true
     }
   ]
 }

@@ -44,6 +44,7 @@ import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/ap
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
 
@@ -97,6 +98,10 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 
 	const { gid } = params;
 	if (!gid) return notFound();
+
+	// TIER-2 read limiter (§16.7): 100/60s per key, enforced AFTER auth (the hook).
+	const limited = await requireRateLimit(principal, 'read');
+	if (limited) return limited;
 
 	// Validate + coerce the query params. A malformed structured param (bad `limit`,
 	// unparseable `from`/`to`) → 422 with field-level details (never a silent ignore,
@@ -167,6 +172,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 
 	const { gid } = params;
 	if (!gid) return notFound();
+
+	// TIER-2 write limiter (§16.7): 20/60s per key, AFTER the scope guard so a read
+	// key hitting a write endpoint gets 403 (not 429) and never consumes this counter.
+	const limited = await requireRateLimit(principal, 'write');
+	if (limited) return limited;
 
 	// Read the raw body ONCE (for the §16.6 fingerprint) and parse it. Unparseable →
 	// JsonBodyError → 400 (mapped by the wrapper). The parsed value is handed to the
