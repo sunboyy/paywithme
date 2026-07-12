@@ -15,13 +15,13 @@
 // a group the key can't see → 404 (conflated). On success we re-read the persisted
 // detail and return the `TransactionDetail` DTO, 201 Created (§16.4 response table).
 
-import { json } from '@sveltejs/kit';
 import { z } from 'zod';
 import { getGroupForUser } from '$lib/server/groups';
 import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
-import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
+import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
 import type { CurrencyCode } from '$lib/money';
 
@@ -60,10 +60,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	const { gid } = params;
 	if (!gid) return notFound();
 
-	// Unparseable body → 400 (via the wrapper). Then validate the {from,to,amount}
-	// shape → 422 with field-level details on failure.
-	const raw = await parseJsonBody(request);
-	const parsed = settleUpSchema.safeParse(raw);
+	// Read the raw body ONCE (for the §16.6 fingerprint) and parse it. Unparseable →
+	// 400 (via the wrapper). Then validate the {from,to,amount} shape → 422 with
+	// field-level details on failure.
+	const { raw: rawBody, value: rawJson } = await readRawJsonBody(request);
+	const parsed = settleUpSchema.safeParse(rawJson);
 	if (!parsed.success) return validationError(parsed.error);
 	const { from, to, amount } = parsed.data;
 
@@ -95,18 +96,27 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 
 	// Delegate to the existing create path (re-validates against active members →
 	// unknown from/to = 422; GroupAccessError → 404). Pass the loaded settlement
-	// currency (trusted group context).
-	const txnId = await createTransaction({
-		userId: principal.userId,
-		groupId: gid,
-		input,
-		settlementCurrency
-	});
+	// currency (trusted group context). Wrapped so a repeated Idempotency-Key replays
+	// the stored 201 instead of recording the settle-up transfer twice (§16.6).
+	const build = async () => {
+		const txnId = await createTransaction({
+			userId: principal.userId,
+			groupId: gid,
+			input,
+			settlementCurrency
+		});
+		const detail = await getTransactionDetail({
+			userId: principal.userId,
+			groupId: gid,
+			txnId
+		});
+		return { status: 201, body: toTransactionDetailDto(detail) };
+	};
 
-	const detail = await getTransactionDetail({
-		userId: principal.userId,
-		groupId: gid,
-		txnId
+	return runCreateWithIdempotency({
+		keyId: principal.keyId,
+		idempotencyKeyHeader: request.headers.get('Idempotency-Key'),
+		rawBody,
+		build
 	});
-	return json(toTransactionDetailDto(detail), { status: 201 });
 });

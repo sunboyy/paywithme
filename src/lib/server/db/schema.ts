@@ -40,6 +40,11 @@
 //     audit trail (PLAN §9, §12.1): no updated_at / no soft-delete; `entity_id`
 //     is deliberately NOT a FK (may dangle after hard-delete); `metadata` is
 //     `jsonb`. The audit-write helper is task 4.6.
+//   - idempotency_key (task #20) → re-exported from `idempotency-schema.ts`,
+//     hand-authored (PLAN §16.6): the `/api/v1` write idempotency store. Maps
+//     (calling api_key id + client `Idempotency-Key` + request fingerprint) → the
+//     stored response, pending-first under a UNIQUE `(key_id, idempotency_key)` so
+//     concurrent retries race safely; 24h TTL via `expires_at`.
 
 export * from './auth-schema';
 export * from './api-key-schema';
@@ -48,3 +53,4 @@ export * from './groups-schema';
 export * from './currencies-schema';
 export * from './transactions-schema';
 export * from './audit-schema';
+export * from './idempotency-schema';

@@ -16,75 +16,96 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //   - `listTransactions` filters by type/category and shapes rows newest-first.
 
 // --- Fluent DB mock -------------------------------------------------------
-const { selectQueue, inserts, updates, deletes, makeDb, lastTxHandle } = vi.hoisted(() => {
-	const selectQueue: unknown[][] = [];
-	// Records: which table + values for every insert, plus the tx handle used.
-	const inserts: { table: string; values: Record<string, unknown>; via: object }[] = [];
-	// Records: which table + the .set() values for every update, plus the tx handle.
-	const updates: { table: string; values: Record<string, unknown>; via: object }[] = [];
-	// Records: which table was deleted from, plus the tx handle.
-	const deletes: { table: string; via: object }[] = [];
-	const lastTxHandle: { current: object | null } = { current: null };
+const { selectQueue, inserts, updates, deletes, updateReturningQueue, makeDb, lastTxHandle } =
+	vi.hoisted(() => {
+		const selectQueue: unknown[][] = [];
+		// Records: which table + values for every insert, plus the tx handle used.
+		const inserts: { table: string; values: Record<string, unknown>; via: object }[] = [];
+		// Records: which table + the .set() values for every update, plus the tx handle.
+		const updates: { table: string; values: Record<string, unknown>; via: object }[] = [];
+		// Records: which table was deleted from, plus the tx handle.
+		const deletes: { table: string; via: object }[] = [];
+		// Row-sets the NEXT update `.returning()` resolves to (rows-affected count). Empty
+		// → default to ONE affected row so a real state transition writes its audit; push
+		// `[]` to simulate a NO-OP update (0 rows affected → audit gated off, §16.6).
+		const updateReturningQueue: unknown[][] = [];
+		const lastTxHandle: { current: object | null } = { current: null };
 
-	function nextSelectRows(): unknown[] {
-		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
-	}
-
-	function selectChain() {
-		const rows = nextSelectRows();
-		const chain: Record<string, unknown> = {};
-		const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
-		for (const m of methods) chain[m] = () => chain;
-		chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
-		return chain;
-	}
-
-	function tableName(table: unknown): string {
-		// Drizzle tables carry their SQL name on a Symbol; fall back to a tag we set
-		// in the mock. We instead tag inserts by identity in the executor below.
-		return (table as { __name?: string }).__name ?? 'unknown';
-	}
-
-	function makeExecutor(via: object) {
-		return {
-			select: () => selectChain(),
-			insert: (table: unknown) => ({
-				values(values: Record<string, unknown>) {
-					inserts.push({ table: tableName(table), values, via });
-					return Promise.resolve(undefined);
-				}
-			}),
-			update: (table: unknown) => {
-				const chain: Record<string, unknown> = {};
-				chain.set = (values: Record<string, unknown>) => {
-					updates.push({ table: tableName(table), values, via });
-					return chain;
-				};
-				chain.where = () => chain;
-				chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
-				return chain;
-			},
-			delete: (table: unknown) => ({
-				where: () => {
-					deletes.push({ table: tableName(table), via });
-					return Promise.resolve(undefined);
-				}
-			})
-		};
-	}
-
-	const baseExecutor = makeExecutor({ name: 'db' });
-	const db = {
-		...baseExecutor,
-		transaction: (cb: (tx: object) => Promise<unknown>) => {
-			const tx = makeExecutor({ name: 'tx' });
-			lastTxHandle.current = tx;
-			return cb(tx);
+		function nextSelectRows(): unknown[] {
+			return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
 		}
-	};
 
-	return { selectQueue, inserts, updates, deletes, makeDb: () => db, lastTxHandle };
-});
+		function selectChain() {
+			const rows = nextSelectRows();
+			const chain: Record<string, unknown> = {};
+			const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
+			for (const m of methods) chain[m] = () => chain;
+			chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
+			return chain;
+		}
+
+		function tableName(table: unknown): string {
+			// Drizzle tables carry their SQL name on a Symbol; fall back to a tag we set
+			// in the mock. We instead tag inserts by identity in the executor below.
+			return (table as { __name?: string }).__name ?? 'unknown';
+		}
+
+		function makeExecutor(via: object) {
+			return {
+				select: () => selectChain(),
+				insert: (table: unknown) => ({
+					values(values: Record<string, unknown>) {
+						inserts.push({ table: tableName(table), values, via });
+						return Promise.resolve(undefined);
+					}
+				}),
+				update: (table: unknown) => {
+					const chain: Record<string, unknown> = {};
+					chain.set = (values: Record<string, unknown>) => {
+						updates.push({ table: tableName(table), values, via });
+						return chain;
+					};
+					chain.where = () => chain;
+					// `.returning()` resolves to the rows-affected set (softDelete/restore read
+					// its length to gate the audit write, §16.6). Default: ONE affected row.
+					chain.returning = () =>
+						Promise.resolve(
+							updateReturningQueue.length > 0
+								? (updateReturningQueue.shift() as unknown[])
+								: [{ id: 'affected' }]
+						);
+					chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
+					return chain;
+				},
+				delete: (table: unknown) => ({
+					where: () => {
+						deletes.push({ table: tableName(table), via });
+						return Promise.resolve(undefined);
+					}
+				})
+			};
+		}
+
+		const baseExecutor = makeExecutor({ name: 'db' });
+		const db = {
+			...baseExecutor,
+			transaction: (cb: (tx: object) => Promise<unknown>) => {
+				const tx = makeExecutor({ name: 'tx' });
+				lastTxHandle.current = tx;
+				return cb(tx);
+			}
+		};
+
+		return {
+			selectQueue,
+			inserts,
+			updates,
+			deletes,
+			updateReturningQueue,
+			makeDb: () => db,
+			lastTxHandle
+		};
+	});
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
 
@@ -176,6 +197,7 @@ beforeEach(() => {
 	inserts.length = 0;
 	updates.length = 0;
 	deletes.length = 0;
+	updateReturningQueue.length = 0;
 	selectQueue.length = 0;
 	lastTxHandle.current = null;
 });
@@ -1566,6 +1588,25 @@ describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => 
 		expect(audit).toHaveLength(1);
 		expect(audit[0].values.action).toBe('restore');
 		expect((audit[0].via as { name: string }).name).toBe('tx');
+	});
+
+	it('no-op delete (already-deleted → 0 rows affected) → NO audit row (§16.6)', async () => {
+		// access → load txn. The guarded UPDATE affects 0 rows (already soft-deleted), so
+		// the audit write MUST be gated off — idempotent success, no spurious history.
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: new Date() }]);
+		updateReturningQueue.push([]); // 0 rows affected
+		await softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		// The UPDATE still ran (idempotent), but no audit row was appended.
+		expect(updatesTo('transactions')).toHaveLength(1);
+		expect(insertsTo('audit_log')).toHaveLength(0);
+	});
+
+	it('no-op restore (already-live → 0 rows affected) → NO audit row (§16.6)', async () => {
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		updateReturningQueue.push([]); // 0 rows affected
+		await restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
+		expect(updatesTo('transactions')).toHaveLength(1);
+		expect(insertsTo('audit_log')).toHaveLength(0);
 	});
 
 	it('both are access-checked → GroupAccessError, no writes', async () => {

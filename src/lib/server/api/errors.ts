@@ -37,6 +37,14 @@ export const API_ERROR_CODES = {
 	validation_error: 'validation_error',
 	/** 429 — rate limit exceeded (wired by a later ticket, §16.7). */
 	rate_limited: 'rate_limited',
+	/**
+	 * 409 — an idempotency conflict (§16.6). Emitted for BOTH "same `Idempotency-Key`
+	 * + a DIFFERENT request body" (key reused) and "a concurrent retry is still in
+	 * progress" (the pending-first insert lost the race). §16.5's enumerated list
+	 * omits 409, but §16.6 requires it; `details.reason` (`key_reused` | `in_progress`)
+	 * distinguishes the two sub-cases while the top-level `code` stays `conflict`.
+	 */
+	conflict: 'conflict',
 	/** 500 — an uncaught internal error, normalized so no internals leak. */
 	internal_error: 'internal_error'
 } as const;
@@ -52,6 +60,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
 	not_found: 404,
 	validation_error: 422,
 	rate_limited: 429,
+	conflict: 409,
 	internal_error: 500
 };
 
@@ -68,6 +77,7 @@ const DEFAULT_MESSAGE_BY_CODE: Record<ApiErrorCode, string> = {
 	not_found: 'The requested resource was not found.',
 	validation_error: 'The request failed validation.',
 	rate_limited: 'Rate limit exceeded.',
+	conflict: 'The request conflicts with the current state of the resource.',
 	internal_error: 'Internal server error.'
 };
 
@@ -138,6 +148,15 @@ export const notFound = (message?: string): Response => apiError('not_found', me
 export const rateLimited = (message?: string, details?: unknown): Response =>
 	apiError('rate_limited', message, details);
 
+/**
+ * 409 `conflict` — an idempotency conflict (§16.6). Use `details.reason` to name
+ * the sub-case: `key_reused` (same `Idempotency-Key`, different body) or
+ * `in_progress` (a concurrent retry still running under the pending-first insert).
+ * The top-level `code` stays `conflict` either way.
+ */
+export const conflict = (message?: string, details?: unknown): Response =>
+	apiError('conflict', message, details);
+
 /** 500 `internal_error` — normalized uncaught failure, no internals leaked. */
 export const internalError = (message?: string): Response => apiError('internal_error', message);
 
@@ -195,6 +214,7 @@ const HTTP_STATUS_TO_CODE: Record<number, ApiErrorCode> = {
 	401: 'unauthorized',
 	403: 'forbidden_scope',
 	404: 'not_found',
+	409: 'conflict',
 	422: 'validation_error',
 	429: 'rate_limited',
 	500: 'internal_error'

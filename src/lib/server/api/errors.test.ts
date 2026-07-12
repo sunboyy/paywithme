@@ -17,6 +17,7 @@ import {
 	forbiddenScope,
 	notFound,
 	rateLimited,
+	conflict,
 	internalError,
 	validationError,
 	handleApiError,
@@ -40,6 +41,7 @@ describe('apiError / apiErrorEnvelope', () => {
 		['not_found', 404],
 		['validation_error', 422],
 		['rate_limited', 429],
+		['conflict', 409],
 		['internal_error', 500]
 	];
 
@@ -75,9 +77,18 @@ describe('per-code convenience helpers', () => {
 		expect((await read(forbiddenScope())).status).toBe(403);
 		expect((await read(notFound())).status).toBe(404);
 		expect((await read(rateLimited())).status).toBe(429);
+		expect((await read(conflict())).status).toBe(409);
 		expect((await read(internalError())).status).toBe(500);
 
 		expect((await read(forbiddenScope())).body.error.code).toBe('forbidden_scope');
+	});
+
+	it('conflict() carries the §16.6 `reason` detail while the code stays `conflict`', async () => {
+		const { status, body } = await read(conflict('Key reused.', { reason: 'key_reused' }));
+		expect(status).toBe(409);
+		expect(body.error.code).toBe('conflict');
+		expect(body.error.message).toBe('Key reused.');
+		expect(body.error.details).toEqual({ reason: 'key_reused' });
 	});
 
 	it('unauthorized() matches the #14 hook 401 shape (code + human message)', async () => {

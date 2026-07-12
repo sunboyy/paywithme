@@ -42,8 +42,9 @@ import {
 } from '$lib/server/transactions';
 import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
-import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
+import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
 
 /** Default page size when `limit` is omitted (§16.4). */
@@ -151,6 +152,12 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 // currency is GROUP CONTEXT loaded by the service from the group row — NEVER
 // trusted from the payload. On success we re-read the persisted detail and return
 // the SAME `TransactionDetail` DTO the GET routes serve (§16.4), 201 Created.
+//
+// IDEMPOTENCY (§16.6): when an `Idempotency-Key` header is present, the create +
+// re-read is run AT MOST ONCE per (calling key + request body) via
+// `runCreateWithIdempotency` — a same-body retry replays the stored 201 (no
+// duplicate txn / audit row), a different body → 409, a concurrent retry → 409.
+// Absent header → at-least-once (unchanged).
 export const POST = withWriteErrorHandling(async ({ locals, params, request }) => {
 	const principal = locals.apiKey;
 	if (!principal) return unauthorized();
@@ -161,23 +168,32 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	const { gid } = params;
 	if (!gid) return notFound();
 
-	// Unparseable body → JsonBodyError → 400 (mapped by the wrapper). The parsed
-	// value is handed to the service VERBATIM as the full internal input.
-	const input = await parseJsonBody(request);
+	// Read the raw body ONCE (for the §16.6 fingerprint) and parse it. Unparseable →
+	// JsonBodyError → 400 (mapped by the wrapper). The parsed value is handed to the
+	// service VERBATIM as the full internal input.
+	const { raw, value: input } = await readRawJsonBody(request);
 
-	// Throws TransactionValidationError (→ 422 field-level), GroupAccessError (→ 404),
-	// all mapped by the wrapper. Settlement currency loaded server-side from the group.
-	const txnId = await createTransaction({
-		userId: principal.userId,
-		groupId: gid,
-		input
-	});
+	// The create (service call → 422/404 via the wrapper; settlement currency loaded
+	// server-side from the group) + the 201 DTO re-read (§16.4). Wrapped so a repeated
+	// Idempotency-Key replays this exact response instead of re-running it.
+	const build = async () => {
+		const txnId = await createTransaction({
+			userId: principal.userId,
+			groupId: gid,
+			input
+		});
+		const detail = await getTransactionDetail({
+			userId: principal.userId,
+			groupId: gid,
+			txnId
+		});
+		return { status: 201, body: toTransactionDetailDto(detail) };
+	};
 
-	// Re-read the persisted detail to build the 201 response DTO (§16.4).
-	const detail = await getTransactionDetail({
-		userId: principal.userId,
-		groupId: gid,
-		txnId
+	return runCreateWithIdempotency({
+		keyId: principal.keyId,
+		idempotencyKeyHeader: request.headers.get('Idempotency-Key'),
+		rawBody: raw,
+		build
 	});
-	return json(toTransactionDetailDto(detail), { status: 201 });
 });

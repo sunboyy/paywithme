@@ -21,6 +21,9 @@
 //     with the domain message and no field-level details.
 //   - `GroupAccessError` / `TransactionNotFoundError` → 404 `not_found`, CONFLATED
 //     with each other AND with "absent" (PLAN §16.5 / §12) so existence never leaks.
+//   - `IdempotencyConflictError` → 409 `conflict` (§16.6) with `details.reason`
+//     (`key_reused` = same key + different body; `in_progress` = a concurrent retry
+//     lost the pending-first race).
 //
 // Anything else falls through to `handleApiError` (redirect re-throw / HttpError
 // mapping / opaque 500). Wrapping a write handler in `withWriteErrorHandling` gives
@@ -34,7 +37,15 @@ import {
 	TransactionDeletedError,
 	TransactionNotFoundError
 } from '$lib/server/transactions';
-import { badRequest, handleApiError, notFound, validationError, apiError } from './errors';
+import {
+	badRequest,
+	handleApiError,
+	notFound,
+	validationError,
+	apiError,
+	conflict
+} from './errors';
+import { IdempotencyConflictError } from './idempotency';
 
 /**
  * The request body could not be parsed as JSON. Raised by {@link parseJsonBody} so
@@ -58,6 +69,22 @@ export class JsonBodyError extends Error {
 export async function parseJsonBody(request: Request): Promise<unknown> {
 	try {
 		return await request.json();
+	} catch {
+		throw new JsonBodyError();
+	}
+}
+
+/**
+ * Read a request's body ONCE as raw text AND parse it as JSON, raising
+ * {@link JsonBodyError} (→ 400) on anything unparseable. The raw string is returned
+ * alongside the parsed value so an idempotency handler can fingerprint the EXACT
+ * bytes the client sent (§16.6) without re-reading the already-consumed body — a
+ * `Request` body stream can only be read once.
+ */
+export async function readRawJsonBody(request: Request): Promise<{ raw: string; value: unknown }> {
+	const raw = await request.text();
+	try {
+		return { raw, value: JSON.parse(raw) };
 	} catch {
 		throw new JsonBodyError();
 	}
@@ -91,6 +118,12 @@ export function mapWriteError(err: unknown): Response {
 	// never leaks (PLAN §16.5 / §12).
 	if (err instanceof GroupAccessError || err instanceof TransactionNotFoundError) {
 		return notFound();
+	}
+	// An idempotency conflict (§16.6) → 409 `conflict`. `details.reason` names the
+	// sub-case (`key_reused` = same key + different body; `in_progress` = a concurrent
+	// retry lost the pending-first race) while the top-level `code` stays `conflict`.
+	if (err instanceof IdempotencyConflictError) {
+		return conflict(err.message, { reason: err.reason });
 	}
 	// Unknown: let the shared normalizer decide (re-throws redirects, maps HttpErrors,
 	// collapses everything else to an opaque 500).

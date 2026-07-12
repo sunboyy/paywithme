@@ -1289,9 +1289,11 @@ export async function updateTransaction({
 /**
  * Soft-delete a transaction (PLAN §9, §12.1) — set `deleted_at = now()`, guarded by
  * `isNull(deleted_at)` so it is IDEMPOTENT (a no-op on an already-deleted txn rather
- * than overwriting the original delete time). Access-checked; writes a `delete`
- * audit row IN THE SAME `db.transaction` (the audit trail is append-only and
- * OUTLIVES the soft-delete — the row is never removed). Mirrors `softDeleteGroup`.
+ * than overwriting the original delete time). Access-checked; on an ACTUAL state
+ * transition (rows-affected > 0) writes a `delete` audit row IN THE SAME
+ * `db.transaction` (the audit trail is append-only and OUTLIVES the soft-delete —
+ * the row is never removed). A no-op delete records NO audit row (§16.6 — audit
+ * captures state transitions only). Mirrors `softDeleteGroup`.
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
@@ -1315,29 +1317,37 @@ export async function softDeleteTransaction({
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
 
 		// Only stamp `deleted_at` if still null → idempotent (no-op on an already
-		// soft-deleted txn; keeps the original delete time + audit history).
-		await tx
+		// soft-deleted txn; keeps the original delete time + audit history). `.returning`
+		// yields one row per AFFECTED row, so its length is the rows-affected count.
+		const affected = await tx
 			.update(transactions)
 			.set({ deletedAt: now() })
-			.where(and(eq(transactions.id, txnId), isNull(transactions.deletedAt)));
+			.where(and(eq(transactions.id, txnId), isNull(transactions.deletedAt)))
+			.returning({ id: transactions.id });
 
-		await writeAuditLog(tx, {
-			groupId,
-			actorUserId: actor,
-			action: 'delete',
-			entityType: 'transaction',
-			entityId: txnId,
-			summary: `Deleted transaction '${existing.title}'`,
-			metadata: { title: existing.title }
-		});
+		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op delete (the txn was
+		// already deleted → 0 rows affected) is an idempotent success with NO new audit
+		// row. Gate the write on rows-affected > 0.
+		if (affected.length > 0) {
+			await writeAuditLog(tx, {
+				groupId,
+				actorUserId: actor,
+				action: 'delete',
+				entityType: 'transaction',
+				entityId: txnId,
+				summary: `Deleted transaction '${existing.title}'`,
+				metadata: { title: existing.title }
+			});
+		}
 	});
 }
 
 /**
  * Restore a soft-deleted transaction (PLAN §9, §12.1) — clear `deleted_at`, guarded
  * by `isNotNull(deleted_at)` so restoring a LIVE txn is a no-op. Non-destructive (no
- * confirmation needed). Access-checked; writes a `restore` audit row IN THE SAME
- * `db.transaction`.
+ * confirmation needed). Access-checked; on an ACTUAL state transition
+ * (rows-affected > 0) writes a `restore` audit row IN THE SAME `db.transaction`. A
+ * no-op restore records NO audit row (§16.6 — audit captures state transitions only).
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
@@ -1358,20 +1368,27 @@ export async function restoreTransaction({
 		await assertGroupAccess(userId, groupId, tx);
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
 
-		// Only clear if currently deleted → no-op on a live txn.
-		await tx
+		// Only clear if currently deleted → no-op on a live txn. `.returning` yields one
+		// row per AFFECTED row, so its length is the rows-affected count.
+		const affected = await tx
 			.update(transactions)
 			.set({ deletedAt: null })
-			.where(and(eq(transactions.id, txnId), isNotNull(transactions.deletedAt)));
+			.where(and(eq(transactions.id, txnId), isNotNull(transactions.deletedAt)))
+			.returning({ id: transactions.id });
 
-		await writeAuditLog(tx, {
-			groupId,
-			actorUserId: actor,
-			action: 'restore',
-			entityType: 'transaction',
-			entityId: txnId,
-			summary: `Restored transaction '${existing.title}'`,
-			metadata: { title: existing.title }
-		});
+		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op restore (the txn was
+		// already live → 0 rows affected) is an idempotent success with NO new audit row.
+		// Gate the write on rows-affected > 0.
+		if (affected.length > 0) {
+			await writeAuditLog(tx, {
+				groupId,
+				actorUserId: actor,
+				action: 'restore',
+				entityType: 'transaction',
+				entityId: txnId,
+				summary: `Restored transaction '${existing.title}'`,
+				metadata: { title: existing.title }
+			});
+		}
 	});
 }

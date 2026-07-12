@@ -27,6 +27,57 @@ vi.mock('$lib/server/transactions', async (importOriginal) => {
 	return { ...actual, createTransaction, getTransactionDetail };
 });
 
+// Swap ONLY the DB-backed idempotency store for an in-memory one (§16.6) so the
+// header path exercises the REAL `withIdempotency` semantics without a database.
+const { memoryStore } = vi.hoisted(() => {
+	type Row = {
+		requestHash: string;
+		status: 'pending' | 'completed';
+		responseStatus: number | null;
+		responseBody: unknown;
+	};
+	const rows = new Map<string, Row>();
+	const k = (keyId: string, ik: string) => `${keyId}::${ik}`;
+	const memoryStore = {
+		rows,
+		async insertPending(row: {
+			keyId: string;
+			idempotencyKey: string;
+			requestHash: string;
+		}): Promise<boolean> {
+			const key = k(row.keyId, row.idempotencyKey);
+			if (rows.has(key)) return false;
+			rows.set(key, {
+				requestHash: row.requestHash,
+				status: 'pending',
+				responseStatus: null,
+				responseBody: null
+			});
+			return true;
+		},
+		async load(keyId: string, ik: string): Promise<Row | null> {
+			return rows.get(k(keyId, ik)) ?? null;
+		},
+		async markCompleted(
+			keyId: string,
+			ik: string,
+			response: { status: number; body: unknown }
+		): Promise<void> {
+			const row = rows.get(k(keyId, ik));
+			if (row) {
+				row.status = 'completed';
+				row.responseStatus = response.status;
+				row.responseBody = response.body;
+			}
+		}
+	};
+	return { memoryStore };
+});
+vi.mock('$lib/server/api/idempotency', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/api/idempotency')>();
+	return { ...actual, createDbIdempotencyStore: () => memoryStore };
+});
+
 import { POST } from './+server';
 import { TransactionValidationError } from '$lib/server/transactions';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
@@ -47,13 +98,16 @@ function makeEvent(
 	{
 		apiKey = writePrincipal,
 		gid = 'g1',
-		raw
-	}: { apiKey?: ApiKeyPrincipal; gid?: string; raw?: string } = {}
+		raw,
+		idempotencyKey
+	}: { apiKey?: ApiKeyPrincipal; gid?: string; raw?: string; idempotencyKey?: string } = {}
 ) {
 	const url = new URL(`http://localhost/api/v1/groups/${gid}/settle-up`);
+	const headers: Record<string, string> = { 'content-type': 'application/json' };
+	if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
 	const request = new Request(url, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers,
 		body: raw ?? JSON.stringify(body)
 	});
 	return {
@@ -93,7 +147,10 @@ const transferDetail = {
 	input: { type: 'transfer', title: 'Debt settlement', secret: 'internal' }
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	memoryStore.rows.clear();
+});
 
 describe('POST /api/v1/groups/{gid}/settle-up', () => {
 	it('builds a single-payer Transfer (rate 1, "Debt settlement") and → 201', async () => {
@@ -197,5 +254,61 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 		expect(status).toBe(422);
 		expect(body.error.code).toBe('validation_error');
 		expect(body.error.details.fieldErrors.payers).toBeDefined();
+	});
+
+	describe('Idempotency-Key (§16.6)', () => {
+		it('same key + same body → settle-up runs ONCE and the 2nd call REPLAYS the 201', async () => {
+			getGroupForUser.mockResolvedValue(group);
+			createTransaction.mockResolvedValue('t_settle');
+			getTransactionDetail.mockResolvedValue(transferDetail);
+
+			const payload = { from: 'm1', to: 'm2', amount: 5000 };
+			const first = await read(
+				(await POST(makeEvent(payload, { idempotencyKey: 'settle-1' }))) as Response
+			);
+			const second = await read(
+				(await POST(makeEvent(payload, { idempotencyKey: 'settle-1' }))) as Response
+			);
+
+			expect(first.status).toBe(201);
+			expect(second.status).toBe(201);
+			expect(second.body).toEqual(first.body);
+			// No duplicate settle-up transfer recorded.
+			expect(createTransaction).toHaveBeenCalledTimes(1);
+		});
+
+		it('same key + DIFFERENT body → 409 conflict (key_reused)', async () => {
+			getGroupForUser.mockResolvedValue(group);
+			createTransaction.mockResolvedValue('t_settle');
+			getTransactionDetail.mockResolvedValue(transferDetail);
+
+			const first = await read(
+				(await POST(
+					makeEvent({ from: 'm1', to: 'm2', amount: 5000 }, { idempotencyKey: 'settle-2' })
+				)) as Response
+			);
+			expect(first.status).toBe(201);
+
+			const second = await read(
+				(await POST(
+					makeEvent({ from: 'm1', to: 'm2', amount: 9999 }, { idempotencyKey: 'settle-2' })
+				)) as Response
+			);
+			expect(second.status).toBe(409);
+			expect(second.body.error.code).toBe('conflict');
+			expect(second.body.error.details.reason).toBe('key_reused');
+			expect(createTransaction).toHaveBeenCalledTimes(1);
+		});
+
+		it('NO header → settle-up runs on every call (at-least-once, unchanged)', async () => {
+			getGroupForUser.mockResolvedValue(group);
+			createTransaction.mockResolvedValue('t_settle');
+			getTransactionDetail.mockResolvedValue(transferDetail);
+
+			const payload = { from: 'm1', to: 'm2', amount: 5000 };
+			await read((await POST(makeEvent(payload))) as Response);
+			await read((await POST(makeEvent(payload))) as Response);
+			expect(createTransaction).toHaveBeenCalledTimes(2);
+		});
 	});
 });

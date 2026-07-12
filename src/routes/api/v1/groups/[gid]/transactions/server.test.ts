@@ -25,6 +25,57 @@ vi.mock('$lib/server/transactions', async (importOriginal) => {
 	return { ...actual, listTransactions, createTransaction, getTransactionDetail };
 });
 
+// Swap ONLY the DB-backed idempotency store for an in-memory one (§16.6) so the
+// header path exercises the REAL `withIdempotency` semantics without a database.
+const { memoryStore } = vi.hoisted(() => {
+	type Row = {
+		requestHash: string;
+		status: 'pending' | 'completed';
+		responseStatus: number | null;
+		responseBody: unknown;
+	};
+	const rows = new Map<string, Row>();
+	const k = (keyId: string, ik: string) => `${keyId}::${ik}`;
+	const memoryStore = {
+		rows,
+		async insertPending(row: {
+			keyId: string;
+			idempotencyKey: string;
+			requestHash: string;
+		}): Promise<boolean> {
+			const key = k(row.keyId, row.idempotencyKey);
+			if (rows.has(key)) return false;
+			rows.set(key, {
+				requestHash: row.requestHash,
+				status: 'pending',
+				responseStatus: null,
+				responseBody: null
+			});
+			return true;
+		},
+		async load(keyId: string, ik: string): Promise<Row | null> {
+			return rows.get(k(keyId, ik)) ?? null;
+		},
+		async markCompleted(
+			keyId: string,
+			ik: string,
+			response: { status: number; body: unknown }
+		): Promise<void> {
+			const row = rows.get(k(keyId, ik));
+			if (row) {
+				row.status = 'completed';
+				row.responseStatus = response.status;
+				row.responseBody = response.body;
+			}
+		}
+	};
+	return { memoryStore };
+});
+vi.mock('$lib/server/api/idempotency', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/server/api/idempotency')>();
+	return { ...actual, createDbIdempotencyStore: () => memoryStore };
+});
+
 import { GET, POST } from './+server';
 import {
 	createdAtInRange,
@@ -63,13 +114,16 @@ function makePostEvent(
 	{
 		gid = 'g1',
 		apiKey = writePrincipal,
-		raw
-	}: { gid?: string; apiKey?: ApiKeyPrincipal; raw?: string } = {}
+		raw,
+		idempotencyKey
+	}: { gid?: string; apiKey?: ApiKeyPrincipal; raw?: string; idempotencyKey?: string } = {}
 ) {
 	const url = new URL(`http://localhost/api/v1/groups/${gid}/transactions`);
+	const headers: Record<string, string> = { 'content-type': 'application/json' };
+	if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
 	const request = new Request(url, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers,
 		body: raw ?? JSON.stringify(body)
 	});
 	return {
@@ -127,7 +181,10 @@ function items(n: number) {
 	}));
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+	vi.clearAllMocks();
+	memoryStore.rows.clear();
+});
 
 describe('GET /api/v1/groups/{gid}/transactions', () => {
 	it('default limit 50: over-fetches 51 and forwards empty filters', async () => {
@@ -314,5 +371,77 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 		const { status, body } = await read((await POST(makePostEvent(validInput))) as Response);
 		expect(status).toBe(404);
 		expect(body.error.code).toBe('not_found');
+	});
+
+	describe('Idempotency-Key (§16.6)', () => {
+		it('same key + same body → the service runs ONCE and the 2nd call REPLAYS the 201', async () => {
+			createTransaction.mockResolvedValue('t_new');
+			getTransactionDetail.mockResolvedValue(createdDetail);
+
+			const first = await read(
+				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-1' }))) as Response
+			);
+			const second = await read(
+				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-1' }))) as Response
+			);
+
+			expect(first.status).toBe(201);
+			expect(second.status).toBe(201);
+			// The stored response is replayed byte-for-byte — no duplicate create.
+			expect(second.body).toEqual(first.body);
+			expect(createTransaction).toHaveBeenCalledTimes(1);
+			expect(getTransactionDetail).toHaveBeenCalledTimes(1);
+		});
+
+		it('same key + DIFFERENT body → 409 conflict (key_reused); no second create', async () => {
+			createTransaction.mockResolvedValue('t_new');
+			getTransactionDetail.mockResolvedValue(createdDetail);
+
+			const first = await read(
+				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-2' }))) as Response
+			);
+			expect(first.status).toBe(201);
+
+			const second = await read(
+				(await POST(
+					makePostEvent({ ...validInput, title: 'Different' }, { idempotencyKey: 'key-2' })
+				)) as Response
+			);
+			expect(second.status).toBe(409);
+			expect(second.body.error.code).toBe('conflict');
+			expect(second.body.error.details.reason).toBe('key_reused');
+			expect(createTransaction).toHaveBeenCalledTimes(1);
+		});
+
+		it('a still-pending row (concurrent retry) → 409 conflict (in_progress)', async () => {
+			// Seed a pending row for this key+body, simulating a concurrent request that
+			// won the pending-first insert and is still running.
+			const raw = JSON.stringify(validInput);
+			const { fingerprintRequestBody } = await import('$lib/server/api/idempotency');
+			memoryStore.rows.set(`${writePrincipal.keyId}::key-3`, {
+				requestHash: fingerprintRequestBody(raw),
+				status: 'pending',
+				responseStatus: null,
+				responseBody: null
+			});
+
+			const { status, body } = await read(
+				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-3' }))) as Response
+			);
+			expect(status).toBe(409);
+			expect(body.error.code).toBe('conflict');
+			expect(body.error.details.reason).toBe('in_progress');
+			// The create is never attempted — the row is already claimed.
+			expect(createTransaction).not.toHaveBeenCalled();
+		});
+
+		it('NO header → the service runs on every call (at-least-once, unchanged)', async () => {
+			createTransaction.mockResolvedValue('t_new');
+			getTransactionDetail.mockResolvedValue(createdDetail);
+
+			await read((await POST(makePostEvent(validInput))) as Response);
+			await read((await POST(makePostEvent(validInput))) as Response);
+			expect(createTransaction).toHaveBeenCalledTimes(2);
+		});
 	});
 });
