@@ -52,3 +52,22 @@ test('/docs/api renders the quickstart and links to the raw spec', async ({ page
 		'/api/v1/openapi.yaml'
 	);
 });
+
+test('the quickstart curls address the host the docs are served from, not an example domain', async ({
+	page,
+	baseURL
+}) => {
+	// The commands are copy-pasteable ONLY if they point at a host that exists. This
+	// asserts against the real served HTML — the origin is resolved per request (or
+	// from `BETTER_AUTH_URL`), so what a reader copies works without editing.
+	await page.goto('/docs/api');
+
+	const commands = page.locator('pre code');
+	await expect(commands.first()).toBeVisible();
+	const text = (await commands.allInnerTexts()).join('\n');
+
+	expect(text).toContain(`${baseURL}/api/v1/groups`);
+	expect(text).toContain(`${baseURL}/api/v1/groups/grp_tokyo/transactions`);
+	// And no placeholder domain anywhere on the page.
+	await expect(page.locator('body')).not.toContainText('paywithme.example');
+});

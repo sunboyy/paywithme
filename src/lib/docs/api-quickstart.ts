@@ -24,12 +24,38 @@ export const OPENAPI_YAML_PATH = '/api/v1/openapi.yaml';
 export const OPENAPI_JSON_PATH = '/api/v1/openapi.json';
 
 /**
- * The origin placeholder used throughout the quickstart. A reader pastes their own
- * deployment's origin (or `http://localhost:5173` in local dev); the API itself is
- * host-agnostic, which is why the spec's `servers` entry is the relative
- * {@link API_BASE_PATH}.
+ * Last-resort origin for the quickstart, used ONLY when no real one is available
+ * (i.e. a caller that has neither a request nor `BETTER_AUTH_URL` — in practice just
+ * unit tests). The rendered docs never show this: `/docs/api` resolves the origin
+ * from the deployment it is actually being served by (see `resolveDocsOrigin`), so a
+ * reader can copy a `curl` that works against THIS host without editing it.
+ *
+ * The API itself stays host-agnostic — which is why the spec's `servers` entry
+ * remains the relative {@link API_BASE_PATH}.
  */
-export const EXAMPLE_ORIGIN = 'https://paywithme.example';
+export const FALLBACK_ORIGIN = 'http://localhost:5173';
+
+/**
+ * The origin the quickstart's `curl` examples should address.
+ *
+ * Precedence, and why:
+ *  1. **`BETTER_AUTH_URL`** — the app's own canonical origin (`.env`, already the
+ *     WebAuthn origin). It is the right answer whenever it is set, because behind a
+ *     proxy or on a preview URL the request host may not be the origin operators
+ *     actually call.
+ *  2. **The live request origin** — zero-config and always correct for whatever host
+ *     the reader is reading the docs on.
+ *  3. {@link FALLBACK_ORIGIN} — only if neither is available.
+ *
+ * A trailing slash is trimmed so `${origin}${API_BASE_PATH}` never doubles up.
+ */
+export function resolveDocsOrigin(options: {
+	requestOrigin?: string;
+	configuredOrigin?: string;
+}): string {
+	const candidate = options.configuredOrigin?.trim() || options.requestOrigin?.trim();
+	return (candidate || FALLBACK_ORIGIN).replace(/\/+$/, '');
+}
 
 /** The shell variable the examples read the key from — never a key inline. */
 export const KEY_ENV_VAR = 'PWM_API_KEY';
@@ -126,23 +152,27 @@ export function formatJson(value: unknown): string {
 	return JSON.stringify(value, null, 2);
 }
 
-/** The READ step's `curl`, verbatim. */
-export const QUICKSTART_READ_COMMAND = [
-	`curl -sS ${EXAMPLE_ORIGIN}${API_BASE_PATH}/groups \\`,
-	`  -H "Authorization: Bearer $${KEY_ENV_VAR}"`
-].join('\n');
+/** The READ step's `curl`, against the origin the docs are being served from. */
+export function quickstartReadCommand(origin: string): string {
+	return [
+		`curl -sS ${origin}${API_BASE_PATH}/groups \\`,
+		`  -H "Authorization: Bearer $${KEY_ENV_VAR}"`
+	].join('\n');
+}
 
 /**
- * The WRITE step's `curl`, verbatim — the header trio an agent must get right
+ * The WRITE step's `curl` — the header trio an agent must get right
  * (`Authorization: Bearer`, `Content-Type: application/json`, `Idempotency-Key`) plus
  * the exact money JSON. The `Idempotency-Key` is a value YOU choose and REUSE on a
  * retry: same key + same body replays the original 201 instead of recording a second
  * ramen.
  */
-export const QUICKSTART_WRITE_COMMAND = [
-	`curl -sS -X POST ${EXAMPLE_ORIGIN}${API_BASE_PATH}/groups/grp_tokyo/transactions \\`,
-	`  -H "Authorization: Bearer $${KEY_ENV_VAR}" \\`,
-	`  -H "Content-Type: application/json" \\`,
-	`  -H "Idempotency-Key: ramen-2026-05-04-01" \\`,
-	`  -d '${formatJson(QUICKSTART_CREATE_BODY)}'`
-].join('\n');
+export function quickstartWriteCommand(origin: string): string {
+	return [
+		`curl -sS -X POST ${origin}${API_BASE_PATH}/groups/grp_tokyo/transactions \\`,
+		`  -H "Authorization: Bearer $${KEY_ENV_VAR}" \\`,
+		`  -H "Content-Type: application/json" \\`,
+		`  -H "Idempotency-Key: ramen-2026-05-04-01" \\`,
+		`  -d '${formatJson(QUICKSTART_CREATE_BODY)}'`
+	].join('\n');
+}

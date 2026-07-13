@@ -37,10 +37,15 @@ import {
 	QUICKSTART_CREATE_RESPONSE,
 	QUICKSTART_GROUPS_RESPONSE,
 	QUICKSTART_ERROR_RESPONSE,
-	QUICKSTART_READ_COMMAND,
-	QUICKSTART_WRITE_COMMAND
+	quickstartReadCommand,
+	quickstartWriteCommand,
+	resolveDocsOrigin,
+	FALLBACK_ORIGIN
 } from './api-quickstart';
 import { createComponentSchemaChecker, loadOpenApiYaml } from './openapi';
+
+/** A stand-in for "whatever origin the docs are served from" (see `resolveDocsOrigin`). */
+const TEST_ORIGIN = 'https://pay.example.org';
 
 // The spec's component schemas, compiled ONCE. The SAME checker backs the LIVE
 // contract test (`tests/integration/api-contract.test.ts`), so "valid" means exactly
@@ -250,13 +255,68 @@ describe('the /docs/api quickstart matches the spec', () => {
 	});
 
 	it('shows the headers an agent must get right', () => {
-		expect(QUICKSTART_READ_COMMAND).toContain('Authorization: Bearer');
-		expect(QUICKSTART_WRITE_COMMAND).toContain('Authorization: Bearer');
-		expect(QUICKSTART_WRITE_COMMAND).toContain('Idempotency-Key:');
-		expect(QUICKSTART_WRITE_COMMAND).toContain('Content-Type: application/json');
+		const read = quickstartReadCommand(TEST_ORIGIN);
+		const write = quickstartWriteCommand(TEST_ORIGIN);
+
+		expect(read).toContain('Authorization: Bearer');
+		expect(write).toContain('Authorization: Bearer');
+		expect(write).toContain('Idempotency-Key:');
+		expect(write).toContain('Content-Type: application/json');
 		// The read step is a GET; the write step posts to the real create path.
-		expect(QUICKSTART_WRITE_COMMAND).toContain('/api/v1/groups/grp_tokyo/transactions');
-		expect(QUICKSTART_READ_COMMAND).toContain('/api/v1/groups');
+		expect(write).toContain('/api/v1/groups/grp_tokyo/transactions');
+		expect(read).toContain('/api/v1/groups');
+	});
+
+	it('addresses the CALLER’S origin — no example host is baked into the commands', () => {
+		// The whole point of parameterizing the origin: whatever host the docs are
+		// served from is the host the copied `curl` hits. A literal origin creeping back
+		// into the builders (or a stray placeholder domain) fails here.
+		const read = quickstartReadCommand(TEST_ORIGIN);
+		const write = quickstartWriteCommand(TEST_ORIGIN);
+
+		expect(read).toContain(`${TEST_ORIGIN}/api/v1/groups`);
+		expect(write).toContain(`${TEST_ORIGIN}/api/v1/groups/grp_tokyo/transactions`);
+		for (const command of [read, write]) {
+			// Exactly ONE origin per command, and it's the one we passed in.
+			expect(command.match(/https?:\/\/[^\s/]+/g)).toEqual([TEST_ORIGIN]);
+		}
+	});
+
+	describe('resolveDocsOrigin', () => {
+		it('prefers the configured canonical origin over the request host', () => {
+			// Behind a proxy / on a preview URL the request host is not what operators
+			// call, so `BETTER_AUTH_URL` wins whenever it is set.
+			expect(
+				resolveDocsOrigin({
+					requestOrigin: 'https://preview-xyz.vercel.app',
+					configuredOrigin: 'https://pay.example.org'
+				})
+			).toBe('https://pay.example.org');
+		});
+
+		it('falls back to the live request origin when nothing is configured', () => {
+			// Zero-config: the docs still show a `curl` that works against THIS host.
+			expect(
+				resolveDocsOrigin({ requestOrigin: 'https://pay.example.org', configuredOrigin: undefined })
+			).toBe('https://pay.example.org');
+			// A blank/whitespace env var is treated as unset, not as an empty origin.
+			expect(
+				resolveDocsOrigin({ requestOrigin: 'https://pay.example.org', configuredOrigin: '  ' })
+			).toBe('https://pay.example.org');
+		});
+
+		it('trims a trailing slash so the base path never doubles up', () => {
+			expect(resolveDocsOrigin({ configuredOrigin: 'https://pay.example.org/' })).toBe(
+				'https://pay.example.org'
+			);
+			expect(
+				quickstartReadCommand(resolveDocsOrigin({ configuredOrigin: 'https://x.test/' }))
+			).toContain('https://x.test/api/v1/groups');
+		});
+
+		it('falls back to localhost only when there is neither a request nor config', () => {
+			expect(resolveDocsOrigin({})).toBe(FALLBACK_ORIGIN);
+		});
 	});
 });
 
