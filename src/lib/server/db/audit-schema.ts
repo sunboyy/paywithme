@@ -32,9 +32,15 @@ export const auditLog = pgTable(
 		id: text('id')
 			.primaryKey()
 			.$defaultFn(() => crypto.randomUUID()),
-		groupId: text('group_id')
-			.notNull()
-			.references(() => groups.id, { onDelete: 'cascade' }),
+		// NULLABLE — an ACCOUNT-LEVEL action has no group (#23 / PLAN §16.8: API-key
+		// create + revoke are performed by a user against their own account, not
+		// inside any group). Group-scoped mutations (transactions, members, invites,
+		// group settings) still ALWAYS carry a group id; the read side
+		// (`activity.ts`) filters on `group_id = <id>`, so a NULL row simply never
+		// appears in any group feed — which is exactly right: an account-level event
+		// is not part of a group's trail. `onDelete: cascade` is unchanged for the
+		// rows that DO carry a group.
+		groupId: text('group_id').references(() => groups.id, { onDelete: 'cascade' }),
 		// Who performed the action → user.id. NOT NULL + default restrict.
 		actorUserId: text('actor_user_id')
 			.notNull()

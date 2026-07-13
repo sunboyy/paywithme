@@ -14,7 +14,7 @@ import { requireGroupAccess } from '$lib/server/access';
 import { GroupAccessError } from '$lib/server/groups';
 import { listGroupActivity, parseEntityTypeFilter, type ActivityEntry } from '$lib/server/activity';
 import { listMembers } from '$lib/server/members';
-import { AUDIT_ENTITY_TYPES } from '$lib/server/audit';
+import { GROUP_AUDIT_ENTITY_TYPES } from '$lib/server/audit';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ params, locals, url }) => {
@@ -57,8 +57,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		actors: members
 			.filter((m) => m.userId != null)
 			.map((m) => ({ userId: m.userId as string, displayName: m.displayName })),
-		// The constrained entity-type set for the entity filter control.
-		entityTypes: [...AUDIT_ENTITY_TYPES],
+		// The constrained entity-type set for the entity filter control. GROUP-scoped
+		// only: the account-level `api_key` kind (PLAN §16.8) never carries a group, so
+		// offering it here would be a filter option that can only ever return nothing.
+		entityTypes: [...GROUP_AUDIT_ENTITY_TYPES],
 		// Current filter state (echoed so the page can highlight active filters).
 		filters: { entity: entityFilter ?? null, actor: actorFilter ?? null }
 	};

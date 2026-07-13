@@ -7,13 +7,17 @@
 	// Delete: a real server-action `<form>` per row (works without JS); the action
 	// status surfaces via `role="status"` / `role="alert"`.
 	import { invalidateAll } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import * as Card from '$lib/components/ui/card';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
 	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
+	import TerminalIcon from '@lucide/svelte/icons/terminal';
 	import { authClient } from '$lib/auth-client';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -55,10 +59,28 @@
 		}
 	}
 
+	// API-key revoke (PLAN §16.8) — the same one-superForm-for-all-rows shape as
+	// the passkey delete above: each row posts a real `<form>` to `?/revokeApiKey`
+	// (works with JS disabled), confirmed through `ConfirmSubmit`.
+	// svelte-ignore state_referenced_locally
+	const revokeForm = superForm(data.revokeApiKeyForm);
+	const { message: revokeMessage, enhance: revokeEnhance, submitting: revoking } = revokeForm;
+
 	const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
 	function formatCreated(iso: string): string {
 		const d = new Date(iso);
 		return Number.isNaN(d.getTime()) ? '' : dateFormatter.format(d);
+	}
+
+	/** "Never used" until the plugin's `lastRequest` is stamped by a real call. */
+	function formatLastUsed(iso: string | null): string {
+		return iso ? `Last used ${formatCreated(iso)}` : 'Never used';
+	}
+
+	/** Expiry line — expired keys are called out, not silently listed as normal. */
+	function formatExpiry(iso: string | null, expired: boolean): string {
+		if (!iso) return 'Never expires';
+		return `${expired ? 'Expired' : 'Expires'} ${formatCreated(iso)}`;
 	}
 </script>
 
@@ -155,6 +177,105 @@
 			<Button type="button" class="w-full" disabled={enrolling} onclick={addPasskey}>
 				{enrolling ? 'Adding passkey…' : 'Add a passkey'}
 			</Button>
+		</Card.Content>
+	</Card.Root>
+
+	<!-- API keys (PLAN §16.8) — the sibling section to passkeys. -->
+	<Card.Root>
+		<Card.Header>
+			<Card.Title>API keys</Card.Title>
+			<Card.Description>
+				API keys let a script or an AI agent act on your behalf through the Pay with me API. A key
+				sees exactly the groups you see.
+			</Card.Description>
+			<Card.Action>
+				<!-- `/docs/api` lands with PLAN §16.9 (separate ticket), so it isn't a
+				     known route id yet and `resolve()` cannot type it. -->
+				<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+				<Button variant="ghost" size="sm" href="/docs/api">API docs</Button>
+			</Card.Action>
+		</Card.Header>
+
+		<Card.Content class="space-y-4">
+			<!-- Revoke success/error, shared across the per-row forms. -->
+			{#if $revokeMessage}
+				<p
+					class={$revokeMessage.type === 'error' ? 'text-destructive text-sm' : 'text-sm'}
+					role={$revokeMessage.type === 'error' ? 'alert' : 'status'}
+				>
+					{$revokeMessage.text}
+				</p>
+			{/if}
+
+			{#if data.apiKeys.length === 0}
+				<!-- First-run: two EQUAL-WEIGHT buttons — Create key + View API docs
+				     (PLAN §16.8), both real links (no client-only fetches). -->
+				<EmptyState
+					title="No API keys yet"
+					description="Create a key to let an agent or script read your groups — or, if you trust it, record and settle transactions for you."
+					icon={TerminalIcon}
+				>
+					{#snippet action()}
+						<div class="flex flex-col gap-2 sm:flex-row">
+							<Button href={resolve('/settings/api-keys/new')}>Create key</Button>
+							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+							<Button variant="outline" href="/docs/api">View API docs</Button>
+						</div>
+					{/snippet}
+				</EmptyState>
+			{:else}
+				<!-- Mobile: every field stays visible (PLAN §16.8 "no collapsing") — the
+				     row simply stacks instead of hiding anything. -->
+				<ul class="divide-border divide-y" aria-label="Your API keys">
+					{#each data.apiKeys as apiKey (apiKey.id)}
+						<li
+							class="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+							data-testid="api-key-row"
+						>
+							<div class="min-w-0 space-y-1">
+								<div class="flex flex-wrap items-center gap-2">
+									<p class="truncate font-medium">{apiKey.name ?? 'API key'}</p>
+									<Badge variant={apiKey.scope === 'write' ? 'default' : 'secondary'}>
+										{apiKey.scope === 'write' ? 'Read & write' : 'Read only'}
+									</Badge>
+									{#if apiKey.expired}
+										<Badge variant="destructive">Expired</Badge>
+									{/if}
+								</div>
+								{#if apiKey.start}
+									<!-- The `start` prefix is safe to show (PLAN §16.1) — it's how you
+									     tell two keys apart without ever revealing a secret. -->
+									<p class="text-muted-foreground font-mono text-xs break-all">
+										{apiKey.start}…
+									</p>
+								{/if}
+								<p class="text-muted-foreground text-xs">
+									Created {formatCreated(apiKey.createdAt)} · {formatLastUsed(apiKey.lastRequest)} ·
+									{formatExpiry(apiKey.expiresAt, apiKey.expired)}
+								</p>
+							</div>
+
+							<ConfirmSubmit
+								action="?/revokeApiKey"
+								enhance={revokeEnhance}
+								hiddenName="id"
+								hiddenValue={apiKey.id}
+								triggerLabel="Revoke"
+								title="Revoke this API key?"
+								description="Anything using this key stops working immediately. This can't be undone — you'd need to create a new key."
+								confirmLabel="Revoke key"
+								disabled={$revoking}
+							/>
+						</li>
+					{/each}
+				</ul>
+
+				<Separator />
+
+				<Button variant="outline" class="w-full" href={resolve('/settings/api-keys/new')}>
+					Create another key
+				</Button>
+			{/if}
 		</Card.Content>
 	</Card.Root>
 </div>

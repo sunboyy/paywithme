@@ -65,10 +65,28 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 /**
  * The entity kinds an audit entry can be attached to (PLAN §12.1). Stored as
  * `text` in `audit_log.entity_type`; validated here at the write layer.
+ *
+ * `api_key` (PLAN §16.8) is the one ACCOUNT-LEVEL kind: an API key belongs to a
+ * user, not to a group, so those rows carry `groupId: null` (see `AuditEntry.
+ * groupId`). Every other kind is group-scoped.
  */
-export const AUDIT_ENTITY_TYPES = ['transaction', 'member', 'invite', 'group'] as const;
+export const AUDIT_ENTITY_TYPES = ['transaction', 'member', 'invite', 'group', 'api_key'] as const;
 
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];
+
+/**
+ * The GROUP-SCOPED entity kinds — i.e. every kind except the account-level
+ * `api_key`. This is the set the group activity feed's entity filter offers
+ * (§12.1 "optional filters by entity type"): an `api_key` row always carries
+ * `groupId: null`, so it can never appear in ANY group's feed, and offering it as
+ * a filter option would be a menu entry that is guaranteed to return nothing.
+ */
+export const GROUP_AUDIT_ENTITY_TYPES = AUDIT_ENTITY_TYPES.filter(
+	(type) => type !== 'api_key'
+) as readonly Exclude<AuditEntityType, 'api_key'>[];
+
+/** An entity kind that lives inside a group (everything but `api_key`). */
+export type GroupAuditEntityType = (typeof GROUP_AUDIT_ENTITY_TYPES)[number];
 
 /**
  * PROVENANCE for an API-key-driven mutation (PLAN §16.2, "Audit actor — zero
@@ -133,8 +151,13 @@ function withViaMetadata(metadata: unknown, via: AuditVia): Record<string, unkno
  * intentionally absent: the DB defaults stamp them (`audit-schema.ts`).
  */
 export interface AuditEntry {
-	/** The group this action happened in. */
-	groupId: string;
+	/**
+	 * The group this action happened in — or `null` for an ACCOUNT-LEVEL action
+	 * that belongs to no group (PLAN §16.8: API-key create/revoke). A null-group
+	 * row never surfaces in a group activity feed (`activity.ts` always filters on
+	 * a concrete `group_id`), which is the intended visibility.
+	 */
+	groupId: string | null;
 	/** The authenticated user who performed it — durable authorship key (§12.1). */
 	actorUserId: string;
 	/** What was done (constrained set). */

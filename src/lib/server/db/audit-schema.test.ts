@@ -40,7 +40,11 @@ describe('audit_log drizzle table', () => {
 		expect(c.id.primary).toBe(true);
 
 		expect(c.groupId.name).toBe('group_id');
-		expect(c.groupId.notNull).toBe(true);
+		// NULLABLE (PLAN §16.8): an ACCOUNT-LEVEL action — API-key create/revoke — is
+		// performed by a user against their own account, not inside any group. Every
+		// group-scoped mutation still supplies a group id; a null-group row simply
+		// never appears in a group feed (the read side always filters on group_id).
+		expect(c.groupId.notNull).toBe(false);
 
 		// who performed it → user.id; durable.
 		expect(c.actorUserId.name).toBe('actor_user_id');
