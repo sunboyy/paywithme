@@ -26,16 +26,24 @@ pnpm dev               # http://localhost:5173
 
 For local Postgres setup, see [`docs/local-dev.md`](./docs/local-dev.md) — the repo ships a `docker-compose.yml` to bring one up quickly.
 
+## Public API
+
+A versioned REST/JSON API under **`/api/v1`**, authenticated with an API key you mint in the app (Settings → API keys), so a script or an AI agent can read your groups, transactions and balances — and, with a `write` key, record and settle transactions on your behalf.
+
+- [`/docs/api`](./src/routes/docs/api/+page.svelte) — quickstart + conventions (served at `/docs/api`).
+- The OpenAPI 3.1 spec is served verbatim at [`/api/v1/openapi.yaml`](./static/api/v1/openapi.yaml) and [`/api/v1/openapi.json`](./static/api/v1/openapi.json). The YAML is the source of truth; regenerate the JSON with `pnpm openapi:json`.
+
 ## Common scripts
 
-| Command                 | Purpose                |
-| ----------------------- | ---------------------- |
-| `pnpm check`            | Type-check the project |
-| `pnpm lint`             | Lint with ESLint       |
-| `pnpm format`           | Format with Prettier   |
-| `pnpm test:unit`        | Run unit tests         |
-| `pnpm test:integration` | Run integration tests  |
-| `pnpm test:e2e`         | Run end-to-end tests   |
+| Command                 | Purpose                                      |
+| ----------------------- | -------------------------------------------- |
+| `pnpm check`            | Type-check the project                       |
+| `pnpm lint`             | Lint with ESLint                             |
+| `pnpm format`           | Format with Prettier                         |
+| `pnpm test:unit`        | Run unit tests                               |
+| `pnpm test:integration` | Run integration tests                        |
+| `pnpm test:e2e`         | Run end-to-end tests                         |
+| `pnpm openapi:json`     | Regenerate the API spec's JSON from its YAML |
 
 ## Docs
 

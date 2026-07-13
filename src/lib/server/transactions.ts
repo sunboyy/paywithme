@@ -43,7 +43,7 @@
 // the same-day sort tie-break). `updated_at` = real `now()`, bumped on every edit
 // (NOT the editable date — an edit's wall-clock time, decoupled from `created_at`).
 
-import { and, asc, desc, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, isNotNull, lt, lte, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from './db';
 import {
@@ -57,7 +57,7 @@ import {
 } from './db/transactions-schema';
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
-import { writeAuditLog } from './audit';
+import { writeAuditLog, type AuditVia } from './audit';
 import {
 	buildTransactionSchema,
 	convertToSettlement,
@@ -163,6 +163,7 @@ export async function createTransaction({
 	groupId,
 	input,
 	settlementCurrency,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
@@ -175,6 +176,13 @@ export async function createTransaction({
 	 * tests can omit it; production callers always pass it.
 	 */
 	settlementCurrency?: CurrencyCode;
+	/**
+	 * API-key provenance (PLAN §16.2) — passed ONLY by the `/api/v1` handlers. The
+	 * audit row then gains the "(via API key '<name>')" summary suffix +
+	 * `{ viaKey, keyName }` metadata; `actorUserId` stays the user. Omitted by the
+	 * web `actions`, whose rows carry no provenance.
+	 */
+	via?: AuditVia;
 	/** Injectable clock (tests). Defaults to the real `now`. */
 	now?: () => Date;
 }): Promise<string> {
@@ -233,6 +241,7 @@ export async function createTransaction({
 			entityType: 'transaction',
 			entityId: transactionId,
 			summary: `Added ${data.type} '${data.title}' — ${amountSummary}`,
+			via,
 			metadata: {
 				type: data.type,
 				categoryId: data.categoryId,
@@ -540,12 +549,172 @@ async function assertCategoryExists(categoryId: string, executor: DbExecutor): P
 	}
 }
 
-/** Filters for {@link listTransactions} (PLAN §10 list filters). */
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyset pagination cursor (PLAN §16.4).
+//
+// The transactions list is the ONLY paginated collection. Its total order is
+// `(createdAt DESC, occurredAt DESC, id DESC)` — the §7.1 real-world date first,
+// the immutable insert time as the same-day tie-break, and `id` as the FINAL
+// tie-break so the order is TOTAL (no two rows compare equal) and therefore STABLE
+// under concurrent inserts: a keyset over a total order can never skip or duplicate
+// a row when new rows land between page fetches.
+//
+// The cursor is OPAQUE: base64url of the JSON tuple `[createdAtISO, occurredAtISO,
+// id]` — the full sort key of the last row on the previous page. Callers must treat
+// it as a blob; a malformed/undecodable cursor raises {@link TransactionCursorError}
+// (the API layer turns this into a 400/422 rather than silently ignoring it).
+//
+// `id` DIRECTION: DESC, matching the two timestamps, so the whole key is ordered
+// uniformly. "Strictly after the cursor" is then the single lexicographic tuple
+// comparison `(createdAt, occurredAt, id) < (c, o, i)` — see `keysetAfterCondition`
+// (the SQL half) and `rowIsAfterCursor` (its pure mirror, used by tests).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The full sort key of a transaction row under the §16.4 total order. */
+export interface TransactionCursorKey {
+	/** §7.1 real-world display/sort date (primary sort key, DESC). */
+	createdAt: Date;
+	/** Immutable insert time (same-day tie-break, DESC). */
+	occurredAt: Date;
+	/** Row id (final tie-break, DESC) — makes the order total. */
+	id: string;
+}
+
+/**
+ * A pagination `after` cursor could not be decoded (not base64url, not the expected
+ * `[createdAtISO, occurredAtISO, id]` tuple, or carries invalid dates/id). The API
+ * layer surfaces this as a 400/422 — a bad cursor is a client error, never silently
+ * ignored (which would restart pagination from page 1 and hide the bug).
+ */
+export class TransactionCursorError extends Error {
+	readonly code = 'transaction_cursor_invalid' as const;
+	constructor(message = 'Invalid pagination cursor') {
+		super(message);
+		this.name = 'TransactionCursorError';
+	}
+}
+
+/**
+ * Encode a row's sort key into an OPAQUE base64url cursor. PURE. The inverse of
+ * {@link decodeTransactionCursor}; the API layer calls this on the LAST row of a
+ * page to mint the `after` cursor for the next page.
+ */
+export function encodeTransactionCursor(key: TransactionCursorKey): string {
+	const tuple = [key.createdAt.toISOString(), key.occurredAt.toISOString(), key.id];
+	return Buffer.from(JSON.stringify(tuple), 'utf8').toString('base64url');
+}
+
+/**
+ * Decode an OPAQUE `after` cursor back into its sort key. PURE. Throws
+ * {@link TransactionCursorError} on anything malformed — never returns a partial or
+ * a silently-defaulted key.
+ */
+export function decodeTransactionCursor(cursor: string): TransactionCursorKey {
+	let json: string;
+	try {
+		json = Buffer.from(cursor, 'base64url').toString('utf8');
+	} catch {
+		throw new TransactionCursorError();
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(json);
+	} catch {
+		throw new TransactionCursorError();
+	}
+	if (!Array.isArray(parsed) || parsed.length !== 3) {
+		throw new TransactionCursorError();
+	}
+	const [createdAtRaw, occurredAtRaw, id] = parsed;
+	if (typeof createdAtRaw !== 'string' || typeof occurredAtRaw !== 'string') {
+		throw new TransactionCursorError();
+	}
+	if (typeof id !== 'string' || id.length === 0) {
+		throw new TransactionCursorError();
+	}
+	const createdAt = new Date(createdAtRaw);
+	const occurredAt = new Date(occurredAtRaw);
+	if (Number.isNaN(createdAt.getTime()) || Number.isNaN(occurredAt.getTime())) {
+		throw new TransactionCursorError();
+	}
+	return { createdAt, occurredAt, id };
+}
+
+/**
+ * PURE mirror of the SQL {@link keysetAfterCondition}: is `row` strictly AFTER
+ * `cursor` in the `(createdAt DESC, occurredAt DESC, id DESC)` total order? i.e. does
+ * the lexicographic tuple `(createdAt, occurredAt, id)` compare STRICTLY LESS than
+ * the cursor's? Exists so the pagination boundary math is unit-testable without a
+ * live DB; the SQL builder below must stay structurally identical to it.
+ */
+export function rowIsAfterCursor(row: TransactionCursorKey, cursor: TransactionCursorKey): boolean {
+	const rc = row.createdAt.getTime();
+	const cc = cursor.createdAt.getTime();
+	if (rc !== cc) return rc < cc;
+	const ro = row.occurredAt.getTime();
+	const co = cursor.occurredAt.getTime();
+	if (ro !== co) return ro < co;
+	return row.id < cursor.id;
+}
+
+/**
+ * PURE mirror of the `from`/`to` SQL conditions (`gte`/`lte` on `createdAt`): is
+ * `createdAt` within the INCLUSIVE `[from, to]` range? Either bound may be omitted
+ * (open on that side). Exists so the inclusivity boundary is unit-testable without a
+ * live DB; `listTransactions` implements exactly this with `gte`/`lte`.
+ */
+export function createdAtInRange(createdAt: Date, from?: Date, to?: Date): boolean {
+	if (from && createdAt.getTime() < from.getTime()) return false;
+	if (to && createdAt.getTime() > to.getTime()) return false;
+	return true;
+}
+
+/**
+ * SQL half of the keyset predicate: rows STRICTLY AFTER `cursor` in the
+ * `(createdAt DESC, occurredAt DESC, id DESC)` total order — the lexicographic
+ * expansion of `(createdAt, occurredAt, id) < (c, o, i)`. Must stay structurally
+ * identical to the pure {@link rowIsAfterCursor} (which the tests exercise). `id` is
+ * a `text` column, so `<` is Postgres's default lexicographic collation — a total,
+ * stable order on the unique ids.
+ */
+function keysetAfterCondition(cursor: TransactionCursorKey) {
+	return or(
+		lt(transactions.createdAt, cursor.createdAt),
+		and(
+			eq(transactions.createdAt, cursor.createdAt),
+			lt(transactions.occurredAt, cursor.occurredAt)
+		),
+		and(
+			eq(transactions.createdAt, cursor.createdAt),
+			eq(transactions.occurredAt, cursor.occurredAt),
+			lt(transactions.id, cursor.id)
+		)
+	);
+}
+
+/** Filters for {@link listTransactions} (PLAN §10 list filters + §16.4 pagination). */
 export interface TransactionListFilters {
 	/** Restrict to a transaction `type` ('spending' | 'transfer'). */
 	type?: 'spending' | 'transfer';
 	/** Restrict to a category id. */
 	categoryId?: string;
+	/**
+	 * §16.4 keyset cursor: return only rows STRICTLY AFTER this one in the total
+	 * order. Opaque — mint it with {@link encodeTransactionCursor}. A malformed value
+	 * raises {@link TransactionCursorError}.
+	 */
+	after?: string;
+	/**
+	 * Inclusive lower bound on `createdAt` (the §7.1 real-world date). A `Date` —
+	 * matched against the `timestamp` column directly. Rows with
+	 * `createdAt >= from` pass.
+	 */
+	from?: Date;
+	/**
+	 * Inclusive upper bound on `createdAt` (the §7.1 real-world date). A `Date`. Rows
+	 * with `createdAt <= to` pass.
+	 */
+	to?: Date;
 }
 
 /** The shape the list page renders per transaction row. */
@@ -572,12 +741,24 @@ export interface TransactionListItem {
 	isForeign: boolean;
 	/** The real-world date (PLAN §7.1 `created_at`), ISO string — the display/sort date. */
 	createdAt: string;
+	/**
+	 * The immutable insert time (PLAN §7.1 `occurred_at`), ISO string — the same-day
+	 * sort tie-break. Exposed so the API layer (#18) can reconstruct this row's full
+	 * §16.4 sort key `(createdAt, occurredAt, id)` and mint the next-page `after`
+	 * cursor via {@link encodeTransactionCursor}. Not a UI field.
+	 */
+	occurredAt: string;
 }
 
 /**
  * List a group's non-soft-deleted transactions, newest first by `created_at` (the
  * §7.1 display/sort date), with category name/icon + the settlement total.
- * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10).
+ * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10), an
+ * inclusive `from`/`to` date range on `createdAt`, and a §16.4 keyset `after`
+ * cursor. Rows are returned in the total order `(createdAt DESC, occurredAt DESC,
+ * id DESC)`; `limit` caps them (NO default/max clamp here — that's the API layer's
+ * job, #18; this internal function honours whatever cap the caller passes and
+ * returns all rows when `limit` is omitted).
  */
 export async function listTransactions({
 	userId,
@@ -609,6 +790,21 @@ export async function listTransactions({
 	if (filters.categoryId) {
 		conditions.push(eq(transactions.categoryId, filters.categoryId));
 	}
+	// Inclusive date range on the §7.1 real-world date (both bounds `>= from` /
+	// `<= to`).
+	if (filters.from) {
+		conditions.push(gte(transactions.createdAt, filters.from));
+	}
+	if (filters.to) {
+		conditions.push(lte(transactions.createdAt, filters.to));
+	}
+	// §16.4 keyset: decode the opaque cursor (throws TransactionCursorError on a bad
+	// value — never silently ignored) and keep only rows strictly after it.
+	if (filters.after !== undefined) {
+		const cursor = decodeTransactionCursor(filters.after);
+		const afterCondition = keysetAfterCondition(cursor);
+		if (afterCondition) conditions.push(afterCondition);
+	}
 
 	const baseQuery = db
 		.select({
@@ -621,14 +817,17 @@ export async function listTransactions({
 			amountTotal: transactions.amountTotal,
 			amountTotalSettlement: transactions.amountTotalSettlement,
 			currency: transactions.currency,
-			createdAt: transactions.createdAt
+			createdAt: transactions.createdAt,
+			occurredAt: transactions.occurredAt
 		})
 		.from(transactions)
 		.innerJoin(categories, eq(transactions.categoryId, categories.id))
 		.where(and(...conditions))
-		// Newest first by the real-world date (§7.1 `created_at`); `occurred_at` is
-		// the immutable insert-time tie-break.
-		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt));
+		// The §16.4 TOTAL order: newest first by the real-world date (§7.1
+		// `created_at`), then the immutable `occurred_at` insert-time tie-break, then
+		// `id` as the FINAL tie-break so the keyset cursor is unambiguous and stable
+		// under concurrent inserts. All three DESC (see `keysetAfterCondition`).
+		.orderBy(desc(transactions.createdAt), desc(transactions.occurredAt), desc(transactions.id));
 
 	// Apply caller-supplied cap (e.g. the overview page requests only 5).
 	const rows = limit !== undefined ? await baseQuery.limit(limit) : await baseQuery;
@@ -651,7 +850,8 @@ export async function listTransactions({
 			amountTotalSettlement: r.amountTotalSettlement,
 			settlementCurrency,
 			isForeign: entryCurrency !== settlementCurrency,
-			createdAt: r.createdAt.toISOString()
+			createdAt: r.createdAt.toISOString(),
+			occurredAt: r.occurredAt.toISOString()
 		};
 	});
 }
@@ -1015,6 +1215,7 @@ export async function updateTransaction({
 	input,
 	actorUserId,
 	settlementCurrency,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
@@ -1026,6 +1227,8 @@ export async function updateTransaction({
 	actorUserId?: string;
 	/** Group settlement currency (trusted group context, NEVER the payload). */
 	settlementCurrency?: CurrencyCode;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 	/** Injectable clock (tests). */
 	now?: () => Date;
 }): Promise<void> {
@@ -1080,6 +1283,7 @@ export async function updateTransaction({
 			entityType: 'transaction',
 			entityId: txnId,
 			summary: `Edited ${data.type} '${data.title}' — ${amountSummary}`,
+			via,
 			metadata: {
 				before: { title: existing.title },
 				after: {
@@ -1098,9 +1302,11 @@ export async function updateTransaction({
 /**
  * Soft-delete a transaction (PLAN §9, §12.1) — set `deleted_at = now()`, guarded by
  * `isNull(deleted_at)` so it is IDEMPOTENT (a no-op on an already-deleted txn rather
- * than overwriting the original delete time). Access-checked; writes a `delete`
- * audit row IN THE SAME `db.transaction` (the audit trail is append-only and
- * OUTLIVES the soft-delete — the row is never removed). Mirrors `softDeleteGroup`.
+ * than overwriting the original delete time). Access-checked; on an ACTUAL state
+ * transition (rows-affected > 0) writes a `delete` audit row IN THE SAME
+ * `db.transaction` (the audit trail is append-only and OUTLIVES the soft-delete —
+ * the row is never removed). A no-op delete records NO audit row (§16.6 — audit
+ * captures state transitions only). Mirrors `softDeleteGroup`.
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
@@ -1110,12 +1316,15 @@ export async function softDeleteTransaction({
 	groupId,
 	txnId,
 	actorUserId,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
 	groupId: string;
 	txnId: string;
 	actorUserId?: string;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 	now?: () => Date;
 }): Promise<void> {
 	const actor = actorUserId ?? userId;
@@ -1124,29 +1333,38 @@ export async function softDeleteTransaction({
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
 
 		// Only stamp `deleted_at` if still null → idempotent (no-op on an already
-		// soft-deleted txn; keeps the original delete time + audit history).
-		await tx
+		// soft-deleted txn; keeps the original delete time + audit history). `.returning`
+		// yields one row per AFFECTED row, so its length is the rows-affected count.
+		const affected = await tx
 			.update(transactions)
 			.set({ deletedAt: now() })
-			.where(and(eq(transactions.id, txnId), isNull(transactions.deletedAt)));
+			.where(and(eq(transactions.id, txnId), isNull(transactions.deletedAt)))
+			.returning({ id: transactions.id });
 
-		await writeAuditLog(tx, {
-			groupId,
-			actorUserId: actor,
-			action: 'delete',
-			entityType: 'transaction',
-			entityId: txnId,
-			summary: `Deleted transaction '${existing.title}'`,
-			metadata: { title: existing.title }
-		});
+		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op delete (the txn was
+		// already deleted → 0 rows affected) is an idempotent success with NO new audit
+		// row. Gate the write on rows-affected > 0.
+		if (affected.length > 0) {
+			await writeAuditLog(tx, {
+				groupId,
+				actorUserId: actor,
+				action: 'delete',
+				entityType: 'transaction',
+				entityId: txnId,
+				summary: `Deleted transaction '${existing.title}'`,
+				via,
+				metadata: { title: existing.title }
+			});
+		}
 	});
 }
 
 /**
  * Restore a soft-deleted transaction (PLAN §9, §12.1) — clear `deleted_at`, guarded
  * by `isNotNull(deleted_at)` so restoring a LIVE txn is a no-op. Non-destructive (no
- * confirmation needed). Access-checked; writes a `restore` audit row IN THE SAME
- * `db.transaction`.
+ * confirmation needed). Access-checked; on an ACTUAL state transition
+ * (rows-affected > 0) writes a `restore` audit row IN THE SAME `db.transaction`. A
+ * no-op restore records NO audit row (§16.6 — audit captures state transitions only).
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
@@ -1155,32 +1373,43 @@ export async function restoreTransaction({
 	userId,
 	groupId,
 	txnId,
-	actorUserId
+	actorUserId,
+	via
 }: {
 	userId: string;
 	groupId: string;
 	txnId: string;
 	actorUserId?: string;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 }): Promise<void> {
 	const actor = actorUserId ?? userId;
 	await db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
 
-		// Only clear if currently deleted → no-op on a live txn.
-		await tx
+		// Only clear if currently deleted → no-op on a live txn. `.returning` yields one
+		// row per AFFECTED row, so its length is the rows-affected count.
+		const affected = await tx
 			.update(transactions)
 			.set({ deletedAt: null })
-			.where(and(eq(transactions.id, txnId), isNotNull(transactions.deletedAt)));
+			.where(and(eq(transactions.id, txnId), isNotNull(transactions.deletedAt)))
+			.returning({ id: transactions.id });
 
-		await writeAuditLog(tx, {
-			groupId,
-			actorUserId: actor,
-			action: 'restore',
-			entityType: 'transaction',
-			entityId: txnId,
-			summary: `Restored transaction '${existing.title}'`,
-			metadata: { title: existing.title }
-		});
+		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op restore (the txn was
+		// already live → 0 rows affected) is an idempotent success with NO new audit row.
+		// Gate the write on rows-affected > 0.
+		if (affected.length > 0) {
+			await writeAuditLog(tx, {
+				groupId,
+				actorUserId: actor,
+				action: 'restore',
+				entityType: 'transaction',
+				entityId: txnId,
+				summary: `Restored transaction '${existing.title}'`,
+				via,
+				metadata: { title: existing.title }
+			});
+		}
 	});
 }

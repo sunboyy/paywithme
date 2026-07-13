@@ -24,3 +24,6 @@ playwright/.cache/
 
 # Generated database migrations (Drizzle Kit output)
 drizzle/
+
+# Throwaway prototype output (prototype skill) — not production code
+prototypes/

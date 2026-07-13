@@ -18,7 +18,7 @@ describe('root +layout.server load', () => {
 			emailVerified: true
 		} as unknown as App.Locals['user'];
 
-		const result = load(makeEvent({ user, session: null })) as {
+		const result = load(makeEvent({ user, session: null, apiKey: null })) as {
 			user: { name: string; email: string } | null;
 		};
 
@@ -28,7 +28,7 @@ describe('root +layout.server load', () => {
 	});
 
 	it('returns null user for an anonymous request', () => {
-		const result = load(makeEvent({ user: null, session: null }));
+		const result = load(makeEvent({ user: null, session: null, apiKey: null }));
 		expect(result).toEqual({ user: null });
 	});
 });

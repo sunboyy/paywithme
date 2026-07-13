@@ -5,16 +5,29 @@
 // with the auth config (PLAN §5.7). `import type` is erased at build time, so
 // this does NOT drag server code into client bundles.
 import type { Auth } from '$lib/server/auth';
+import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 type BetterAuthSession = Auth['$Infer']['Session'];
 
 declare global {
 	namespace App {
-		// interface Error {}
+		// The value SvelteKit renders for an uncaught error. For `/api/v1/*` the
+		// `handleError` hook returns the stable `{ error: { code, message } }`
+		// envelope (PLAN §16.5); every other route falls back to SvelteKit's default
+		// `{ message }`. Both fields are optional so a single shape covers both
+		// worlds — a browser 500 carries `message`, an API 500 carries `error`.
+		interface Error {
+			message?: string;
+			error?: { code: string; message: string; details?: unknown };
+		}
 		interface Locals {
 			// Resolved once per request in `hooks.server.ts`; `null` when anonymous.
 			user: BetterAuthSession['user'] | null;
 			session: BetterAuthSession['session'] | null;
+			// Resolved API-key principal for `/api/v1/*` requests (PLAN §16.3),
+			// attached by the `apiV1Guard` hook after a successful `verifyApiKey`.
+			// `null` on every non-api route and before the guard runs.
+			apiKey: ApiKeyPrincipal | null;
 		}
 		// interface PageData {}
 		// interface PageState {}

@@ -26,7 +26,8 @@
 // never crashes.
 //
 // ── Optional filters (PLAN §12.1 "optional filters by entity type or member") ──
-//   - entityType — one of AUDIT_ENTITY_TYPES; an unrecognized value is treated as
+//   - entityType — one of GROUP_AUDIT_ENTITY_TYPES; an unrecognized value (incl.
+//     the account-level `api_key` kind, which never has a group) is treated as
 //     "no filter" (mirrors how the transactions list's parseTypeFilter ignores junk).
 //   - actorUserId — actions performed BY one user. This is the "by member" filter
 //     expressed via the DURABLE actor key. Filtering by the member *acted upon* is
@@ -39,7 +40,7 @@ import { auditLog } from './db/audit-schema';
 import { members } from './db/groups-schema';
 import { user } from './db/auth-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
-import { AUDIT_ENTITY_TYPES, type AuditEntityType } from './audit';
+import { GROUP_AUDIT_ENTITY_TYPES, type AuditEntityType } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
@@ -78,12 +79,18 @@ export type ActivityFilters = {
 
 /**
  * Normalize a raw entity-type filter value: returns it only when it's one of the
- * constrained AUDIT_ENTITY_TYPES, else `undefined` ("no filter"). Mirrors the
+ * GROUP-scoped entity kinds, else `undefined` ("no filter"). Mirrors the
  * transactions list's `parseTypeFilter` — unrecognized junk is ignored, never
  * applied as a (never-matching) literal filter.
+ *
+ * The account-level `api_key` kind (PLAN §16.8) is deliberately NOT accepted here:
+ * those rows carry `groupId: null` and so can never appear in a group feed, which
+ * would make `?entity=api_key` a filter that renders a permanently empty list.
+ * Treating it as junk ("no filter") is the same discipline already applied to any
+ * other unrecognized value.
  */
 export function parseEntityTypeFilter(raw: string | null | undefined): AuditEntityType | undefined {
-	return raw != null && (AUDIT_ENTITY_TYPES as readonly string[]).includes(raw)
+	return raw != null && (GROUP_AUDIT_ENTITY_TYPES as readonly string[]).includes(raw)
 		? (raw as AuditEntityType)
 		: undefined;
 }

@@ -1,0 +1,1122 @@
+# Pay with me — public API v1 (PLAN §16.9).
+#
+# HAND-WRITTEN, and deliberately so: only the WRITE inputs are Zod (the shared
+# `buildTransactionSchema`); the READ DTOs are plain owned TypeScript interfaces
+# in `src/lib/server/api/v1/`, so there is nothing to generate a spec from. This
+# file is therefore the SINGLE SOURCE OF TRUTH for the wire contract and is kept
+# honest by the contract test (`src/lib/docs/openapi.contract.test.ts`), which
+# validates real DTO-mapper output — and the /docs/api quickstart's curl bodies —
+# against the component schemas below.
+#
+# `openapi.json` is GENERATED from this file (`pnpm openapi:json`); a unit test
+# fails the build if the two drift.
+openapi: 3.1.0
+
+info:
+  title: Pay with me API
+  version: '1.0.0'
+  summary: Read and write a user's shared-expense groups, transactions and balances.
+  description: |
+    A versioned REST/JSON API over Pay with me's shared-expense engine, meant for
+    scripts and AI agents acting on a user's behalf.
+
+    - **Auth**: `Authorization: Bearer <api-key>` on every request. Keys are minted
+      in the app under Settings → API keys. A key sees exactly the groups its owner
+      sees; there is no separate API identity.
+    - **Scopes**: `read` keys may call every `GET`; write operations additionally
+      require a `write` key (otherwise `403 forbidden_scope`).
+    - **JSON only**: every request and response body is `application/json`.
+    - **Money**: every monetary value is a self-describing
+      `{ "amount": <integer minor units>, "currency": "<ISO code>" }` object. Never a
+      float, never a formatted string. Discover each currency's minor-unit exponent
+      and symbol once via `GET /currencies`.
+    - **Errors**: every error is `{ "error": { "code", "message", "details"? } }`.
+    - **CORS is closed** — this API is server-to-server; it is not callable from a
+      browser page.
+
+    Group, member and invite management are **not** exposed in v1: use the web app.
+  contact:
+    name: Pay with me
+    url: /docs/api
+
+servers:
+  # Host-agnostic: v1 always lives under this relative base path, whatever origin
+  # the app is deployed to. A future v2 lives side-by-side at `/api/v2`.
+  - url: /api/v1
+    description: Version 1 (relative to whatever origin serves the app).
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Reference
+    description: Static reference data.
+  - name: Groups
+    description: The groups the calling key's owner belongs to.
+  - name: Transactions
+    description: Read and write a group's transactions.
+
+paths:
+  /currencies:
+    get:
+      tags: [Reference]
+      operationId: listCurrencies
+      summary: List supported currencies
+      description: |
+        The supported-currency reference table. This is where a client discovers each
+        currency's `exponent` (how many minor units make one major unit — 2 for `USD`,
+        0 for `JPY`) and `symbol`, so that the money objects on the wire can stay small.
+        Any valid key may call this.
+      responses:
+        '200':
+          description: The supported currencies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Currency' }
+              example:
+                - { code: 'THB', exponent: 2, symbol: '฿' }
+                - { code: 'JPY', exponent: 0, symbol: '¥' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups:
+    get:
+      tags: [Groups]
+      operationId: listGroups
+      summary: List the caller's groups
+      description: |
+        Every group the key's owner is an active member of. Unpaginated — only the
+        transactions list paginates. A group the caller cannot see simply never appears.
+      responses:
+        '200':
+          description: The caller's groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+              example:
+                - id: 'grp_tokyo'
+                  name: 'Tokyo trip'
+                  settlementCurrency: 'THB'
+                  createdBy: 'usr_ada'
+                  createdAt: '2026-05-01T09:12:03.000Z'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [Groups]
+      operationId: getGroup
+      summary: Get one group
+      description: |
+        A group the caller can see. A group that does not exist and a group the caller
+        has no access to are deliberately indistinguishable: both are `404 not_found`.
+      responses:
+        '200':
+          description: The group.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+              example:
+                id: 'grp_tokyo'
+                name: 'Tokyo trip'
+                settlementCurrency: 'THB'
+                createdBy: 'usr_ada'
+                createdAt: '2026-05-01T09:12:03.000Z'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/members:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [Groups]
+      operationId: listMembers
+      summary: List a group's members
+      description: |
+        The full roster, including deactivated members (a member with a non-null
+        `deactivatedAt` keeps their history but can no longer be added to a new
+        transaction). Member ids are what every payer / beneficiary / balance refers to.
+        Unpaginated.
+      responses:
+        '200':
+          description: The group's members.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Member' }
+              example:
+                - id: 'mem_ada'
+                  displayName: 'Ada'
+                  userId: 'usr_ada'
+                  deactivatedAt: null
+                  isLinked: true
+                - id: 'mem_grace'
+                  displayName: 'Grace'
+                  userId: null
+                  deactivatedAt: null
+                  isLinked: false
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/balances:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [Groups]
+      operationId: getGroupBalances
+      summary: Get each member's net balance
+      description: |
+        One row per member: Σ paid − Σ owed, in the group's **settlement currency**.
+        Positive = the group owes them (creditor); negative = they owe the group
+        (debtor); zero = square. Unpaginated.
+      responses:
+        '200':
+          description: Net balance per member.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Balance' }
+              example:
+                - memberId: 'mem_ada'
+                  balance: { amount: 45000, currency: 'THB' }
+                - memberId: 'mem_grace'
+                  balance: { amount: -45000, currency: 'THB' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/transactions:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [Transactions]
+      operationId: listTransactions
+      summary: List a group's transactions
+      description: |
+        The group's transactions, newest first, ordered by `(createdAt DESC, occurredAt
+        DESC, id)`. This is the only paginated collection: pass the `nextCursor` from a
+        response back as `cursor` to fetch the next page; a `null` `nextCursor` means
+        you have reached the end. The cursor is **opaque** — do not construct or parse
+        it (an undecodable one is a `400 bad_request`).
+
+        Soft-deleted transactions are excluded from this list; they remain fetchable by
+        id (with `deletedAt` set) and can be restored.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/TypeFilter'
+        - $ref: '#/components/parameters/CategoryIdFilter'
+        - $ref: '#/components/parameters/FromFilter'
+        - $ref: '#/components/parameters/ToFilter'
+      responses:
+        '200':
+          description: One page of transactions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionPage' }
+              example:
+                data:
+                  - id: 'txn_ramen'
+                    type: 'spending'
+                    title: 'Ramen'
+                    categoryId: 'spending-food-drink'
+                    categoryName: 'Food & drink'
+                    categoryIcon: 'utensils'
+                    amount: { amount: 3600, currency: 'JPY' }
+                    settlementAmount: { amount: 87840, currency: 'THB' }
+                    isForeign: true
+                    createdAt: '2026-05-04T12:00:00.000Z'
+                nextCursor: 'eyJjIjoiMjAyNi0wNS0wNCIsImkiOiJ0eG5fcmFtZW4ifQ'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [Transactions]
+      operationId: createTransaction
+      summary: Create a transaction
+      description: |
+        Records a spending or a transfer. Requires a `write` key.
+
+        The body is the complete transaction input (the same payload the web app
+        submits). Note in particular:
+
+        - `amountTotal` is in **`currency`'s** minor units; `amountTotalSettlement` is
+          the same money expressed in the **group's settlement currency**, and you must
+          supply it. It is re-checked server-side and must equal exactly
+          `round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`,
+          where `exp_x` is the currency's `exponent` from `GET /currencies`. A mismatch
+          is a `422 validation_error` naming `amountTotalSettlement`.
+        - Same-currency is the trivial case: `exchangeRate: "1"` and
+          `amountTotalSettlement == amountTotal`.
+        - `Σ payers[].amountPaid` must equal `amountTotal`.
+
+        Send an `Idempotency-Key` header (strongly recommended): a retry with the same
+        key and the same body replays the original response instead of creating a second
+        transaction.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionInput' }
+            examples:
+              equalSplit:
+                summary: An equal-split spending in the settlement currency
+                value:
+                  type: 'spending'
+                  title: 'Ramen'
+                  date: '2026-05-04'
+                  categoryId: 'spending-food-drink'
+                  amountTotal: 90000
+                  currency: 'THB'
+                  exchangeRate: '1'
+                  amountTotalSettlement: 90000
+                  splitMode: 'equal'
+                  payers: [{ memberId: 'mem_ada', amountPaid: 90000 }]
+                  beneficiaries: [{ memberId: 'mem_ada' }, { memberId: 'mem_grace' }]
+                  items: []
+                  charges: []
+              foreignCurrency:
+                summary: A foreign-currency spending (JPY entry, THB settlement @ 0.244)
+                value:
+                  type: 'spending'
+                  title: 'Ramen in Tokyo'
+                  date: '2026-05-04'
+                  categoryId: 'spending-food-drink'
+                  amountTotal: 3600
+                  currency: 'JPY'
+                  exchangeRate: '0.244'
+                  amountTotalSettlement: 87840
+                  splitMode: 'equal'
+                  payers: [{ memberId: 'mem_ada', amountPaid: 3600 }]
+                  beneficiaries: [{ memberId: 'mem_ada' }, { memberId: 'mem_grace' }]
+                  items: []
+                  charges: []
+      responses:
+        '201':
+          description: The created transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/transactions/{txid}:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+      - $ref: '#/components/parameters/TransactionId'
+    get:
+      tags: [Transactions]
+      operationId: getTransaction
+      summary: Get one transaction
+      description: |
+        The full detail: payers, resolved per-member shares (in the settlement currency),
+        itemized lines and charges. A soft-deleted transaction is still returned, with
+        `deletedAt` set.
+      responses:
+        '200':
+          description: The transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      tags: [Transactions]
+      operationId: updateTransaction
+      summary: Replace a transaction
+      description: |
+        A **full replacement** (hence `PUT`, not `PATCH`): send the complete transaction
+        input, exactly as for a create. Any field you omit is not "left alone" — it is
+        replaced by the schema default or rejected. Requires a `write` key.
+
+        Concurrency is **last-write-wins**: there is no version / `If-Match` in v1, so a
+        `PUT` built from a stale read silently reverts anything changed in between. Read
+        immediately before writing.
+
+        A soft-deleted transaction cannot be edited — restore it first (`422`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionInput' }
+      responses:
+        '200':
+          description: The updated transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [Transactions]
+      operationId: deleteTransaction
+      summary: Soft-delete a transaction
+      description: |
+        Soft-deletes the transaction: it stops counting towards balances and drops out of
+        the list, but stays fetchable by id and can be restored. Requires a `write` key.
+
+        Idempotent: deleting an already-deleted transaction succeeds with `200` and
+        writes no new audit entry.
+      responses:
+        '200':
+          description: The transaction, now with `deletedAt` set.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/transactions/{txid}/restore:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+      - $ref: '#/components/parameters/TransactionId'
+    post:
+      tags: [Transactions]
+      operationId: restoreTransaction
+      summary: Restore a soft-deleted transaction
+      description: |
+        Un-deletes the transaction: it counts towards balances again. Requires a `write`
+        key. Idempotent: restoring a live transaction succeeds with `200` and writes no
+        new audit entry. Takes no request body.
+      responses:
+        '200':
+          description: The transaction, with `deletedAt` back to `null`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/settle-up:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    post:
+      tags: [Transactions]
+      operationId: settleUp
+      summary: Record a settle-up payment
+      description: |
+        Sugar over `POST …/transactions`: records `from` paying `to` as a single-payer /
+        single-beneficiary transfer in the group's **settlement currency** (rate 1),
+        under the "Debt settlement" category. Requires a `write` key.
+
+        `amount` is a plain integer in the group's settlement-currency minor units — the
+        currency is group context, so it is neither sent nor trusted from the payload.
+        The response is the created transfer, in the same shape as any other transaction.
+
+        Send an `Idempotency-Key` header so a retry cannot record the payment twice.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SettleUpInput' }
+            example:
+              from: 'mem_grace'
+              to: 'mem_ada'
+              amount: 45000
+      responses:
+        '201':
+          description: The created settle-up transfer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/ForbiddenScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        An API key minted in the app (Settings → API keys), sent as
+        `Authorization: Bearer <key>`. The full key is shown exactly once, at creation.
+        Every missing / invalid / expired / revoked key collapses to the same
+        `401 unauthorized`.
+
+  parameters:
+    GroupId:
+      name: gid
+      in: path
+      required: true
+      description: The group's id.
+      schema: { type: string, minLength: 1 }
+      example: 'grp_tokyo'
+    TransactionId:
+      name: txid
+      in: path
+      required: true
+      description: The transaction's id.
+      schema: { type: string, minLength: 1 }
+      example: 'txn_ramen'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Out-of-range values are rejected (`422`), not clamped.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: An opaque `nextCursor` from a previous page. Do not construct or parse it.
+      schema: { type: string, minLength: 1 }
+    TypeFilter:
+      name: type
+      in: query
+      required: false
+      description: Only transactions of this type.
+      schema: { type: string, enum: ['spending', 'transfer'] }
+    CategoryIdFilter:
+      name: categoryId
+      in: query
+      required: false
+      description: Only transactions in this category (e.g. `spending-food-drink`).
+      schema: { type: string, minLength: 1 }
+    FromFilter:
+      name: from
+      in: query
+      required: false
+      description: Inclusive lower bound on the transaction's real-world date (`createdAt`).
+      schema: { type: string, format: date }
+      example: '2026-05-01'
+    ToFilter:
+      name: to
+      in: query
+      required: false
+      description: Inclusive upper bound on the transaction's real-world date (`createdAt`).
+      schema: { type: string, format: date }
+      example: '2026-05-31'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional but **strongly recommended** on creates. A client-chosen unique string,
+        remembered for 24h and scoped to the calling key:
+
+        - same key + same body → the stored response is replayed (no second transaction,
+          no second audit entry);
+        - same key + a different body → `409 conflict` (`details.reason: "key_reused"`);
+        - a concurrent retry that loses the race → `409 conflict`
+          (`details.reason: "in_progress"`).
+
+        Without the header a create is at-least-once: a retry after a network timeout may
+        record the transaction twice.
+      schema: { type: string, minLength: 1 }
+      example: 'ramen-2026-05-04-01'
+
+  schemas:
+    CurrencyCode:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      description: An ISO-4217 code from `GET /currencies`.
+      examples: ['THB', 'JPY']
+
+    Money:
+      type: object
+      description: |
+        A monetary value. `amount` is an integer in `currency`'s **minor units** — never a
+        float, never a formatted string. `฿450.00` is `{ "amount": 45000, "currency": "THB" }`;
+        `¥3600` (a 0-exponent currency) is `{ "amount": 3600, "currency": "JPY" }`. Get each
+        currency's `exponent` from `GET /currencies`.
+      required: [amount, currency]
+      additionalProperties: false
+      properties:
+        amount:
+          type: integer
+          description: The value in `currency`'s minor units. May be negative (e.g. a balance).
+        currency: { $ref: '#/components/schemas/CurrencyCode' }
+      examples:
+        - { amount: 45000, currency: 'THB' }
+
+    Currency:
+      type: object
+      description: One supported currency and how to format it.
+      required: [code, exponent, symbol]
+      additionalProperties: false
+      properties:
+        code: { $ref: '#/components/schemas/CurrencyCode' }
+        exponent:
+          type: integer
+          minimum: 0
+          description: Minor units per major unit, as a power of ten. `2` for `THB`, `0` for `JPY`.
+        symbol:
+          type: string
+          description: The display symbol, e.g. `฿`.
+
+    Group:
+      type: object
+      required: [id, name, settlementCurrency, createdBy, createdAt]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        settlementCurrency:
+          allOf: [{ $ref: '#/components/schemas/CurrencyCode' }]
+          description: The currency every balance and settlement amount in this group is expressed in.
+        createdBy: { type: string, description: The user id of the group's creator. }
+        createdAt: { type: string, format: date-time }
+
+    Member:
+      type: object
+      required: [id, displayName, userId, deactivatedAt, isLinked]
+      additionalProperties: false
+      properties:
+        id: { type: string, description: The id every payer / beneficiary / balance refers to. }
+        displayName: { type: string }
+        userId:
+          type: [string, 'null']
+          description: The linked account's user id, or `null` for an unlinked participant slot.
+        deactivatedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Non-null = deactivated; keeps their history, cannot join new transactions.
+        isLinked: { type: boolean, description: Whether this slot maps to a real account. }
+
+    Balance:
+      type: object
+      required: [memberId, balance]
+      additionalProperties: false
+      properties:
+        memberId: { type: string }
+        balance:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: Σ paid − Σ owed, in the group's settlement currency. Positive = creditor.
+
+    TransactionType:
+      type: string
+      enum: ['spending', 'transfer']
+
+    SplitMode:
+      type: string
+      enum: ['equal', 'amount', 'share', 'itemized']
+      description: |
+        How the total is divided among the beneficiaries. `equal` = evenly; `amount` = each
+        beneficiary carries an explicit `rawAmount`; `share` = weights; `itemized` = the
+        beneficiaries live on the `items` (spending only).
+
+    ItemSplitMode:
+      type: string
+      enum: ['equal', 'amount', 'share']
+
+    TransactionListItem:
+      type: object
+      description: One row of the transactions list.
+      required:
+        [
+          id,
+          type,
+          title,
+          categoryId,
+          categoryName,
+          categoryIcon,
+          amount,
+          settlementAmount,
+          isForeign,
+          createdAt
+        ]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        type: { $ref: '#/components/schemas/TransactionType' }
+        title: { type: string }
+        categoryId: { type: string }
+        categoryName: { type: string }
+        categoryIcon: { type: string }
+        amount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The original total, in the **entry** currency.
+        settlementAmount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The same total converted to the group's **settlement** currency.
+        isForeign:
+          { type: boolean, description: Whether the entry currency differs from settlement. }
+        createdAt:
+          type: string
+          format: date-time
+          description: The editable, backdatable **real-world date** of the transaction.
+
+    TransactionPage:
+      type: object
+      required: [data, nextCursor]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/TransactionListItem' }
+        nextCursor:
+          type: [string, 'null']
+          description: Pass back as `cursor` to fetch the next page. `null` = last page.
+
+    DetailPayer:
+      type: object
+      required: [memberId, amountPaid]
+      additionalProperties: false
+      properties:
+        memberId: { type: string }
+        amountPaid:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: What this member paid, in the **entry** currency.
+
+    DetailShare:
+      type: object
+      required: [memberId, amountOwed]
+      additionalProperties: false
+      properties:
+        memberId: { type: string }
+        amountOwed:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The resolved amount this member owes, in the **settlement** currency.
+
+    DetailItem:
+      type: object
+      required: [label, amount, splitMode, shares]
+      additionalProperties: false
+      properties:
+        label: { type: string }
+        amount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The item's amount, in the **entry** currency.
+        splitMode: { $ref: '#/components/schemas/ItemSplitMode' }
+        shares:
+          type: array
+          items: { $ref: '#/components/schemas/DetailShare' }
+
+    DetailCharge:
+      type: object
+      description: A charge / discount line applied on top of the itemized subtotal.
+      required: [kind, mode, value, base, sortOrder]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: ['service', 'vat', 'discount', 'tip']
+          description: '`discount` subtracts; the others add.'
+        mode: { type: string, enum: ['percent', 'absolute'] }
+        value:
+          type: integer
+          minimum: 0
+          description: |
+            A non-negative magnitude — the sign comes from `kind`. In `percent` mode it is
+            **basis points** (`1250` = 12.50%, max `10000`); in `absolute` mode it is
+            entry-currency minor units. This is deliberately not a money object: a percentage
+            is not an amount.
+        base: { type: string, enum: ['items_subtotal', 'running_total'] }
+        sortOrder: { type: integer, minimum: 0, description: The order charges are applied in. }
+
+    TransactionDetail:
+      type: object
+      description: The full transaction, as returned by every read and every write.
+      required:
+        [
+          id,
+          groupId,
+          type,
+          title,
+          categoryId,
+          categoryName,
+          categoryIcon,
+          amount,
+          settlementAmount,
+          isForeign,
+          splitMode,
+          createdAt,
+          deletedAt,
+          payers,
+          shares,
+          items,
+          charges
+        ]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        groupId: { type: string }
+        type: { $ref: '#/components/schemas/TransactionType' }
+        title: { type: string }
+        categoryId: { type: string }
+        categoryName: { type: string }
+        categoryIcon: { type: string }
+        amount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The original total, in the **entry** currency.
+        settlementAmount:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: The same total in the group's **settlement** currency.
+        isForeign: { type: boolean }
+        splitMode: { $ref: '#/components/schemas/SplitMode' }
+        createdAt:
+          type: string
+          format: date-time
+          description: The editable, backdatable **real-world date**.
+        deletedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Non-null = soft-deleted (excluded from balances and from the list).
+        payers:
+          type: array
+          items: { $ref: '#/components/schemas/DetailPayer' }
+        shares:
+          type: array
+          description: |
+            The resolved per-member owed amounts — the source of truth for balances. Always
+            populated, including for an `itemized` transaction (where it is the aggregate of
+            the per-item shares plus the allocated charges).
+          items: { $ref: '#/components/schemas/DetailShare' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DetailItem' }
+        charges:
+          type: array
+          items: { $ref: '#/components/schemas/DetailCharge' }
+      examples:
+        - id: 'txn_ramen'
+          groupId: 'grp_tokyo'
+          type: 'spending'
+          title: 'Ramen'
+          categoryId: 'spending-food-drink'
+          categoryName: 'Food & drink'
+          categoryIcon: 'utensils'
+          amount: { amount: 90000, currency: 'THB' }
+          settlementAmount: { amount: 90000, currency: 'THB' }
+          isForeign: false
+          splitMode: 'equal'
+          createdAt: '2026-05-04T12:00:00.000Z'
+          deletedAt: null
+          payers: [{ memberId: 'mem_ada', amountPaid: { amount: 90000, currency: 'THB' } }]
+          shares:
+            - { memberId: 'mem_ada', amountOwed: { amount: 45000, currency: 'THB' } }
+            - { memberId: 'mem_grace', amountOwed: { amount: 45000, currency: 'THB' } }
+          items: []
+          charges: []
+
+    PayerInput:
+      type: object
+      required: [memberId, amountPaid]
+      additionalProperties: false
+      properties:
+        memberId: { type: string, minLength: 1 }
+        amountPaid:
+          type: integer
+          minimum: 0
+          description: Entry-currency minor units. The payers' amounts must sum to `amountTotal`.
+
+    ShareInput:
+      type: object
+      description: |
+        A beneficiary. Which optional field you send depends on the split mode: `rawAmount`
+        for `amount`, `shareWeight` for `share`, neither for `equal`.
+      required: [memberId]
+      additionalProperties: false
+      properties:
+        memberId: { type: string, minLength: 1 }
+        rawAmount:
+          type: integer
+          minimum: 0
+          description: "`amount` split only: this member's share in entry-currency minor units. The raw amounts must sum to the total."
+        shareWeight:
+          type: integer
+          minimum: 0
+          description: "`share` split only: this member's weight. The weights must sum to more than zero."
+
+    ItemInput:
+      type: object
+      description: One itemized line (spending only). Each item carries its own split.
+      required: [label, amount, splitMode, beneficiaries]
+      additionalProperties: false
+      properties:
+        label: { type: string, minLength: 1, maxLength: 200 }
+        amount:
+          type: integer
+          minimum: 1
+          description: Entry-currency minor units. Must be greater than zero.
+        splitMode: { $ref: '#/components/schemas/ItemSplitMode' }
+        beneficiaries:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ShareInput' }
+
+    ChargeInput:
+      type: object
+      description: A charge / discount applied on top of the items subtotal (itemized only).
+      required: [kind, mode, value, base, sortOrder]
+      additionalProperties: false
+      properties:
+        kind: { type: string, enum: ['service', 'vat', 'discount', 'tip'] }
+        mode: { type: string, enum: ['percent', 'absolute'] }
+        value:
+          type: integer
+          minimum: 0
+          description: Basis points in `percent` mode (max `10000`), entry-currency minor units in `absolute` mode.
+        base: { type: string, enum: ['items_subtotal', 'running_total'] }
+        sortOrder: { type: integer, minimum: 0 }
+
+    TransactionInput:
+      type: object
+      description: |
+        The complete transaction payload — the same body for a create (`POST`) and a full
+        replacement (`PUT`). Beyond the per-field rules, the server enforces:
+
+        - `Σ payers[].amountPaid == amountTotal`;
+        - `amountTotalSettlement == round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`;
+        - `exchangeRate` must be exactly `"1"` when `currency` is the group's settlement currency;
+        - `amount` split → `Σ rawAmount == amountTotal`; `share` split → `Σ shareWeight > 0`;
+        - `itemized` requires at least one item and is **spending only**;
+        - every `memberId` must be an active member of the group;
+        - `categoryId` must exist and apply to `type`.
+
+        A violation is a `422 validation_error` whose `details.fieldErrors` names the field.
+      required:
+        [
+          type,
+          title,
+          categoryId,
+          amountTotal,
+          currency,
+          exchangeRate,
+          amountTotalSettlement,
+          splitMode,
+          payers,
+          beneficiaries
+        ]
+      additionalProperties: false
+      properties:
+        type: { $ref: '#/components/schemas/TransactionType' }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        date:
+          type: string
+          format: date
+          description: |
+            The **real-world date** (`YYYY-MM-DD`) the money moved — editable and backdatable,
+            but never in the future. Defaults to today when omitted.
+        categoryId:
+          type: string
+          minLength: 1
+          description: Must apply to `type`, e.g. `spending-food-drink` or `transfer-cash`.
+        amountTotal:
+          type: integer
+          minimum: 0
+          description: The total in `currency`'s minor units. Must be greater than zero unless `itemized`.
+        currency:
+          allOf: [{ $ref: '#/components/schemas/CurrencyCode' }]
+          description: The **entry** currency — what was actually spent. May differ from the group's settlement currency.
+        exchangeRate:
+          type: string
+          pattern: '^\d{1,12}(?:\.\d{1,6})?$'
+          description: |
+            Settlement-currency units per 1 unit of `currency`, as a **string** (up to 6 decimal
+            places, greater than zero) so no float ever touches the money math. Exactly `"1"`
+            when `currency` is the settlement currency.
+        amountTotalSettlement:
+          type: integer
+          minimum: 0
+          description: |
+            `amountTotal` converted to the group's settlement currency, in ITS minor units.
+            Caller-supplied and re-checked server-side (see the rule above) — a mismatch is a `422`.
+        splitMode: { $ref: '#/components/schemas/SplitMode' }
+        payers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PayerInput' }
+        beneficiaries:
+          type: array
+          description: Who the spending is for. Empty for `itemized` (the beneficiaries live on the items).
+          items: { $ref: '#/components/schemas/ShareInput' }
+        items:
+          type: array
+          description: 'Itemized lines. Required (non-empty) for `splitMode: itemized`, `[]` otherwise.'
+          default: []
+          items: { $ref: '#/components/schemas/ItemInput' }
+        charges:
+          type: array
+          description: Charges / discounts. Itemized only; `[]` otherwise.
+          default: []
+          items: { $ref: '#/components/schemas/ChargeInput' }
+
+    SettleUpInput:
+      type: object
+      description: A settle-up payment from the debtor `from` to the creditor `to`.
+      required: [from, to, amount]
+      additionalProperties: false
+      properties:
+        from: { type: string, minLength: 1, description: The paying member's id (the debtor). }
+        to:
+          {
+            type: string,
+            minLength: 1,
+            description: The receiving member's id (the creditor). Must differ from `from`.
+          }
+        amount:
+          type: integer
+          minimum: 1
+          description: The payment, in the group's **settlement-currency** minor units.
+
+    Error:
+      type: object
+      description: |
+        The one error envelope. `code` is the stable, machine-readable contract — branch on
+        it, not on `message`.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              enum:
+                [
+                  bad_request,
+                  unauthorized,
+                  forbidden_scope,
+                  not_found,
+                  conflict,
+                  validation_error,
+                  rate_limited,
+                  internal_error
+                ]
+            message:
+              { type: string, description: A human-readable explanation. Not a stable contract. }
+            details:
+              description: |
+                Structured context, present on some codes. `validation_error` carries
+                `{ formErrors, fieldErrors }`; `rate_limited` carries
+                `{ scope, limit, windowSeconds, retryAfterSeconds }`; `conflict` carries
+                `{ reason: "key_reused" | "in_progress" }`.
+      examples:
+        - error:
+            code: 'validation_error'
+            message: 'The request failed validation.'
+            details:
+              formErrors: []
+              fieldErrors:
+                amountTotalSettlement: ['The settlement total does not match the converted amount']
+
+  responses:
+    BadRequest:
+      description: '`bad_request` — the request body or an opaque cursor could not be parsed.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            { error: { code: 'bad_request', message: 'The request body is not valid JSON.' } }
+    Unauthorized:
+      description: '`unauthorized` — missing, invalid, expired or revoked key (all collapse to this).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: 'unauthorized', message: 'Authentication required.' } }
+    ForbiddenScope:
+      description: '`forbidden_scope` — a read-only key attempted a write.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: 'forbidden_scope', message: 'This API key does not have write access.' }
+    NotFound:
+      description: |
+        `not_found` — the resource does not exist **or** the caller has no access to it. The
+        two are deliberately conflated so existence never leaks.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            { error: { code: 'not_found', message: 'The requested resource was not found.' } }
+    Conflict:
+      description: |
+        `conflict` — an `Idempotency-Key` was reused with a different body
+        (`details.reason: "key_reused"`), or a concurrent retry with the same key is still
+        running (`details.reason: "in_progress"`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: 'conflict'
+              message: 'This Idempotency-Key was already used with a different request body.'
+              details: { reason: 'key_reused' }
+    ValidationError:
+      description: '`validation_error` — a rule failed. `details.fieldErrors` names the offending fields.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: 'validation_error'
+              message: 'The request failed validation.'
+              details:
+                formErrors: []
+                fieldErrors:
+                  amountTotalSettlement:
+                    ['The settlement total does not match the converted amount']
+    RateLimited:
+      description: |
+        `rate_limited` — too many requests for this key. Read and write have independent
+        per-key counters (100/60s and 20/60s), behind a combined 150/60s backstop. Back off
+        for `Retry-After` seconds.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, minimum: 0 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: 'rate_limited'
+              message: 'Rate limit exceeded.'
+              details: { scope: 'write', limit: 20, windowSeconds: 60, retryAfterSeconds: 37 }
+    InternalError:
+      description: '`internal_error` — something broke on our side. Safe to retry (with an `Idempotency-Key` on creates).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: 'internal_error', message: 'Internal server error.' } }

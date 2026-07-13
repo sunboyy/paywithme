@@ -26,6 +26,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { magicLink } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { passkey } from '@better-auth/passkey';
+import { apiKey } from '@better-auth/api-key';
 import { getRequestEvent } from '$app/server';
 import { building } from '$app/environment';
 import { env } from '$env/dynamic/private';
@@ -34,6 +35,16 @@ import { sendMagicLinkEmail } from './email';
 
 // rpName is the constant the OS passkey prompt shows (PLAN §5.2) — not an env var.
 const RP_NAME = 'Pay with me';
+
+// API-key prefixes (PLAN §16.1). These are OUR env-scoping policy, not a plugin
+// freebie: keys minted against a live database carry `pwm_live_`, everything else
+// (dev/test/preview) carries `pwm_test_`, so a test key is never mistaken for a
+// production credential. The prefix is baked into the plaintext key and its stored
+// `start`, so the display surface stays prefix-agnostic (it renders whatever
+// `start` a key carries). The trailing underscore is the plugin's recommended
+// convention for making a prefix identifiable.
+const API_KEY_PREFIX_LIVE = 'pwm_live_';
+const API_KEY_PREFIX_TEST = 'pwm_test_';
 
 // Magic-link token lifetime. PLAN §5.3 wants tokens "single-use, short-lived";
 // each token is also consumed atomically on first verification by the plugin.
@@ -232,6 +243,19 @@ export function resolveAuthEnv({
 }
 
 /**
+ * Resolve the env-scoped API-key prefix (PLAN §16.1).
+ *
+ * PURE and unit-testable — takes the same `isProduction` flag `resolveAuthEnv`
+ * uses (rather than reading global state) so it can be exercised without building
+ * `auth`. Production keys get `pwm_live_`; dev/test/preview get `pwm_test_`. This
+ * feeds the plugin's `defaultPrefix`, which stamps the prefix into every minted
+ * key's plaintext and its stored `start`.
+ */
+export function resolveApiKeyPrefix({ isProduction }: { isProduction: boolean }): string {
+	return isProduction ? API_KEY_PREFIX_LIVE : API_KEY_PREFIX_TEST;
+}
+
+/**
  * `sendMagicLink` callback wired into the `magicLink` plugin below.
  *
  * Routes the single-use, short-lived link (PLAN §5.3) through the swappable
@@ -273,6 +297,13 @@ const { baseURL, secret, rpID, origin, trustedOrigins } = resolveAuthEnv({
 	isProduction: env.NODE_ENV === 'production' && !building
 });
 
+// Env-scoped API-key prefix (PLAN §16.1). Resolved with the SAME `isProduction`
+// signal as the auth env above so live keys carry `pwm_live_` and everything else
+// carries `pwm_test_`. Feeds the `apiKey` plugin's `defaultPrefix` below.
+const apiKeyPrefix = resolveApiKeyPrefix({
+	isProduction: env.NODE_ENV === 'production' && !building
+});
+
 export const auth = betterAuth({
 	database: drizzleAdapter(db, { provider: 'pg' }),
 	secret,
@@ -306,6 +337,52 @@ export const auth = betterAuth({
 			// WebAuthn origin = the app's canonical origin (BETTER_AUTH_URL),
 			// resolved strictly per environment by `resolveAuthEnv`.
 			origin
+		}),
+		// API-key plugin (PLAN §16.1). Registered BEFORE `sveltekitCookies` (which
+		// stays last). It provides the server-side key API
+		// (`auth.api.{createApiKey,verifyApiKey,getApiKey,updateApiKey,deleteApiKey,
+		// listApiKeys,deleteAllExpiredApiKeys}`) that later tickets call from the
+		// app's own routes — hashing at rest (SHA-256), one-time plaintext reveal on
+		// create, a display `start` prefix, per-key expiry, `lastRequest`/
+		// `requestCount`, `permissions`, and per-key rate-limit fields.
+		//
+		// `enableSessionForAPIKeys` stays OFF (the plugin flags it not-for-production):
+		// the app resolves keys explicitly (§16.4) rather than having a valid key
+		// mock a session. The plugin's own HTTP endpoints (`/api/auth/api-key/*`) are
+		// NOT the public API.
+		//
+		// Coupling: the backing `api_key` table is HAND-AUTHORED in its own file
+		// (`db/api-key-schema.ts`, exported under the adapter key `apikey`) by a
+		// SEPARATE ticket (#13). Registering the plugin here is construction-time
+		// only and does not touch the DB, so the config builds and the gate stays
+		// green before that schema exists; any server API call that hits the store
+		// will need the #13 table.
+		apiKey({
+			enableSessionForAPIKeys: false,
+			// Env-scoped prefix policy (PLAN §16.1): `pwm_live_` in production,
+			// `pwm_test_` everywhere else. The plugin stamps this into every minted
+			// key's plaintext and its stored `start`, so the display surface stays
+			// prefix-agnostic. See `resolveApiKeyPrefix` / `apiKeyPrefix` above.
+			defaultPrefix: apiKeyPrefix,
+			// TIER-1 rate-limit BACKSTOP (PLAN §16.7). These config-level defaults are
+			// stamped onto EVERY key at creation (the plugin's `createApiKey` reads
+			// `rateLimitMax ?? opts.rateLimit.maxRequests`, `rateLimitTimeWindow ??
+			// opts.rateLimit.timeWindow`, `rateLimitEnabled ?? opts.rateLimit.enabled`),
+			// so no per-key creation UX (#23) is needed to satisfy the "set on every
+			// key" requirement. The plugin's built-in per-key limiter fires INSIDE the
+			// `verifyApiKey` call the `/api/v1` guard already makes (`hooks.server.ts`).
+			//
+			// It is ONE combined counter per key (it can't split read/write), so it is
+			// deliberately sized ABOVE the tier-2 burst (read 100/60s + write 20/60s):
+			// a generous 150 req / 60s. Tier 2 (the primary, class-aware limiter in
+			// `api/rate-limit.ts`) does the real per-class enforcement; this tier only
+			// trips if tier 2 is bypassed or buggy. On a trip the plugin surfaces
+			// `RATE_LIMITED`, which the guard maps to the 429 envelope (§16.7).
+			rateLimit: {
+				enabled: true,
+				timeWindow: 60_000,
+				maxRequests: 150
+			}
 		}),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
 		// its cookie handler in an `after` hook, so every server-side `auth.api.*`

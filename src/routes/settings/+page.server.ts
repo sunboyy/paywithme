@@ -15,7 +15,14 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { getAuthenticatorName } from '@better-auth/passkey';
 import { deletePasskeySchema } from '$lib/schemas/auth';
+import { revokeApiKeySchema } from '$lib/schemas/api-key';
 import { auth } from '$lib/server/auth';
+import {
+	ApiKeyNotFoundError,
+	listApiKeysForUser,
+	revokeApiKeyForUser,
+	type ApiKeyListItem
+} from '$lib/server/api-keys';
 import type { Actions, PageServerLoad } from './$types';
 
 /** The trimmed passkey shape the page renders — never the raw credential. */
@@ -57,10 +64,24 @@ export const load: PageServerLoad = async ({ locals, request }) => {
 		passkeys = [];
 	}
 
+	// API keys (PLAN §16.8) — the sibling section to passkeys. Same degrade-
+	// gracefully rule: a transient list failure renders the empty state (which
+	// offers Create + API docs), never a 500. Zero keys is the normal first-run
+	// state anyway, so the two are visually identical and nothing is lost.
+	let apiKeys: ApiKeyListItem[];
+	try {
+		apiKeys = await listApiKeysForUser({ headers: request.headers });
+	} catch {
+		apiKeys = [];
+	}
+
 	return {
 		passkeys,
+		apiKeys,
 		// One delete form instance seeds the per-row hidden-id forms on the page.
-		deleteForm: await superValidate(zod4(deletePasskeySchema))
+		deleteForm: await superValidate(zod4(deletePasskeySchema)),
+		// Likewise: one revoke form seeds the per-key hidden-id revoke forms.
+		revokeApiKeyForm: await superValidate(zod4(revokeApiKeySchema))
 	};
 };
 
@@ -92,5 +113,40 @@ export const actions: Actions = {
 
 		// `load` re-runs after the action and re-lists, so the row disappears.
 		return message(form, { type: 'success', text: 'Passkey removed' });
+	},
+
+	// Revoke an API key (PLAN §16.8) — the passkey-delete pattern, key for key:
+	// a real per-row `<form>` (works with JS disabled) confirmed by
+	// `ConfirmSubmit.svelte`. Revoke = delete, so the key 401s on its very next
+	// request (§16.2); it is audited by the service.
+	revokeApiKey: async ({ request, locals }) => {
+		if (!locals.user) {
+			redirect(303, '/login');
+		}
+		const userId = locals.user.id;
+
+		// Clone the headers BEFORE `superValidate` consumes the (single-use) body —
+		// the plugin's session-scoped `getApiKey`/`deleteApiKey` need them.
+		const headers = new Headers(request.headers);
+
+		const form = await superValidate(request, zod4(revokeApiKeySchema));
+		if (!form.valid) {
+			return fail(400, { form });
+		}
+
+		try {
+			await revokeApiKeyForUser({ userId, keyId: form.data.id, headers });
+		} catch (e) {
+			// Absent / not-ours are conflated by the service, so this message says
+			// nothing about whether the id exists (no enumeration signal).
+			const text =
+				e instanceof ApiKeyNotFoundError
+					? 'That API key no longer exists.'
+					: 'Could not revoke that key. Please try again.';
+			return message(form, { type: 'error', text }, { status: 500 });
+		}
+
+		// `load` re-runs after the action, so the revoked key disappears from the list.
+		return message(form, { type: 'success', text: 'API key revoked' });
 	}
 };
