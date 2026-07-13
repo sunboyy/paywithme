@@ -189,10 +189,9 @@
 				sees exactly the groups you see.
 			</Card.Description>
 			<Card.Action>
-				<!-- `/docs/api` lands with PLAN §16.9 (separate ticket), so it isn't a
-				     known route id yet and `resolve()` cannot type it. -->
-				<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-				<Button variant="ghost" size="sm" href="/docs/api">API docs</Button>
+				<!-- Discoverability (PLAN §16.9): the prose docs + raw spec are one tap away
+				     from where you mint the key they describe. -->
+				<Button variant="ghost" size="sm" href={resolve('/docs/api')}>API docs</Button>
 			</Card.Action>
 		</Card.Header>
 
@@ -218,8 +217,7 @@
 					{#snippet action()}
 						<div class="flex flex-col gap-2 sm:flex-row">
 							<Button href={resolve('/settings/api-keys/new')}>Create key</Button>
-							<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-							<Button variant="outline" href="/docs/api">View API docs</Button>
+							<Button variant="outline" href={resolve('/docs/api')}>View API docs</Button>
 						</div>
 					{/snippet}
 				</EmptyState>

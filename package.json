@@ -7,6 +7,7 @@
 	"scripts": {
 		"dev": "vite dev",
 		"gen:icons": "node scripts/gen-icons.mjs",
+		"openapi:json": "node scripts/openapi-json.mjs",
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
@@ -40,6 +41,7 @@
 		"@types/pg": "^8.20.0",
 		"@vite-pwa/sveltekit": "^1.1.0",
 		"@vitest/coverage-v8": "^4.1.8",
+		"ajv": "^8.20.0",
 		"bits-ui": "^2.18.1",
 		"clsx": "^2.1.1",
 		"drizzle-kit": "^0.31.10",
@@ -70,7 +72,8 @@
 		"vaul-svelte": "1.0.0-next.7",
 		"vite": "^8.0.16",
 		"vitest": "^4.1.8",
-		"workbox-window": "7.4.1"
+		"workbox-window": "7.4.1",
+		"yaml": "^2.9.0"
 	},
 	"dependencies": {
 		"@better-auth/api-key": "^1.6.18",
