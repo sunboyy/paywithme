@@ -38,7 +38,7 @@ vi.mock('$lib/server/db', () => ({
 	}
 }));
 
-import { writeAuditLog, AUDIT_ACTIONS, AUDIT_ENTITY_TYPES } from './audit';
+import { writeAuditLog, viaKeySummarySuffix, AUDIT_ACTIONS, AUDIT_ENTITY_TYPES } from './audit';
 import { auditLog } from './db/audit-schema';
 
 // --- Mock transaction handle (`tx`) ----------------------------------------
@@ -180,5 +180,79 @@ describe('constrained value sets (PLAN §12.1)', () => {
 		// `@ts-expect-error` directives require; `pnpm check` fails if either line
 		// stops being a type error.)
 		expect(true).toBe(true);
+	});
+});
+
+// --- API-key provenance (PLAN §16.2, task #22) ------------------------------
+// The writer is the ONE place the provenance format lives: `via` → a
+// "(via API key '<name>')" summary suffix + `{viaKey,keyName}` merged into the
+// EXISTING nullable `metadata` jsonb. Zero schema change; the actor is untouched.
+describe('writeAuditLog — API-key provenance (PLAN §16.2)', () => {
+	const via = { keyId: 'key_abc', keyName: 'agent key' };
+
+	it('merges {viaKey,keyName} into metadata and suffixes the summary — actor UNCHANGED', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, metadata: { amount: [800, 950] }, via });
+
+		const values = insertCalls[0].values;
+		// The key carries no authority: the durable actor is still the USER (§16.2).
+		expect(values.actorUserId).toBe('user-42');
+		expect(values.metadata).toEqual({
+			amount: [800, 950],
+			viaKey: 'key_abc',
+			keyName: 'agent key'
+		});
+		expect(values.summary).toBe("Edited 'Dinner' — amount ฿800 → ฿950 (via API key 'agent key')");
+		// No `actor_key_id` (or any other new column) is ever written — the row keeps the
+		// existing shape (PLAN §16.2 explicitly rejects that column).
+		expect(Object.keys(values).sort()).toEqual([
+			'action',
+			'actorUserId',
+			'entityId',
+			'entityType',
+			'groupId',
+			'metadata',
+			'summary'
+		]);
+	});
+
+	it('with NO metadata, the provenance object becomes the metadata (not null)', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, via });
+
+		expect(insertCalls[0].values.metadata).toEqual({ viaKey: 'key_abc', keyName: 'agent key' });
+	});
+
+	it('a non-object metadata is preserved under `details`, provenance stays top-level', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, metadata: 'legacy note', via });
+
+		expect(insertCalls[0].values.metadata).toEqual({
+			details: 'legacy note',
+			viaKey: 'key_abc',
+			keyName: 'agent key'
+		});
+	});
+
+	it('an unnamed key falls back to a well-formed label; metadata keeps the null', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, via: { keyId: 'key_x', keyName: null } });
+
+		expect(insertCalls[0].values.summary).toContain("(via API key 'unnamed')");
+		expect(insertCalls[0].values.metadata).toEqual({ viaKey: 'key_x', keyName: null });
+		expect(viaKeySummarySuffix({ keyId: 'key_x', keyName: null })).toBe(" (via API key 'unnamed')");
+	});
+
+	it('WITHOUT `via` (a web-session mutation) the row is untouched — no suffix, no keys', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, metadata: { amount: [800, 950] } });
+
+		expect(insertCalls[0].values.summary).toBe("Edited 'Dinner' — amount ฿800 → ฿950");
+		expect(insertCalls[0].values.metadata).toEqual({ amount: [800, 950] });
 	});
 });

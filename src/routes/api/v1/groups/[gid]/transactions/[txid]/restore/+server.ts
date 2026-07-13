@@ -13,6 +13,7 @@ import { getTransactionDetail, restoreTransaction } from '$lib/server/transactio
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withWriteErrorHandling } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { auditVia } from '$lib/server/api/provenance';
 import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
@@ -36,7 +37,9 @@ export const POST = withWriteErrorHandling(async ({ locals, params }) => {
 		userId: principal.userId,
 		groupId: gid,
 		txnId: txid,
-		actorUserId: principal.userId
+		actorUserId: principal.userId,
+		// §16.2 audit provenance (only recorded when the restore actually transitions state).
+		via: auditVia(principal)
 	});
 
 	const detail = await getTransactionDetail({

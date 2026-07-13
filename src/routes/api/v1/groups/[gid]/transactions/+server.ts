@@ -44,6 +44,7 @@ import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/ap
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { auditVia } from '$lib/server/api/provenance';
 import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
@@ -190,7 +191,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 		const txnId = await createTransaction({
 			userId: principal.userId,
 			groupId: gid,
-			input
+			input,
+			// §16.2 audit provenance: the actor stays the USER; the key is recorded as
+			// `{viaKey,keyName}` metadata + a "(via API key '…')" summary suffix on the
+			// audit row written in the SAME transaction as the create (no schema change).
+			via: auditVia(principal)
 		});
 		const detail = await getTransactionDetail({
 			userId: principal.userId,

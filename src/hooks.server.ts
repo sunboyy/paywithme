@@ -195,8 +195,11 @@ const apiV1Guard: Handle = async ({ event, resolve }) => {
 	// Verified. Attach the minimal principal (PLAN §16.4). The plugin stores the
 	// owning user under `referenceId`; surface it as `userId`. `permissions` is the
 	// key's scope, read by the §16.2 per-route write-guard (a LATER ticket).
+	// `name` is the key's label, carried ONLY as audit provenance (§16.2 — it lands in
+	// the audit row's summary suffix + `metadata.keyName`), never as authority.
 	const principal: ApiKeyPrincipal = {
 		keyId: result.key.id,
+		name: result.key.name ?? null,
 		userId: result.key.referenceId,
 		permissions: result.key.permissions ?? null
 	};

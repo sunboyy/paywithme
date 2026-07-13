@@ -20,6 +20,7 @@ import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { auditVia } from '$lib/server/api/provenance';
 import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { notFound, unauthorized } from '$lib/server/api/errors';
 
@@ -74,7 +75,10 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 		groupId: gid,
 		txnId: txid,
 		input,
-		actorUserId: principal.userId
+		actorUserId: principal.userId,
+		// §16.2 audit provenance: actor stays the user; the key is recorded as
+		// `{viaKey,keyName}` metadata + a "(via API key '…')" summary suffix.
+		via: auditVia(principal)
 	});
 
 	const detail = await getTransactionDetail({
@@ -109,7 +113,9 @@ export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
 		userId: principal.userId,
 		groupId: gid,
 		txnId: txid,
-		actorUserId: principal.userId
+		actorUserId: principal.userId,
+		// §16.2 audit provenance (only recorded when the delete actually transitions state).
+		via: auditVia(principal)
 	});
 
 	const detail = await getTransactionDetail({

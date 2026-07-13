@@ -11,6 +11,13 @@ export interface ApiKeyPrincipal {
 	/** The API key's own id (audit / rate-limit correlation). */
 	keyId: string;
 	/**
+	 * The key's human label (the plugin's nullable `name`). Carried purely as AUDIT
+	 * PROVENANCE (§16.2): it is denormalized into the audit row's summary suffix +
+	 * `metadata.keyName` so an old entry stays readable after the key is revoked and
+	 * gone. Never used for authentication or authorization.
+	 */
+	name: string | null;
+	/**
 	 * The id of the user that owns the key. The api-key plugin stores the owner
 	 * under `referenceId` (references = user); we surface it as `userId` because
 	 * that is what downstream per-route guards reason about.

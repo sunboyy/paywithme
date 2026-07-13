@@ -21,6 +21,7 @@ import { createTransaction, getTransactionDetail } from '$lib/server/transaction
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
+import { auditVia } from '$lib/server/api/provenance';
 import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
@@ -109,7 +110,10 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			userId: principal.userId,
 			groupId: gid,
 			input,
-			settlementCurrency
+			settlementCurrency,
+			// §16.2 audit provenance: a settle-up recorded through a key is attributable to
+			// that key (metadata + summary suffix) while the actor stays the user.
+			via: auditVia(principal)
 		});
 		const detail = await getTransactionDetail({
 			userId: principal.userId,

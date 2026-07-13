@@ -88,11 +88,13 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const readPrincipal: ApiKeyPrincipal = {
 	keyId: 'key_r',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
 };
 const writePrincipal: ApiKeyPrincipal = {
 	keyId: 'key_w',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read', 'write'] }
 };
@@ -174,6 +176,9 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 		expect(arg.groupId).toBe('g1');
 		// Settlement currency is loaded from the group row, not the payload.
 		expect(arg.settlementCurrency).toBe('THB');
+		// §16.2 audit provenance is forwarded so the settle-up audit row records WHICH key
+		// moved the money (the actor stays the user).
+		expect(arg.via).toEqual({ keyId: 'key_w', keyName: 'agent key' });
 		expect(arg.input).toMatchObject({
 			type: 'transfer',
 			title: 'Debt settlement',

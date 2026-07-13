@@ -20,6 +20,7 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
 };

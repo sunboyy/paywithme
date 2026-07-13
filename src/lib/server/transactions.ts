@@ -57,7 +57,7 @@ import {
 } from './db/transactions-schema';
 import { members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
-import { writeAuditLog } from './audit';
+import { writeAuditLog, type AuditVia } from './audit';
 import {
 	buildTransactionSchema,
 	convertToSettlement,
@@ -163,6 +163,7 @@ export async function createTransaction({
 	groupId,
 	input,
 	settlementCurrency,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
@@ -175,6 +176,13 @@ export async function createTransaction({
 	 * tests can omit it; production callers always pass it.
 	 */
 	settlementCurrency?: CurrencyCode;
+	/**
+	 * API-key provenance (PLAN §16.2) — passed ONLY by the `/api/v1` handlers. The
+	 * audit row then gains the "(via API key '<name>')" summary suffix +
+	 * `{ viaKey, keyName }` metadata; `actorUserId` stays the user. Omitted by the
+	 * web `actions`, whose rows carry no provenance.
+	 */
+	via?: AuditVia;
 	/** Injectable clock (tests). Defaults to the real `now`. */
 	now?: () => Date;
 }): Promise<string> {
@@ -233,6 +241,7 @@ export async function createTransaction({
 			entityType: 'transaction',
 			entityId: transactionId,
 			summary: `Added ${data.type} '${data.title}' — ${amountSummary}`,
+			via,
 			metadata: {
 				type: data.type,
 				categoryId: data.categoryId,
@@ -1206,6 +1215,7 @@ export async function updateTransaction({
 	input,
 	actorUserId,
 	settlementCurrency,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
@@ -1217,6 +1227,8 @@ export async function updateTransaction({
 	actorUserId?: string;
 	/** Group settlement currency (trusted group context, NEVER the payload). */
 	settlementCurrency?: CurrencyCode;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 	/** Injectable clock (tests). */
 	now?: () => Date;
 }): Promise<void> {
@@ -1271,6 +1283,7 @@ export async function updateTransaction({
 			entityType: 'transaction',
 			entityId: txnId,
 			summary: `Edited ${data.type} '${data.title}' — ${amountSummary}`,
+			via,
 			metadata: {
 				before: { title: existing.title },
 				after: {
@@ -1303,12 +1316,15 @@ export async function softDeleteTransaction({
 	groupId,
 	txnId,
 	actorUserId,
+	via,
 	now = () => new Date()
 }: {
 	userId: string;
 	groupId: string;
 	txnId: string;
 	actorUserId?: string;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 	now?: () => Date;
 }): Promise<void> {
 	const actor = actorUserId ?? userId;
@@ -1336,6 +1352,7 @@ export async function softDeleteTransaction({
 				entityType: 'transaction',
 				entityId: txnId,
 				summary: `Deleted transaction '${existing.title}'`,
+				via,
 				metadata: { title: existing.title }
 			});
 		}
@@ -1356,12 +1373,15 @@ export async function restoreTransaction({
 	userId,
 	groupId,
 	txnId,
-	actorUserId
+	actorUserId,
+	via
 }: {
 	userId: string;
 	groupId: string;
 	txnId: string;
 	actorUserId?: string;
+	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
+	via?: AuditVia;
 }): Promise<void> {
 	const actor = actorUserId ?? userId;
 	await db.transaction(async (tx) => {
@@ -1387,6 +1407,7 @@ export async function restoreTransaction({
 				entityType: 'transaction',
 				entityId: txnId,
 				summary: `Restored transaction '${existing.title}'`,
+				via,
 				metadata: { title: existing.title }
 			});
 		}

@@ -268,6 +268,7 @@ describe('apiV1Guard (/api/v1 auth gate)', () => {
 			error: null,
 			key: {
 				id: 'key-42',
+				name: 'agent key',
 				referenceId: 'user-7',
 				permissions: { groups: ['read', 'write'] }
 			}
@@ -280,8 +281,10 @@ describe('apiV1Guard (/api/v1 auth gate)', () => {
 		const response = await apiV1Guard({ event, resolve });
 
 		expect(verifyApiKey).toHaveBeenCalledWith({ body: { key: 'pwm_test_good' } });
+		// `name` rides along as AUDIT PROVENANCE only (§16.2) — never as authority.
 		expect(event.locals.apiKey).toEqual({
 			keyId: 'key-42',
+			name: 'agent key',
 			userId: 'user-7',
 			permissions: { groups: ['read', 'write'] }
 		});
@@ -289,7 +292,7 @@ describe('apiV1Guard (/api/v1 auth gate)', () => {
 		expect(response).toBe(sentinel);
 	});
 
-	it('normalizes an absent permissions field to null on the principal', async () => {
+	it('normalizes an absent permissions field AND an unnamed key to null on the principal', async () => {
 		verifyApiKey.mockResolvedValue({
 			valid: true,
 			error: null,
@@ -301,7 +304,12 @@ describe('apiV1Guard (/api/v1 auth gate)', () => {
 
 		await apiV1Guard({ event, resolve });
 
-		expect(event.locals.apiKey).toEqual({ keyId: 'key-1', userId: 'user-1', permissions: null });
+		expect(event.locals.apiKey).toEqual({
+			keyId: 'key-1',
+			name: null,
+			userId: 'user-1',
+			permissions: null
+		});
 	});
 });
 
@@ -365,7 +373,12 @@ describe('composed handle (sequence)', () => {
 
 		expect(getSession).not.toHaveBeenCalled();
 		expect(verifyApiKey).toHaveBeenCalledTimes(1);
-		expect(event.locals.apiKey).toEqual({ keyId: 'key-9', userId: 'user-9', permissions: null });
+		expect(event.locals.apiKey).toEqual({
+			keyId: 'key-9',
+			name: null,
+			userId: 'user-9',
+			permissions: null
+		});
 		expect(routeResolve).toHaveBeenCalledWith(event);
 		expect(response).toBe(sentinel);
 	});

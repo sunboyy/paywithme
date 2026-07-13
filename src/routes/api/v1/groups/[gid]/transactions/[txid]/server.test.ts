@@ -34,6 +34,7 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
 };
@@ -41,6 +42,7 @@ const principal: ApiKeyPrincipal = {
 /** A write-scoped principal (§16.2 `write ⊇ read`). */
 const writePrincipal: ApiKeyPrincipal = {
 	keyId: 'key_w',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read', 'write'] }
 };
@@ -184,7 +186,9 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 			groupId: 'g1',
 			txnId: 't1',
 			input: validInput,
-			actorUserId: 'user_1'
+			actorUserId: 'user_1',
+			// §16.2 audit provenance forwarded to the service (actor stays the user).
+			via: { keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.amount).toEqual({ amount: 9000, currency: 'THB' });
 		expect(body).not.toHaveProperty('input');
@@ -263,7 +267,9 @@ describe('DELETE /api/v1/groups/{gid}/transactions/{txid}', () => {
 			userId: 'user_1',
 			groupId: 'g1',
 			txnId: 't1',
-			actorUserId: 'user_1'
+			actorUserId: 'user_1',
+			// §16.2 audit provenance forwarded to the service (actor stays the user).
+			via: { keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.deletedAt).toBe('2026-01-03T10:00:00.000Z');
 	});

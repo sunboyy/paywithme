@@ -1646,3 +1646,117 @@ describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => 
 		expect(audit[0].values.action).toBe('restore');
 	});
 });
+
+// --- API-key audit provenance (PLAN §16.2, task #22) ------------------------
+// A mutation driven through `/api/v1` passes the caller's key as `via`. The audit
+// row must then carry `{viaKey,keyName}` in the EXISTING nullable `metadata` jsonb
+// plus a "(via API key '<name>')" suffix on the durable `summary` — with NO schema
+// change (no `actor_key_id` column) and, crucially, WITHOUT rewriting the actor:
+// the key acts AS its creating user, so `actorUserId` stays the user id.
+describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
+	const VIA = { keyId: 'key_abc', keyName: 'agent key' };
+
+	/** The `metadata` jsonb of the single audit row written by the last call. */
+	function auditRow() {
+		const rows = insertsTo('audit_log');
+		expect(rows).toHaveLength(1);
+		return rows[0].values;
+	}
+
+	it('create: metadata carries viaKey/keyName, summary gets the suffix, actor stays the USER', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB',
+			via: VIA
+		});
+
+		const audit = auditRow();
+		// Provenance ≠ authority: the actor is still the user who owns the key.
+		expect(audit.actorUserId).toBe('u1');
+		expect(audit.metadata).toMatchObject({ viaKey: 'key_abc', keyName: 'agent key' });
+		// The service's own changed-fields snapshot is PRESERVED alongside the provenance.
+		expect(audit.metadata).toMatchObject({ type: 'spending', splitMode: 'equal' });
+		expect(String(audit.summary)).toContain("Added spending 'Dinner'");
+		expect(String(audit.summary)).toMatch(/ \(via API key 'agent key'\)$/);
+	});
+
+	it('edit: metadata carries the provenance next to before/after, summary gets the suffix', async () => {
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Dinner', deletedAt: null }],
+			ACTIVE_MEMBERS,
+			CATEGORY_ROW,
+			[]
+		);
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: { ...equalInput(), title: 'Lunch' },
+			settlementCurrency: 'THB',
+			via: VIA
+		});
+
+		const audit = auditRow();
+		expect(audit.action).toBe('edit');
+		expect(audit.actorUserId).toBe('u1');
+		expect(audit.metadata).toMatchObject({
+			viaKey: 'key_abc',
+			keyName: 'agent key',
+			before: { title: 'Dinner' }
+		});
+		expect(String(audit.summary)).toContain("(via API key 'agent key')");
+	});
+
+	it('delete + restore: both audit rows carry the provenance', async () => {
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		await softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1', via: VIA });
+		let audit = auditRow();
+		expect(audit.action).toBe('delete');
+		expect(audit.metadata).toMatchObject({
+			title: 'Dinner',
+			viaKey: 'key_abc',
+			keyName: 'agent key'
+		});
+		expect(audit.summary).toBe("Deleted transaction 'Dinner' (via API key 'agent key')");
+
+		inserts.length = 0;
+		updates.length = 0;
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: new Date() }]);
+		await restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1', via: VIA });
+		audit = auditRow();
+		expect(audit.action).toBe('restore');
+		expect(audit.metadata).toMatchObject({ viaKey: 'key_abc', keyName: 'agent key' });
+		expect(audit.summary).toBe("Restored transaction 'Dinner' (via API key 'agent key')");
+	});
+
+	it('an UNNAMED key still yields a well-formed suffix; metadata keeps the truthful null', async () => {
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		await softDeleteTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			via: { keyId: 'key_x', keyName: null }
+		});
+		const audit = auditRow();
+		expect(audit.summary).toBe("Deleted transaction 'Dinner' (via API key 'unnamed')");
+		expect(audit.metadata).toMatchObject({ viaKey: 'key_x', keyName: null });
+	});
+
+	it('a WEB-SESSION mutation (no `via`) records NO provenance and NO suffix', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		const audit = auditRow();
+		expect(String(audit.summary)).not.toContain('via API key');
+		expect(audit.metadata).not.toHaveProperty('viaKey');
+		expect(audit.metadata).not.toHaveProperty('keyName');
+	});
+});

@@ -28,11 +28,13 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const readPrincipal: ApiKeyPrincipal = {
 	keyId: 'key_r',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
 };
 const writePrincipal: ApiKeyPrincipal = {
 	keyId: 'key_w',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read', 'write'] }
 };
@@ -91,7 +93,9 @@ describe('POST /api/v1/groups/{gid}/transactions/{txid}/restore', () => {
 			userId: 'user_1',
 			groupId: 'g1',
 			txnId: 't1',
-			actorUserId: 'user_1'
+			actorUserId: 'user_1',
+			// §16.2 audit provenance forwarded to the service (actor stays the user).
+			via: { keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.deletedAt).toBeNull();
 		expect(body).not.toHaveProperty('input');

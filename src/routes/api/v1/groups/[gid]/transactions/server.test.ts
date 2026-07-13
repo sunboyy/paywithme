@@ -93,6 +93,7 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read'] }
 };
@@ -100,6 +101,7 @@ const principal: ApiKeyPrincipal = {
 /** A write-scoped principal (§16.2 `write ⊇ read`). */
 const writePrincipal: ApiKeyPrincipal = {
 	keyId: 'key_w',
+	name: 'agent key',
 	userId: 'user_1',
 	permissions: { api: ['read', 'write'] }
 };
@@ -322,7 +324,9 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 		expect(createTransaction).toHaveBeenCalledWith({
 			userId: 'user_1',
 			groupId: 'g1',
-			input: validInput
+			input: validInput,
+			// §16.2 audit provenance forwarded to the service (actor stays the user).
+			via: { keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(getTransactionDetail).toHaveBeenCalledWith({
 			userId: 'user_1',
