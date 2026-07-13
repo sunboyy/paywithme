@@ -59,7 +59,15 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 				-- migrated DB always has these too.
 				to_regclass('public.audit_log')    as audit_log,
 				to_regclass('public.transactions') as transactions,
-				to_regclass('public.categories')   as categories
+				to_regclass('public.categories')   as categories,
+					-- Phase-5 public-API tables. The /api/v1 boundary suites (issue #25)
+					-- mint real keys, replay idempotent creates and exhaust the per-key
+					-- rate limiter, so all three must be migrated; checking them here keeps
+					-- the integration run SAFE on an older DB (the suite skips cleanly
+					-- instead of erroring with a missing-relation).
+					to_regclass('public.api_key')                  as api_key,
+					to_regclass('public.idempotency_key')          as idempotency_key,
+					to_regclass('public.api_key_class_rate_limit') as api_key_class_rate_limit
 		`);
 		const row = (res.rows?.[0] ?? {}) as Record<string, unknown>;
 		const missing = Object.entries(row)

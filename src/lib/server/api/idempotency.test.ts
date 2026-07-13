@@ -260,6 +260,26 @@ describe('createDbIdempotencyStore — pending-first insert race', () => {
 		expect(won).toBe(false);
 	});
 
+	it('returns false on a WRAPPED unique violation — the shape Drizzle actually throws', async () => {
+		// Drizzle raises a `DrizzleQueryError` whose own `code` is undefined and whose
+		// `cause` is the `pg` error carrying `23505`. Checking only the top-level object
+		// let the duplicate insert escape as a 500 instead of replaying the stored
+		// response (§16.6) — the real-DB boundary suite caught it, so pin the shape here.
+		const pgError = Object.assign(new Error('duplicate key value'), { code: '23505' });
+		insertThrow.error = Object.assign(new Error('Failed query: insert into "idempotency_key"'), {
+			cause: pgError
+		});
+		const store = createDbIdempotencyStore();
+		const won = await store.insertPending({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			requestHash: 'h',
+			createdAt: new Date(),
+			expiresAt: new Date()
+		});
+		expect(won).toBe(false);
+	});
+
 	it('re-throws a non-unique error', async () => {
 		insertThrow.error = { code: '08006' }; // connection failure, not a dedup
 		const store = createDbIdempotencyStore();
@@ -272,6 +292,22 @@ describe('createDbIdempotencyStore — pending-first insert race', () => {
 				expiresAt: new Date()
 			})
 		).rejects.toEqual({ code: '08006' });
+	});
+
+	it('re-throws a WRAPPED non-unique error (the cause walk does not swallow real failures)', async () => {
+		const pgError = Object.assign(new Error('connection terminated'), { code: '08006' });
+		const wrapped = Object.assign(new Error('Failed query'), { cause: pgError });
+		insertThrow.error = wrapped;
+		const store = createDbIdempotencyStore();
+		await expect(
+			store.insertPending({
+				keyId: 'key_1',
+				idempotencyKey: 'abc',
+				requestHash: 'h',
+				createdAt: new Date(),
+				expiresAt: new Date()
+			})
+		).rejects.toBe(wrapped);
 	});
 
 	it('load returns the mapped row or null', async () => {

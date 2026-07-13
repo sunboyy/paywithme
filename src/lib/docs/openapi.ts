@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import Ajv2020 from 'ajv/dist/2020.js';
 
 /** Absolute path to the hand-written source of truth. */
 export const OPENAPI_YAML_FILE = fileURLToPath(
@@ -35,4 +36,43 @@ export function loadOpenApiYaml(): OpenApiDocument {
 /** Parse the generated JSON spec. */
 export function loadOpenApiJson(): OpenApiDocument {
 	return JSON.parse(readFileSync(OPENAPI_JSON_FILE, 'utf8')) as OpenApiDocument;
+}
+
+/** The outcome of validating one value against a component schema. */
+export interface SchemaCheck {
+	ok: boolean;
+	/** Ajv's field-level errors, one per line — empty when `ok`. */
+	errors: string;
+}
+
+/**
+ * Compile the spec's `#/components/schemas/*` and hand back a checker for them
+ * (PLAN §16.10). ONE Ajv configuration, shared by BOTH contract tests — the
+ * fixture-level one (`openapi.contract.test.ts`, which validates the DTO mappers +
+ * the `/docs/api` quickstart) and the LIVE one
+ * (`tests/integration/api-contract.test.ts`, which validates the bodies the real
+ * routes return over the wire). A single config means the two can never disagree
+ * about what "valid" means.
+ *
+ * `strict: false` + `validateFormats: false`: an OpenAPI document carries annotation
+ * keywords Ajv doesn't know (`example`, `summary`, `discriminator`, `format:
+ * date-time`). We validate STRUCTURE — required fields, types, enums, and the
+ * `additionalProperties: false` that makes an UNDOCUMENTED field a failure — which is
+ * exactly the part of the contract a client depends on. OpenAPI 3.1 schemas ARE JSON
+ * Schema 2020-12, so they compile as-is.
+ */
+export function createComponentSchemaChecker(spec: OpenApiDocument = loadOpenApiYaml()): {
+	check: (schemaName: string, value: unknown) => SchemaCheck;
+} {
+	const ajv = new Ajv2020({ strict: false, validateFormats: false, allErrors: true });
+	ajv.addSchema(spec, 'openapi');
+
+	return {
+		check(schemaName, value) {
+			const validate = ajv.getSchema(`openapi#/components/schemas/${schemaName}`);
+			if (!validate) throw new Error(`No such component schema: ${schemaName}`);
+			const ok = validate(value) === true;
+			return { ok, errors: ok ? '' : ajv.errorsText(validate.errors, { separator: '\n  ' }) };
+		}
+	};
 }

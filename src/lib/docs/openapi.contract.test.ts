@@ -19,8 +19,6 @@
 // keeps the published contract honest without generating it.
 
 import { describe, it, expect } from 'vitest';
-import Ajv2020 from 'ajv/dist/2020.js';
-import type { ValidateFunction } from 'ajv';
 import type { Group } from '$lib/server/groups';
 import type { MemberListItem } from '$lib/server/members';
 import type { MemberBalance } from '$lib/transactions/balances';
@@ -42,39 +40,26 @@ import {
 	QUICKSTART_READ_COMMAND,
 	QUICKSTART_WRITE_COMMAND
 } from './api-quickstart';
-import { loadOpenApiYaml } from './openapi';
+import { createComponentSchemaChecker, loadOpenApiYaml } from './openapi';
 
-// ── Compile the spec's component schemas ─────────────────────────────────────
-// `strict: false` + `validateFormats: false`: an OpenAPI document carries annotation
-// keywords Ajv doesn't know (`example`, `summary`, `discriminator`, `format: date-time`).
-// We are validating STRUCTURE (required fields, types, enums, `additionalProperties:
-// false`), which is exactly the part of the contract a client depends on.
+// The spec's component schemas, compiled ONCE. The SAME checker backs the LIVE
+// contract test (`tests/integration/api-contract.test.ts`), so "valid" means exactly
+// the same thing for a mapper fixture here and for a real wire response there.
 const spec = loadOpenApiYaml();
-const ajv = new Ajv2020({ strict: false, validateFormats: false, allErrors: true });
-ajv.addSchema(spec, 'openapi');
-
-/** Get a compiled validator for one `#/components/schemas/<name>` subschema. */
-function validator(name: string): ValidateFunction {
-	const validate = ajv.getSchema(`openapi#/components/schemas/${name}`);
-	if (!validate) throw new Error(`No such component schema: ${name}`);
-	return validate;
-}
+const { check } = createComponentSchemaChecker(spec);
 
 /**
  * Assert `value` matches the named component schema, reporting Ajv's field-level
  * errors on failure (so a break points straight at the offending property).
  */
 function expectValid(name: string, value: unknown): void {
-	const validate = validator(name);
-	const ok = validate(value);
-	expect(ok, `${name} mismatch: ${ajv.errorsText(validate.errors, { separator: '\n  ' })}`).toBe(
-		true
-	);
+	const result = check(name, value);
+	expect(result.ok, `${name} mismatch: ${result.errors}`).toBe(true);
 }
 
 /** Assert `value` does NOT match — used to prove the schemas actually bite. */
 function expectInvalid(name: string, value: unknown): void {
-	expect(validator(name)(value)).toBe(false);
+	expect(check(name, value).ok).toBe(false);
 }
 
 // ── Internal read-model fixtures (the shapes the real services return) ────────

@@ -160,11 +160,27 @@ export async function withIdempotency({
 	throw new IdempotencyConflictError('in_progress');
 }
 
-/** A Postgres unique-violation (`23505`) — the pending-first insert lost the race. */
+/**
+ * A Postgres unique-violation (`23505`) — the pending-first insert lost the race.
+ *
+ * The code is looked up along the CAUSE CHAIN, not just on the thrown value: Drizzle
+ * wraps every driver failure in a `DrizzleQueryError` whose own `code` is undefined
+ * and whose `cause` is the `pg` error carrying `code: '23505'`. Checking only the
+ * top-level object made the duplicate insert escape as an uncaught error — i.e. a
+ * REPLAY (§16.6) surfaced as a 500 instead of the stored response. Only a real-DB
+ * test can catch that (a stubbed store throws whatever it is told to), which is why
+ * `tests/integration/api-idempotency-rate-limit.test.ts` exists.
+ */
 function isUniqueViolation(e: unknown): boolean {
-	return (
-		typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === '23505'
-	);
+	const UNIQUE_VIOLATION = '23505';
+	// Bounded walk — a cause chain is short, and the bound rules out a cycle.
+	for (let current: unknown = e, depth = 0; current != null && depth < 5; depth++) {
+		if (typeof current === 'object' && 'code' in current) {
+			if ((current as { code: unknown }).code === UNIQUE_VIOLATION) return true;
+		}
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
 }
 
 /**
