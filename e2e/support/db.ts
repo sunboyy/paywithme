@@ -130,6 +130,45 @@ export async function deleteGroupsCreatedBy(email: string): Promise<void> {
 }
 
 /**
+ * Hard-delete every API key owned by the test user (matched by email).
+ *
+ * `api_key.reference_id` holds the owner's user id but is a PLAIN TEXT column
+ * with NO foreign key (the `@better-auth/api-key` plugin's own shape), so
+ * deleting the user does NOT cascade to their keys — they'd be left behind as
+ * orphans. Hence this explicit sweep. Call it before `deleteUserByEmail`.
+ *
+ * Safe to call in `afterAll`; no rows is a no-op.
+ */
+export async function deleteApiKeysOwnedBy(email: string): Promise<void> {
+	await withClient(async (client) => {
+		await client.query(
+			'DELETE FROM api_key WHERE reference_id IN (SELECT id FROM "user" WHERE email = $1)',
+			[email]
+		);
+	});
+}
+
+/**
+ * Hard-delete every audit row the test user is the ACTOR of.
+ *
+ * `audit_log.actor_user_id` → `user.id` is `restrict` (PLAN §12.1: ledger history
+ * pins its author), and key-management rows are group-LESS (`group_id` is NULL),
+ * so unlike the group-flow spec there is no group delete to cascade them away —
+ * the user simply cannot be deleted while they exist. Test data only; production
+ * never deletes audit rows. Call it before `deleteUserByEmail`.
+ *
+ * Safe to call in `afterAll`; no rows is a no-op.
+ */
+export async function deleteAuditRowsActedBy(email: string): Promise<void> {
+	await withClient(async (client) => {
+		await client.query(
+			'DELETE FROM audit_log WHERE actor_user_id IN (SELECT id FROM "user" WHERE email = $1)',
+			[email]
+		);
+	});
+}
+
+/**
  * Remove all auth rows for a test user (and their verification tokens) so reruns
  * stay isolated. Matches the user by email and cascades to session/account/
  * passkey via the FK relationships; `verification` rows key on the token, not the

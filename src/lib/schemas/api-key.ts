@@ -51,17 +51,42 @@ export const API_KEY_CUSTOM_EXPIRY_MAX_DAYS = 365;
 export const API_KEY_NAME_MAX_LENGTH = 32;
 
 /**
+ * Normalizes the raw `customDays` field into `number | undefined`.
+ *
+ * The empty string is the whole reason this exists. An HTML form ALWAYS submits
+ * its custom-days input, and when the user picked a preset that input is empty —
+ * so `customDays` arrives as `''`, not as absent. `z.coerce.number()` turns `''`
+ * into `0`, which then fails the ≥1 bound, so every preset (never/30/90/365) got
+ * rejected unless the user also filled in a day count. Treating blank as ABSENT
+ * is what makes the presets submittable at all.
+ *
+ * Non-numeric junk also maps to `undefined` rather than `NaN`: only a hand-rolled
+ * (no-JS / curl) submission can produce it, and "enter how many days" is a better
+ * message than a type error. Range/integer checks live in the `superRefine` below
+ * so they run ONLY when the value is actually used.
+ */
+function normalizeCustomDays(value: unknown): number | undefined {
+	if (typeof value === 'number') return Number.isNaN(value) ? undefined : value;
+	if (typeof value !== 'string') return undefined;
+	const trimmed = value.trim();
+	if (trimmed === '') return undefined;
+	const parsed = Number(trimmed);
+	return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/**
  * Create-key input (PLAN §16.8). Backs `/settings/api-keys/new`, which is a real
  * server-first route: a plain `<form>` POST carries `name`, `scope`, `expiry` and
  * (only when `expiry === 'custom'`) `customDays`, so the whole flow works with JS
  * disabled.
  *
- * The `superRefine` encodes the one cross-field rule: a custom expiry REQUIRES a
- * day count, and the error is attached to `customDays` so it renders next to that
- * input rather than as a form-level message. When any other choice is selected,
- * `customDays` is ignored entirely (the service reads the choice, not the raw
- * field), so a stale value left in the input by the browser can never leak into
- * the minted key's TTL.
+ * The `superRefine` owns the whole custom-expiry rule: a custom expiry REQUIRES a
+ * valid day count, and every error is attached to `customDays` so it renders next
+ * to that input rather than as a form-level message. When any OTHER choice is
+ * selected the field is not validated at all — it is ignored downstream (the
+ * service reads the choice, not the raw field), so a stale or junk value left in
+ * the input by the browser can neither leak into the minted key's TTL nor block
+ * the submission.
  */
 export const createApiKeySchema = z
 	.object({
@@ -77,25 +102,23 @@ export const createApiKeySchema = z
 		scope: z.enum(API_KEY_SCOPES).default('read'),
 		// Default `never` = PLAN §16.8's stated default (non-expiring, §16.2).
 		expiry: z.enum(API_KEY_EXPIRY_CHOICES).default('never'),
-		// `coerce` because a no-JS form field always arrives as a string.
-		customDays: z.coerce
-			.number()
-			.int({ message: 'Enter a whole number of days' })
-			.min(API_KEY_CUSTOM_EXPIRY_MIN_DAYS, {
-				message: `Choose at least ${API_KEY_CUSTOM_EXPIRY_MIN_DAYS} day`
-			})
-			.max(API_KEY_CUSTOM_EXPIRY_MAX_DAYS, {
-				message: `Choose at most ${API_KEY_CUSTOM_EXPIRY_MAX_DAYS} days`
-			})
-			.optional()
+		customDays: z.preprocess(normalizeCustomDays, z.number().optional())
 	})
 	.superRefine((data, ctx) => {
-		if (data.expiry === 'custom' && data.customDays === undefined) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['customDays'],
-				message: 'Enter how many days the key should last'
-			});
+		if (data.expiry !== 'custom') return;
+
+		const days = data.customDays;
+		const addIssue = (message: string) =>
+			ctx.addIssue({ code: 'custom', path: ['customDays'], message });
+
+		if (days === undefined) {
+			addIssue('Enter how many days the key should last');
+		} else if (!Number.isInteger(days)) {
+			addIssue('Enter a whole number of days');
+		} else if (days < API_KEY_CUSTOM_EXPIRY_MIN_DAYS) {
+			addIssue(`Choose at least ${API_KEY_CUSTOM_EXPIRY_MIN_DAYS} day`);
+		} else if (days > API_KEY_CUSTOM_EXPIRY_MAX_DAYS) {
+			addIssue(`Choose at most ${API_KEY_CUSTOM_EXPIRY_MAX_DAYS} days`);
 		}
 	});
 

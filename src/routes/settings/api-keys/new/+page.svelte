@@ -14,9 +14,12 @@
 	// radio-CARD look is achieved with a real `<input type="radio">` inside a styled
 	// <label>, which is keyboard- and screen-reader-native for free.
 	//
-	// The custom-days input is ALWAYS rendered (never `{#if expiry === 'custom'}`):
-	// a no-JS page can't re-render on radio change, so a conditionally-shown field
-	// could never appear. It is ignored server-side unless "Custom" is chosen.
+	// The custom-days input is only shown when "Custom" is checked — but via a CSS
+	// `:has()` rule, NOT `{#if expiry === 'custom'}`. A no-JS page can't re-render on
+	// a radio change, so an `{#if}` field could never appear; `:has()` reacts to
+	// `:checked` in the browser's own style engine, so it works with JS disabled.
+	// The field stays in the DOM and still submits when hidden — harmless, because
+	// the schema ignores `customDays` unless "Custom" is the chosen expiry.
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { resolve } from '$app/paths';
@@ -172,56 +175,64 @@
 					Keys never expire by default. Give a key an end date if it's for a one-off job.
 				</Card.Description>
 			</Card.Header>
-			<Card.Content class="space-y-4">
-				<Form.Fieldset {form} name="expiry" class="space-y-3">
-					<Form.Legend class="sr-only">Expiry</Form.Legend>
-					<div class="grid gap-2 sm:grid-cols-2">
-						{#each expiryOptions as option (option.value)}
-							<label
-								class="border-input has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-ring flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors has-focus-visible:ring-2"
-							>
-								<input
-									type="radio"
-									name="expiry"
-									value={option.value}
-									bind:group={$formData.expiry}
-									class="accent-primary mt-0.5 size-4 shrink-0"
-								/>
-								<span class="min-w-0">
-									<span class="block font-medium">{option.label}</span>
-									{#if option.hint}
-										<span class="text-muted-foreground block text-xs">{option.hint}</span>
-									{/if}
-								</span>
-							</label>
-						{/each}
-					</div>
-					<Form.FieldErrors />
-				</Form.Fieldset>
+			<Card.Content>
+				<!-- A plain div (not `Card.Content` itself) carries `expiry-group`: Svelte's
+				     CSS scoping only hashes elements in THIS component's markup, so a class
+				     handed to a child component would never match the scoped rule below. -->
+				<div class="expiry-group space-y-4">
+					<Form.Fieldset {form} name="expiry" class="space-y-3">
+						<Form.Legend class="sr-only">Expiry</Form.Legend>
+						<div class="grid gap-2 sm:grid-cols-2">
+							{#each expiryOptions as option (option.value)}
+								<label
+									class="border-input has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-ring flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors has-focus-visible:ring-2"
+								>
+									<input
+										type="radio"
+										name="expiry"
+										value={option.value}
+										bind:group={$formData.expiry}
+										class="accent-primary mt-0.5 size-4 shrink-0"
+									/>
+									<span class="min-w-0">
+										<span class="block font-medium">{option.label}</span>
+										{#if option.hint}
+											<span class="text-muted-foreground block text-xs">{option.hint}</span>
+										{/if}
+									</span>
+								</label>
+							{/each}
+						</div>
+						<Form.FieldErrors />
+					</Form.Fieldset>
 
-				<!-- Always rendered — see the no-JS note in the module comment. -->
-				<Form.Field {form} name="customDays">
-					<Form.Control>
-						{#snippet children({ props })}
-							<Form.Label>Custom expiry (days)</Form.Label>
-							<Input
-								{...props}
-								type="number"
-								inputmode="numeric"
-								min={API_KEY_CUSTOM_EXPIRY_MIN_DAYS}
-								max={API_KEY_CUSTOM_EXPIRY_MAX_DAYS}
-								step="1"
-								placeholder="e.g. 14"
-								bind:value={$formData.customDays}
-							/>
-						{/snippet}
-					</Form.Control>
-					<Form.Description>
-						Used only when <strong>Custom</strong> is selected above. Between
-						{API_KEY_CUSTOM_EXPIRY_MIN_DAYS} and {API_KEY_CUSTOM_EXPIRY_MAX_DAYS} days.
-					</Form.Description>
-					<Form.FieldErrors />
-				</Form.Field>
+					<!-- Kept in the DOM and revealed by CSS when "Custom" is checked — see the
+				     no-JS note in the module comment. -->
+					<div class="custom-days">
+						<Form.Field {form} name="customDays">
+							<Form.Control>
+								{#snippet children({ props })}
+									<Form.Label>Custom expiry (days)</Form.Label>
+									<Input
+										{...props}
+										type="number"
+										inputmode="numeric"
+										min={API_KEY_CUSTOM_EXPIRY_MIN_DAYS}
+										max={API_KEY_CUSTOM_EXPIRY_MAX_DAYS}
+										step="1"
+										placeholder="e.g. 14"
+										bind:value={$formData.customDays}
+									/>
+								{/snippet}
+							</Form.Control>
+							<Form.Description>
+								How long this key should last — between {API_KEY_CUSTOM_EXPIRY_MIN_DAYS} and {API_KEY_CUSTOM_EXPIRY_MAX_DAYS}
+								days.
+							</Form.Description>
+							<Form.FieldErrors />
+						</Form.Field>
+					</div>
+				</div>
 			</Card.Content>
 		</Card.Root>
 
@@ -242,3 +253,18 @@
 		</div>
 	</form>
 </div>
+
+<style>
+	/* The custom-days reveal. `:has()` + `:checked` is evaluated by the browser's
+	   style engine, so this is the one way to make the field appear on a radio
+	   change WITHOUT JavaScript — which §16.8 requires. `display: none` also takes
+	   the input out of the tab order while hidden, so keyboard users don't land on
+	   a field they can't see. */
+	.custom-days {
+		display: none;
+	}
+
+	.expiry-group:has(input[name='expiry'][value='custom']:checked) .custom-days {
+		display: block;
+	}
+</style>

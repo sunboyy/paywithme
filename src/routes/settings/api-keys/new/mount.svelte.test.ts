@@ -68,8 +68,31 @@ describe('/settings/api-keys/new page', () => {
 
 		// Even though "Never" is selected, the field must already be in the DOM —
 		// otherwise a JS-disabled user could select "Custom" and have nowhere to type.
+		// It is HIDDEN (not absent) until "Custom" is checked; the reveal is a CSS
+		// `:has()` rule so it works without JS, which means only a real browser can
+		// assert the visibility itself — see `e2e/api-key-create.spec.ts`.
 		const custom = container.querySelector<HTMLInputElement>('input[name="customDays"]');
 		expect(custom).not.toBeNull();
 		expect(custom?.type).toBe('number');
+	});
+
+	it('wires the custom-days field into the CSS reveal (no `{#if}`, so no-JS still works)', () => {
+		const { container } = render(Page, { props: { data: pageData() } });
+
+		// The rule is `.expiry-group:has(input[value=custom]:checked) .custom-days`.
+		// Vitest/jsdom does not apply the component's styles, so what IS testable here
+		// is the structure the rule depends on: the field must sit inside a
+		// `.custom-days` wrapper that descends from the `.expiry-group` that contains
+		// the custom radio. If a refactor breaks that nesting, the field silently
+		// becomes permanently hidden — this is what catches it.
+		const group = container.querySelector('.expiry-group');
+		expect(group).not.toBeNull();
+		expect(
+			group?.querySelector('input[type="radio"][name="expiry"][value="custom"]')
+		).not.toBeNull();
+
+		const wrapper = group?.querySelector('.custom-days');
+		expect(wrapper).not.toBeNull();
+		expect(wrapper?.querySelector('input[name="customDays"]')).not.toBeNull();
 	});
 });

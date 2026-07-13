@@ -41,6 +41,53 @@ describe('createApiKeySchema', () => {
 		}
 	});
 
+	it('accepts every preset when the custom-days input is EMPTIED rather than absent', () => {
+		// THE REGRESSION (see e2e/api-key-create.spec.ts). An emptied custom-days input
+		// does not reach the schema as "absent": Svelte's number binding sends `null`,
+		// and a no-JS form posts `''`. `z.coerce.number()` turned BOTH into `0`, which
+		// failed the ≥1 bound — so every preset was rejected until the user filled in a
+		// day count they didn't want. Emptied must mean ABSENT.
+		for (const expiry of ['never', '30', '90', '365'] as const) {
+			for (const customDays of ['', null]) {
+				const result = createApiKeySchema.safeParse({
+					name: 'k',
+					scope: 'read',
+					expiry,
+					customDays
+				});
+				expect(
+					result.success,
+					`expiry=${expiry} with customDays=${JSON.stringify(customDays)} must be accepted`
+				).toBe(true);
+				if (result.success) {
+					expect(result.data.expiry).toBe(expiry);
+					// And emptied must not become 0 — the service reads `expiry`, but a 0
+					// here would be a live footgun for any future caller of this field.
+					expect(result.data.customDays).toBeUndefined();
+				}
+			}
+		}
+	});
+
+	it('treats an emptied custom-days as absent even when "custom" is chosen', () => {
+		// Same normalization, but here the field IS required — so it must surface the
+		// friendly "how many days" message, not "choose at least 1 day" (which is what
+		// a coerced `0` produced) nor a `NaN` type error.
+		for (const customDays of ['', '   ', null]) {
+			const result = createApiKeySchema.safeParse({
+				name: 'k',
+				scope: 'read',
+				expiry: 'custom',
+				customDays
+			});
+			expect(result.success).toBe(false);
+			if (!result.success) {
+				const issue = result.error.issues.find((i) => i.path[0] === 'customDays');
+				expect(issue?.message).toBe('Enter how many days the key should last');
+			}
+		}
+	});
+
 	it('rejects an unknown scope rather than silently downgrading it', () => {
 		// A junk scope must be a hard validation error — never quietly coerced to
 		// `write` (privilege escalation) NOR to `read` (a silently wrong key).
@@ -112,6 +159,19 @@ describe('createApiKeySchema', () => {
 			// service reads the CHOICE, not this field (see expiresInSeconds).
 			const result = parseForm({ name: 'k', scope: 'read', expiry: 'never', customDays: '30' });
 			expect(result.success).toBe(true);
+		});
+
+		it('does not let an INVALID stale customDays block a preset submission', () => {
+			// The field is ignored when it isn't the chosen expiry, so its bounds must
+			// not be enforced either — otherwise junk left in a hidden input (or typed
+			// by a no-JS user) would make "90 days" unsubmittable, which is the same
+			// class of bug as the empty-string one above.
+			for (const customDays of ['0', '-5', '999', 'abc']) {
+				const result = parseForm({ name: 'k', scope: 'read', expiry: '90', customDays });
+				expect(result.success, `a stale customDays=${customDays} must not block a preset`).toBe(
+					true
+				);
+			}
 		});
 	});
 });
