@@ -909,6 +909,15 @@ export interface TransactionDetail {
 	readonly categoryId: string;
 	readonly categoryName: string;
 	readonly categoryIcon: string;
+	/**
+	 * The user who RECORDED this transaction (`transactions.created_by` — durable
+	 * authorship, §7.1). It is who AUTHORED the free text on the row (`title`, item
+	 * labels), which is why the agent-facing MCP view needs it: every such field is
+	 * served inside an untrusted envelope attributed to its author (ADR-0003). The
+	 * `/api/v1` `TransactionDetailDto` deliberately does NOT carry it (that contract
+	 * is frozen); the mapper simply does not read this field.
+	 */
+	readonly createdBy: string;
 	/** The ORIGINAL total, ENTRY-currency minor units (§7.6 display). */
 	readonly amountTotal: number;
 	/** The ENTRY currency the txn was recorded in. */
@@ -979,6 +988,7 @@ export async function getTransactionDetail({
 			exchangeRate: transactions.exchangeRate,
 			amountTotalSettlement: transactions.amountTotalSettlement,
 			splitMode: transactions.splitMode,
+			createdBy: transactions.createdBy,
 			createdAt: transactions.createdAt,
 			deletedAt: transactions.deletedAt
 		})
@@ -1152,6 +1162,9 @@ export async function getTransactionDetail({
 		categoryId: txn.categoryId,
 		categoryName: category?.name ?? txn.categoryId,
 		categoryIcon: category?.icon ?? 'circle',
+		// Who wrote the title / item labels — the author the MCP untrusted envelope
+		// attributes them to (ADR-0003). Never reaches the `/api/v1` wire.
+		createdBy: txn.createdBy,
 		amountTotal: txn.amountTotal,
 		currency: entryCurrency,
 		amountTotalSettlement: txn.amountTotalSettlement,

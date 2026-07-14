@@ -16,6 +16,9 @@ function makeDetail(overrides: Partial<TransactionDetail> = {}): TransactionDeta
 		categoryId: 'c1',
 		categoryName: 'Food',
 		categoryIcon: '🍜',
+		// Who authored the title (§7.1 `created_by`). Internal: the MCP view needs it for
+		// the untrusted envelope's author (ADR-0003); the v1 DTO must NOT carry it.
+		createdBy: 'u_author',
 		amountTotal: 1000,
 		currency: 'USD',
 		amountTotalSettlement: 35000,
@@ -51,6 +54,13 @@ describe('toTransactionDetailDto', () => {
 	it('drops the internal `input` edit-form seed', () => {
 		const dto = toTransactionDetailDto(makeDetail());
 		expect(dto).not.toHaveProperty('input');
+	});
+
+	it('drops the internal `createdBy` — the v1 contract is FROZEN (ADR-0006)', () => {
+		// The MCP view layer needs the author (to attribute untrusted text); `/api/v1`
+		// does not serve it, and adding it would change a published, spec-backed DTO.
+		const dto = toTransactionDetailDto(makeDetail());
+		expect(dto).not.toHaveProperty('createdBy');
 	});
 
 	it('nests entry-currency amounts (total, payers, item amounts) in the entry currency', () => {

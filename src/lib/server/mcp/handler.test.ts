@@ -201,23 +201,33 @@ describe('initialize', () => {
 	});
 });
 
+/** The whole READ surface, in the order `tools/list` advertises it (#29). */
+const READ_TOOLS = [
+	'list_groups',
+	'get_group',
+	'list_members',
+	'get_balances',
+	'get_transaction',
+	'list_currencies'
+];
+
 describe('tools/list (ADR-0002: scope-filtered)', () => {
-	it('advertises `list_groups` to a read key', async () => {
+	it('advertises the whole READ surface to a read key, all of it read-only', async () => {
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 
 		const tools = res.body.result?.tools ?? [];
-		expect(tools.map((t) => t.name)).toEqual(['list_groups']);
-		expect(tools[0].annotations.readOnlyHint).toBe(true);
+		expect(tools.map((t) => t.name)).toEqual(READ_TOOLS);
+		expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
 	});
 
-	it('a WRITE key sees the same list today (no write tools ship in #28)', async () => {
+	it('a WRITE key sees the same list today (no write tools ship in #29)', async () => {
 		verifyApiKey.mockResolvedValue({
 			...VALID_KEY,
 			key: { ...VALID_KEY.key, permissions: { api: ['read', 'write'] } }
 		});
 
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual(['list_groups']);
+		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual(READ_TOOLS);
 	});
 });
 
@@ -239,9 +249,11 @@ describe('tools/call', () => {
 		expect(listGroupsForUser).toHaveBeenCalledWith('user_1');
 		expect(res.status).toBe(200);
 		expect(res.body.result?.isError).toBeUndefined();
+		// Through the MCP VIEW (ADR-0006): the group NAME is Member-authored text, so it
+		// arrives inside the untrusted envelope, attributed to its author (ADR-0003).
 		expect(res.body.result?.structuredContent?.groups?.[0]).toMatchObject({
 			id: 'grp_1',
-			name: 'Trip'
+			name: { _untrusted: true, value: 'Trip', author: { kind: 'you', userId: 'user_1' } }
 		});
 	});
 

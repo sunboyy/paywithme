@@ -26,6 +26,11 @@ import { mapToolError, mcpRateLimitedResult, toolError } from './errors';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import type { McpTool, McpToolDefinition, McpToolResult, RegisteredTool } from './types';
 import { listGroupsTool } from './tools/list-groups';
+import { getGroupTool } from './tools/get-group';
+import { listMembersTool } from './tools/list-members';
+import { getBalancesTool } from './tools/get-balances';
+import { getTransactionTool } from './tools/get-transaction';
+import { listCurrenciesTool } from './tools/list-currencies';
 
 /**
  * Erase a tool's `Args` generic so heterogeneous tools share one registry list.
@@ -42,11 +47,28 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
 }
 
 /**
- * Every tool the Connector serves. #28 = the read tracer bullet; ADR-0002's write
- * tools (`create_transaction`, `settle_up`, …) join this list in #32 with
- * `scope: 'write'` and are then automatically hidden from read keys.
+ * Every tool the Connector serves. #28 shipped the tracer bullet (`list_groups`);
+ * #29 completes the READ surface — all of it projected through the MCP view layer
+ * (ADR-0006), so every free-text field an agent sees is an untrusted envelope and
+ * every amount is a decimal string.
+ *
+ * ORDER IS A PROMPT. `tools/list` is emitted in this order, so it reads as the path
+ * the agent should walk: find the group → who is in it (and which member is ME) →
+ * THE OWED FIGURE → one transaction's detail → the currency table. `get_balances`
+ * sits before `get_transaction` deliberately (ADR-0008): the authoritative answer
+ * should be the one the model meets first.
+ *
+ * ADR-0002's write tools (`create_transaction`, `settle_up`, …) join this list in #32
+ * with `scope: 'write'` and are then automatically hidden from read keys.
  */
-export const MCP_TOOLS: readonly RegisteredTool[] = [registerTool(listGroupsTool)];
+export const MCP_TOOLS: readonly RegisteredTool[] = [
+	registerTool(listGroupsTool),
+	registerTool(getGroupTool),
+	registerTool(listMembersTool),
+	registerTool(getBalancesTool),
+	registerTool(getTransactionTool),
+	registerTool(listCurrenciesTool)
+];
 
 /**
  * The tools a key of `scope` may see (ADR-0002). `write ⊇ read`, so a write key
