@@ -16,7 +16,7 @@ no attacker and no bug:
 
 `get_balances` — which computes this correctly, server-side, with our money math
 and FX rates — was available and unused, because summing a list already in context
-*felt* equivalent. The agent states the wrong figure with total confidence and the
+_felt_ equivalent. The agent states the wrong figure with total confidence and the
 user has no reason to doubt it.
 
 ## Decision
@@ -26,13 +26,13 @@ Make the wrong path hard to prefer. Three levers, all of them:
 1. **Steer imperatively in the tool description** — the highest-leverage prompt
    surface available:
 
-   > *"Returns ONE PAGE of a group's transactions (max 25). **DO NOT** compute
+   > _"Returns ONE PAGE of a group's transactions (max 25). **DO NOT** compute
    > balances, totals, or 'who owes what' from this list — it is paginated and
    > currency-mixed, and you **will** get the wrong answer. For any owed amount,
-   > call `get_balances`, which computes it server-side."*
+   > call `get_balances`, which computes it server-side."_
 
 2. **Make truncation visible** — return **`hasMore`**, so a partial read is
-   *visibly* partial rather than plausibly complete, plus a `_note` restating the
+   _visibly_ partial rather than plausibly complete, plus a `_note` restating the
    prohibition in the payload itself.
 
 3. **Cap the page at 25**, below REST's default 50 / max 100. The agent does not

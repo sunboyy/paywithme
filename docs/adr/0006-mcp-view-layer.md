@@ -8,14 +8,14 @@
 Two gaps forced this decision.
 
 **The agent cannot identify the user.** `settle_up` needs `from` (payer) and `to`
-(payee). `to` is obtainable from `list_members`. `from` is *the user's own member
-id in that group* — and nothing in the API reveals it. `MemberDto` carries `id`,
+(payee). `to` is obtainable from `list_members`. `from` is _the user's own member
+id in that group_ — and nothing in the API reveals it. `MemberDto` carries `id`,
 `displayName`, `userId`, `deactivatedAt`, `isLinked`, but **no self marker**, and
 there is no `whoami`. The agent's only recourse would be to guess from a display
 name, which is the wrong-payee failure below, guaranteed rather than occasional.
 
 **The agent can pick the wrong real person.** The server already rejects
-*hallucinated* member ids (settle-up "re-validates against the group's active
+_hallucinated_ member ids (settle-up "re-validates against the group's active
 members (an unknown `from`/`to` → 422)"). But an agent matching "Nan" against
 `Nan Suphaporn` and `Nanthawat P.` can pick the wrong one — and that write is
 valid, passes every guard, and misattributes money between two real people.
@@ -35,13 +35,13 @@ It owns, and only it owns:
   explicit `from` remains allowed — recording that A paid B on others' behalf is a
   real flow).
 - **IDs only** in write-tool schemas. No server-side fuzzy name matching in the
-  money path. The agent calls `list_members` and matches the name *itself,
-  visibly, in the transcript*, where the user can see the reasoning.
+  money path. The agent calls `list_members` and matches the name _itself,
+  visibly, in the transcript_, where the user can see the reasoning.
 - **Prose echo-back naming the humans**, so a wrong pick is legible at the moment
   it happens rather than discovered later:
 
-  > *"Recorded settle-up: you → **Nan Suphaporn**, THB 1,200.00. (The other 'Nan'
-  > in this group is Nanthawat P. — not involved.)"*
+  > _"Recorded settle-up: you → **Nan Suphaporn**, THB 1,200.00. (The other 'Nan'
+  > in this group is Nanthawat P. — not involved.)"_
 
 - **Untrusted-text envelopes** (ADR-0003), **decimal amounts** (ADR-0004),
   **`hasMore` + steering notes** (ADR-0008).

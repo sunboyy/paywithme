@@ -28,13 +28,13 @@ HTTP** transport, **statelessly**.
 
 The MCP spec (2025-06-18) makes three things optional that we decline:
 
-- **Session IDs** — the server *"MAY assign a session ID at initialization."* We
+- **Session IDs** — the server _"MAY assign a session ID at initialization."_ We
   do not. No session store, no sticky routing, no Redis.
-- **SSE streams** — for a JSON-RPC request over POST the server *"MUST either
-  return `Content-Type: text/event-stream` … or `application/json`."* We return
+- **SSE streams** — for a JSON-RPC request over POST the server _"MUST either
+  return `Content-Type: text/event-stream` … or `application/json`."_ We return
   JSON.
-- **GET** — the server *"MUST either return `text/event-stream` … or else return
-  HTTP 405 Method Not Allowed."* We return 405; we have no server-initiated
+- **GET** — the server _"MUST either return `text/event-stream` … or else return
+  HTTP 405 Method Not Allowed."_ We return 405; we have no server-initiated
   messages.
 
 The protocol surface therefore reduces to three JSON-RPC methods — `initialize`,
@@ -54,8 +54,18 @@ implemented.
   (#22) come along for free — they live in `lib/server`, below the transport.
 - The MCP SDK's `StreamableHTTPServerTransport` is **optional**, not required. If
   it fights the serverless runtime, three JSON-RPC methods are hand-implementable.
-  *(Unverified: whether the SDK transport wants Node `req`/`res` or Fetch
-  `Request`/`Response`. Try the SDK first; fall back if it fights.)*
+  **Resolved in #28 — it fights; we hand-rolled.** The SDK transport's entry point
+  is `handleRequest(req: IncomingMessage, res: ServerResponse)`: it writes to a
+  **Node stream**. A SvelteKit `+server.ts` is handed a Fetch `Request` and must
+  **return** a `Response`, so the SDK would only fit behind a fake
+  `IncomingMessage` plus a `ServerResponse` that buffers writes back into a
+  `Response` (the shim Vercel ships as `mcp-handler`). That adapter is more code —
+  and more failure surface — than the thing it adapts, because this ADR has
+  already deleted everything the SDK is _for_: no sessions, no SSE, no GET, no
+  server-initiated messages. What remains is three request methods over one
+  request/response POST. `src/lib/server/mcp/` implements them with **zero new
+  dependencies**; the JSON-RPC codec is a pure function and every malformed-input
+  branch is unit-tested.
 - We can serve `/.well-known/*` at the origin root — unlike Cloudflare Workers or
   Supabase Edge Functions, which the Claude docs call out as painful for exactly
   this reason. This keeps the OAuth path (ADR-0007) open at no cost.
