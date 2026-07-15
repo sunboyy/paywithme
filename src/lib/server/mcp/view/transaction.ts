@@ -22,7 +22,7 @@
 // which a model would read as an amount.
 
 import type { CurrencyCode } from '$lib/money';
-import type { TransactionDetail } from '$lib/server/transactions';
+import type { TransactionDetail, TransactionListItem } from '$lib/server/transactions';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import { toMcpMoney, type McpMoney } from './money';
 import type { MemberView } from './member';
@@ -205,5 +205,100 @@ export function toTransactionView({
 					}
 		),
 		_note: TRANSACTION_NOTE
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The LIST-ROW view — `list_transactions` (issue #30, ADR-0008).
+//
+// The single likeliest way the Connector hands someone a wrong number, with no
+// attacker involved: the agent pages this list, stops early, sums what it holds,
+// converts currencies in its head, and announces a balance that is off because it
+// never saw the rest. ADR-0008 makes that path hard to prefer with THREE levers —
+// the tool caps the page at 25 and returns `hasMore` (levers 1 + 3, in the tool);
+// this view carries lever 2, the `_note` restating the prohibition WHERE THE DATA
+// IS, long after the tool description has scrolled out of context.
+//
+// The row is DELIBERATELY LIGHTER than `TransactionView`: no payer/share lines, no
+// items, no charges — a list is for FINDING a transaction ("what did we spend on
+// food in Tokyo?"), and the moment shares appear the arithmetic temptation returns.
+// The title is still the full untrusted envelope, attributed to its author EXACTLY
+// as `get_transaction` attributes it, so a list title and a detail title read
+// identically (ADR-0003). Money is decimal strings in both currencies (ADR-0004).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One transaction as an agent sees it in a LIST — a lighter row than the detail view. */
+export interface TransactionListItemView {
+	readonly id: string;
+	readonly type: 'spending' | 'transfer';
+	/** UNTRUSTED (ADR-0003) — attributed to whoever recorded the transaction. */
+	readonly title: UntrustedText;
+	readonly category: {
+		readonly id: string;
+		/** UNTRUSTED shape, author `paywithme`: v1 categories are a fixed seeded list (§9). */
+		readonly name: UntrustedText;
+		readonly icon: string;
+	};
+	/** The ORIGINAL total, in the currency it was entered in (§7.6). */
+	readonly amount: McpMoney;
+	/** The SAME total converted into the group's settlement currency — what §8 uses. */
+	readonly settlementAmount: McpMoney;
+	/** TRUE when the entry currency differs from the settlement currency (§7.6). */
+	readonly isForeign: boolean;
+	/**
+	 * The REAL-WORLD date the transaction took place (PLAN §7.1 `created_at`: the
+	 * user-editable, backdatable date — NOT the row's insert time).
+	 */
+	readonly createdAt: string;
+}
+
+/**
+ * The steering ADR-0008 requires on the transaction LIST — the payload half of "make
+ * truncation visible". It restates, next to the data, what the tool description said:
+ * this is ONE PAGE, and a balance summed from it will be wrong. `hasMore` says the
+ * page is incomplete; this says what NOT to do about it.
+ */
+export const LIST_TRANSACTIONS_NOTE =
+	'This is ONE PAGE of transactions (max 25), not the whole ledger. DO NOT compute ' +
+	'balances, totals, or "who owes what" by adding up these rows — the list is ' +
+	'paginated (see `hasMore`) and currency-mixed, and you WILL get the wrong answer. ' +
+	'For any owed amount, call `get_balances`, which computes it server-side. ' +
+	UNTRUSTED_NOTE;
+
+/**
+ * Project a `TransactionListItem` into the agent's LIST row. PURE.
+ *
+ * The title is wrapped and attributed to the transaction's author (`created_by`),
+ * so it attributes IDENTICALLY to the same transaction's `get_transaction` title
+ * (ADR-0003). Both amounts are decimal strings in their correct currency (ADR-0004):
+ * the entry currency for the original total, the settlement currency for the §8 total.
+ */
+export function toTransactionListItemView({
+	item,
+	principal
+}: {
+	item: TransactionListItem;
+	principal: ApiKeyPrincipal;
+}): TransactionListItemView {
+	const entry: CurrencyCode = item.currency;
+	const settlement: CurrencyCode = item.settlementCurrency;
+	// Whoever recorded the transaction wrote its title — the same attribution
+	// `toTransactionView` makes for the detail title.
+	const author = authorOf(item.createdBy, principal);
+
+	return {
+		id: item.id,
+		type: item.type,
+		title: untrusted(item.title, author),
+		category: {
+			id: item.categoryId,
+			// Seeded by the app in v1 (§9) — wrapped for shape uniformity, author `paywithme`.
+			name: untrusted(item.categoryName, PAYWITHME_AUTHOR),
+			icon: item.categoryIcon
+		},
+		amount: toMcpMoney(item.amountTotal, entry),
+		settlementAmount: toMcpMoney(item.amountTotalSettlement, settlement),
+		isForeign: item.isForeign,
+		createdAt: item.createdAt
 	};
 }

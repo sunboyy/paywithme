@@ -50,6 +50,7 @@ import {
 	createApiScenario,
 	spendingInput,
 	SETTLEMENT_CURRENCY,
+	DEBT_SETTLEMENT_CATEGORY,
 	type ApiScenario
 } from './api-fixtures';
 import {
@@ -122,6 +123,26 @@ interface TransactionWire {
 	isDeleted: boolean;
 	payers: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountPaid: MoneyWire }[];
 	shares: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountOwed: MoneyWire }[];
+	_note: string;
+}
+
+/** One row of the `list_transactions` page (the lighter list view, #30). */
+interface TransactionListRowWire {
+	id: string;
+	type: 'spending' | 'transfer';
+	title: UntrustedWire;
+	category: { id: string; name: UntrustedWire; icon: string };
+	amount: MoneyWire;
+	settlementAmount: MoneyWire;
+	isForeign: boolean;
+	createdAt: string;
+}
+
+/** The `list_transactions` payload (#30). */
+interface TransactionListWire {
+	transactions: TransactionListRowWire[];
+	hasMore: boolean;
+	nextCursor: string | null;
 	_note: string;
 }
 
@@ -320,6 +341,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				'get_group',
 				'list_members',
 				'get_balances',
+				'list_transactions',
 				'get_transaction',
 				'list_currencies'
 			]);
@@ -737,6 +759,193 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 	});
 
+	// ── 10b. list_transactions — read steering: cap, hasMore, no client totals ─
+	//        (#30, ADR-0008). The likeliest wrong number, with no attacker.
+
+	describe('tools/call list_transactions (#30)', () => {
+		/** Seed a spending txn recorded by the KEY OWNER (fast, non-API seed). */
+		async function seed(
+			title: string,
+			extra: Record<string, unknown> = {},
+			amount = 9000
+		): Promise<string> {
+			return createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: {
+					...spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob], amount, title }),
+					...extra
+				}
+			});
+		}
+
+		it('caps the page at 25 and reports hasMore + a cursor when more exist (ADR-0008)', async () => {
+			// 26 rows: one more than the fixed cap, so the page is DELIBERATELY incomplete.
+			for (let i = 0; i < 26; i++) await seed(`Txn ${String(i).padStart(2, '0')}`);
+
+			const view = await callOk<TransactionListWire>('list_transactions', { groupId: s.group.id });
+
+			// Lever 3: the cap is 25, below REST's 50/100 — the agent cannot hold a
+			// "complete-looking" page.
+			expect(view.transactions).toHaveLength(25);
+			// Lever 2: truncation is visible. `hasMore` is minted from the `limit+1`
+			// over-fetch — no second COUNT query (ADR-0008).
+			expect(view.hasMore).toBe(true);
+			expect(view.nextCursor).not.toBeNull();
+		});
+
+		it('pages with nextCursor: the second page is short, terminal, and adds the rest with no overlap', async () => {
+			for (let i = 0; i < 26; i++) await seed(`Page ${String(i).padStart(2, '0')}`);
+
+			const page1 = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id
+			});
+			expect(page1.transactions).toHaveLength(25);
+
+			const page2 = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				cursor: page1.nextCursor
+			});
+
+			// A SHORT page: 26 − 25 = 1 row, and it is terminal — the stop signal is
+			// unambiguous (hasMore false, nextCursor null).
+			expect(page2.transactions).toHaveLength(1);
+			expect(page2.hasMore).toBe(false);
+			expect(page2.nextCursor).toBeNull();
+
+			// Every row exactly once across the two pages — the keyset walk is exhaustive.
+			const ids = [...page1.transactions, ...page2.transactions].map((t) => t.id);
+			expect(new Set(ids).size).toBe(26);
+		});
+
+		it('a group with a single page reports hasMore:false and nextCursor:null', async () => {
+			await seed('Only one');
+
+			const view = await callOk<TransactionListWire>('list_transactions', { groupId: s.group.id });
+
+			expect(view.transactions).toHaveLength(1);
+			expect(view.hasMore).toBe(false);
+			expect(view.nextCursor).toBeNull();
+		});
+
+		it('filters by `type` and `categoryId`, exactly as REST does', async () => {
+			await seed('A dinner');
+			await seed('A cab', { categoryId: 'spending-transportation' });
+			// A transfer, so a `type` filter has something to exclude.
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: {
+					type: 'transfer' as const,
+					title: 'Settle up',
+					categoryId: DEBT_SETTLEMENT_CATEGORY,
+					amountTotal: 1000,
+					currency: SETTLEMENT_CURRENCY,
+					exchangeRate: '1',
+					amountTotalSettlement: 1000,
+					splitMode: 'equal' as const,
+					payers: [{ memberId: s.alice, amountPaid: 1000 }],
+					beneficiaries: [{ memberId: s.bob }],
+					items: [],
+					charges: []
+				}
+			});
+
+			// `type: 'transfer'` → only the settle-up.
+			const transfers = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				type: 'transfer'
+			});
+			expect(transfers.transactions.map((t) => t.title.value)).toEqual(['Settle up']);
+
+			// `type: 'spending'` → the two spends, not the transfer.
+			const spends = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				type: 'spending'
+			});
+			expect(spends.transactions.map((t) => t.title.value).sort()).toEqual(['A cab', 'A dinner']);
+
+			// `categoryId` → only the matching category.
+			const cabs = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				categoryId: 'spending-transportation'
+			});
+			expect(cabs.transactions.map((t) => t.title.value)).toEqual(['A cab']);
+			expect(cabs.transactions[0].category.id).toBe('spending-transportation');
+		});
+
+		it('filters by an INCLUSIVE `from`/`to` date range on the real-world date (§7.1)', async () => {
+			// Three rows on three distinct calendar days (the §7.1 editable date).
+			await seed('May 1st', { date: '2026-05-01' });
+			await seed('May 15th', { date: '2026-05-15' });
+			await seed('June 1st', { date: '2026-06-01' });
+
+			// A bare `to=2026-05-15` must INCLUDE that day's row — `createdAt` is anchored
+			// at noon UTC, so the tool rolls `to` to end-of-day (mirrors REST).
+			const window = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				from: '2026-05-01',
+				to: '2026-05-15'
+			});
+
+			expect(window.transactions.map((t) => t.title.value).sort()).toEqual(['May 15th', 'May 1st']);
+		});
+
+		it('a title authored by ANOTHER member arrives untrusted, attributed to them; a self title is `you`', async () => {
+			// A group-mate (a real other person) records a transaction with an injection title.
+			const mate = await linkBobToAStranger();
+			await createTransaction({
+				userId: mate.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.bob,
+					beneficiaryIds: [s.alice, s.bob],
+					amount: 9000,
+					title: INJECTION
+				})
+			});
+			// …and the caller records one of their own.
+			await seed('My lunch');
+
+			const view = await callOk<TransactionListWire>('list_transactions', { groupId: s.group.id });
+
+			const theirs = view.transactions.find((t) => t.title.value === INJECTION);
+			// The attack arrives as DATA, verbatim, attributed to the person who wrote it —
+			// and IDENTICALLY to how `get_transaction` would attribute the same title.
+			expect(theirs?.title).toEqual({
+				_untrusted: true,
+				value: INJECTION,
+				author: { kind: 'member', userId: mate.id }
+			});
+
+			const mine = view.transactions.find((t) => t.title.value === 'My lunch');
+			expect(mine?.title.author).toEqual({ kind: 'you', userId: s.user.id });
+			// Category names are app-defined, and say so.
+			expect(mine?.category.name.author).toEqual({ kind: 'paywithme' });
+			// Money is decimal strings, in the right currency (ADR-0004).
+			expect(mine?.amount).toEqual({ amount: '90.00', currency: 'USD', display: 'USD $90.00' });
+		});
+
+		it('carries the ADR-0008 steering `_note` — do not sum, call get_balances', async () => {
+			await seed('Anything');
+
+			const view = await callOk<TransactionListWire>('list_transactions', { groupId: s.group.id });
+
+			expect(view._note).toMatch(/get_balances/);
+			expect(view._note).toMatch(/do not compute/i);
+			expect(view._note).toMatch(/one page/i);
+		});
+
+		it('is on the READ surface: a read key can see `list_transactions` in tools/list', async () => {
+			const res = await mcpRpc<{ tools: { name: string }[] }>('tools/list', undefined, read);
+			const names = (res.body.result?.tools ?? []).map((t) => t.name);
+			expect(names).toContain('list_transactions');
+		});
+	});
+
 	// ── 11. list_currencies ───────────────────────────────────────────────────
 
 	describe('tools/call list_currencies (#29)', () => {
@@ -774,6 +983,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				['get_group', {}],
 				['list_members', {}],
 				['get_balances', {}],
+				['list_transactions', {}],
 				['get_transaction', { transactionId: 'txn_whatever' }]
 			] as const) {
 				const forbidden = await mcpToolCall(tool, { groupId: theirs.id, ...extra }, read);

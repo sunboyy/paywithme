@@ -49,7 +49,10 @@ export {
 	type ItemView,
 	type ChargeView,
 	type TransactionView,
+	type TransactionListItemView,
 	TRANSACTION_NOTE,
-	toTransactionView
+	LIST_TRANSACTIONS_NOTE,
+	toTransactionView,
+	toTransactionListItemView
 } from './transaction';
 export { type CurrencyView, CURRENCIES_NOTE, toCurrencyViews } from './currency';

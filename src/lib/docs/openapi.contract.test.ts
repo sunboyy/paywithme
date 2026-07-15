@@ -105,6 +105,7 @@ const listItem: TransactionListItem = {
 	id: 'txn_ramen',
 	type: 'spending',
 	title: 'Ramen',
+	createdBy: 'usr_ada',
 	categoryId: 'spending-food-drink',
 	categoryName: 'Food & drink',
 	categoryIcon: 'utensils',

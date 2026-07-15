@@ -207,6 +207,7 @@ const READ_TOOLS = [
 	'get_group',
 	'list_members',
 	'get_balances',
+	'list_transactions',
 	'get_transaction',
 	'list_currencies'
 ];

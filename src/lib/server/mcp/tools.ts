@@ -29,6 +29,7 @@ import { listGroupsTool } from './tools/list-groups';
 import { getGroupTool } from './tools/get-group';
 import { listMembersTool } from './tools/list-members';
 import { getBalancesTool } from './tools/get-balances';
+import { listTransactionsTool } from './tools/list-transactions';
 import { getTransactionTool } from './tools/get-transaction';
 import { listCurrenciesTool } from './tools/list-currencies';
 
@@ -54,9 +55,10 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
  *
  * ORDER IS A PROMPT. `tools/list` is emitted in this order, so it reads as the path
  * the agent should walk: find the group → who is in it (and which member is ME) →
- * THE OWED FIGURE → one transaction's detail → the currency table. `get_balances`
- * sits before `get_transaction` deliberately (ADR-0008): the authoritative answer
- * should be the one the model meets first.
+ * THE OWED FIGURE → a page of transactions → one transaction's detail → the currency
+ * table. `get_balances` sits before BOTH `list_transactions` and `get_transaction`
+ * deliberately (ADR-0008): the authoritative owed figure should be the one the model
+ * meets FIRST, before the tempting-but-paginated list it would otherwise try to sum.
  *
  * ADR-0002's write tools (`create_transaction`, `settle_up`, …) join this list in #32
  * with `scope: 'write'` and are then automatically hidden from read keys.
@@ -66,6 +68,7 @@ export const MCP_TOOLS: readonly RegisteredTool[] = [
 	registerTool(getGroupTool),
 	registerTool(listMembersTool),
 	registerTool(getBalancesTool),
+	registerTool(listTransactionsTool),
 	registerTool(getTransactionTool),
 	registerTool(listCurrenciesTool)
 ];
