@@ -221,14 +221,18 @@ describe('tools/list (ADR-0002: scope-filtered)', () => {
 		expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
 	});
 
-	it('a WRITE key sees the same list today (no write tools ship in #29)', async () => {
+	it('a WRITE key ALSO sees `create_transaction`, after the read surface (#31)', async () => {
 		verifyApiKey.mockResolvedValue({
 			...VALID_KEY,
 			key: { ...VALID_KEY.key, permissions: { api: ['read', 'write'] } }
 		});
 
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual(READ_TOOLS);
+		// Read ⊆ write: the whole read surface, THEN the write tool last.
+		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual([
+			...READ_TOOLS,
+			'create_transaction'
+		]);
 	});
 });
 

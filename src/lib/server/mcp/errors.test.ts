@@ -10,7 +10,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { GroupAccessError } from '$lib/server/groups';
-import { TransactionCursorError, TransactionNotFoundError } from '$lib/server/transactions';
+import {
+	TransactionCursorError,
+	TransactionNotFoundError,
+	TransactionValidationError
+} from '$lib/server/transactions';
 import {
 	RESOURCE_METADATA_PATH,
 	mapToolError,
@@ -138,6 +142,27 @@ describe('mapToolError', () => {
 		const envelope = envelopeOf(mapToolError(parsed.error));
 		expect(envelope.code).toBe('validation_error');
 		expect(envelope.details).toMatchObject({ fieldErrors: expect.any(Object) });
+	});
+
+	it('maps a TransactionValidationError to validation_error, NOT internal_error (#31)', () => {
+		// The shared transaction schema rejecting server-side (e.g. a write tool's
+		// `splitBetween` naming an unknown / deactivated member). It extends plain `Error`,
+		// so without a dedicated branch it would fall through to the opaque `internal_error`
+		// with misleading "server-side failure" guidance — the exact regression this guards.
+		const err = new TransactionValidationError([
+			{
+				code: 'custom',
+				path: ['payers', 0, 'memberId'],
+				message: 'Unknown member'
+			} as unknown as z.core.$ZodIssue
+		]);
+
+		const envelope = envelopeOf(mapToolError(err));
+		expect(envelope.code).toBe('validation_error');
+		// Field-level details, shaped identically to the ZodError branch (REST parity).
+		expect(envelope.details).toMatchObject({ fieldErrors: expect.any(Object) });
+		// And NOT the opaque internal-error retry guidance.
+		expect(envelope.message).not.toMatch(/server-side failure/i);
 	});
 
 	it('collapses an UNKNOWN throw to an opaque internal_error — nothing leaks', () => {

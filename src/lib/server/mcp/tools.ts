@@ -32,6 +32,7 @@ import { getBalancesTool } from './tools/get-balances';
 import { listTransactionsTool } from './tools/list-transactions';
 import { getTransactionTool } from './tools/get-transaction';
 import { listCurrenciesTool } from './tools/list-currencies';
+import { createTransactionTool } from './tools/create-transaction';
 
 /**
  * Erase a tool's `Args` generic so heterogeneous tools share one registry list.
@@ -60,17 +61,22 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
  * deliberately (ADR-0008): the authoritative owed figure should be the one the model
  * meets FIRST, before the tempting-but-paginated list it would otherwise try to sum.
  *
- * ADR-0002's write tools (`create_transaction`, `settle_up`, …) join this list in #32
- * with `scope: 'write'` and are then automatically hidden from read keys.
+ * ADR-0002's WRITE tools join the list LAST, with `scope: 'write'` — so they are
+ * automatically hidden from read keys (`filterToolsByScope`) and appear only AFTER
+ * the whole read surface a write key needs to find its ids first. #31 lands the
+ * first one, `create_transaction`; `settle_up` and the rest follow the same way.
  */
 export const MCP_TOOLS: readonly RegisteredTool[] = [
+	// ── Read surface (#28–#30) ──
 	registerTool(listGroupsTool),
 	registerTool(getGroupTool),
 	registerTool(listMembersTool),
 	registerTool(getBalancesTool),
 	registerTool(listTransactionsTool),
 	registerTool(getTransactionTool),
-	registerTool(listCurrenciesTool)
+	registerTool(listCurrenciesTool),
+	// ── Write surface (#31+) — hidden from read keys by `filterToolsByScope` ──
+	registerTool(createTransactionTool)
 ];
 
 /**

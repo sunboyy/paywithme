@@ -56,3 +56,4 @@ export {
 	toTransactionListItemView
 } from './transaction';
 export { type CurrencyView, CURRENCIES_NOTE, toCurrencyViews } from './currency';
+export { buildEchoBack } from './echo';

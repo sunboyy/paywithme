@@ -27,7 +27,11 @@
 import { z } from 'zod';
 import { apiErrorEnvelope, type ApiErrorCode } from '$lib/server/api/errors';
 import { GroupAccessError } from '$lib/server/groups';
-import { TransactionCursorError, TransactionNotFoundError } from '$lib/server/transactions';
+import {
+	TransactionCursorError,
+	TransactionNotFoundError,
+	TransactionValidationError
+} from '$lib/server/transactions';
 import type { McpToolResult } from './types';
 
 /**
@@ -165,6 +169,16 @@ export function mapToolError(err: unknown): McpToolResult {
 	}
 	if (err instanceof TransactionCursorError) {
 		return toolError('bad_request', 'The pagination cursor is invalid.');
+	}
+	// The SHARED transaction schema rejecting server-side (a write tool re-validating an
+	// unknown / other-group / DEACTIVATED member id, a category/type mismatch, a §7.6
+	// settlement mismatch, …) — self-correctable, so it must be a `validation_error`, NOT
+	// the opaque `internal_error` a plain `Error` would fall through to. The carried
+	// `.issues` are the SAME Zod issue array the `ZodError` branch formats, so we rebuild a
+	// `ZodError` and reuse that field-level shaping — mirroring REST's `mapWriteError`
+	// (`api/write.ts`), so the two channels name the bad field identically.
+	if (err instanceof TransactionValidationError) {
+		return toolError('validation_error', undefined, z.flattenError(new z.ZodError(err.issues)));
 	}
 	// A tool's own Zod rules failing — self-correctable: `details` names the field.
 	if (err instanceof z.ZodError) {

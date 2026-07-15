@@ -43,11 +43,14 @@ import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
+import { transactions as transactionsTable } from '$lib/server/db/transactions-schema';
+import { auditLog } from '$lib/server/db/audit-schema';
 import { MCP_PROTOCOL_VERSION } from '$lib/server/mcp/protocol';
 import { cleanupSuiteRows, createTestUser, db, describeIntegration } from './helpers';
 import { cleanupApiKeyRows, expireApiKey, mintApiKey, revokeApiKey } from './api-client';
 import {
 	createApiScenario,
+	creatorMemberId,
 	spendingInput,
 	SETTLEMENT_CURRENCY,
 	DEBT_SETTLEMENT_CATEGORY,
@@ -352,17 +355,31 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			}
 		});
 
-		it('#29 advertises NO tool that can move money — to EITHER key', async () => {
-			for (const key of [s.readKey.key, s.writeKey.key]) {
-				const res = await mcpRpc<{ tools: { annotations: { readOnlyHint: boolean } }[] }>(
-					'tools/list',
-					undefined,
-					{ key }
-				);
-				const tools = res.body.result?.tools ?? [];
-				expect(tools.length).toBeGreaterThan(0);
-				expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
-			}
+		it('a READ key sees NO write tool — every tool it is shown is read-only', async () => {
+			// The scope filter (`filterToolsByScope`) hides write tools from a read key, so
+			// a read key can never even FORM the intent to move money (ADR-0002).
+			const res = await mcpRpc<{
+				tools: { name: string; annotations: { readOnlyHint: boolean } }[];
+			}>('tools/list', undefined, read);
+			const tools = res.body.result?.tools ?? [];
+			expect(tools.length).toBeGreaterThan(0);
+			expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
+			expect(tools.map((t) => t.name)).not.toContain('create_transaction');
+		});
+
+		it('a WRITE key DOES see `create_transaction`, annotated as a non-destructive write (#31)', async () => {
+			// The first write tool: a write key sees it (read ⊆ write), and its annotations
+			// say plainly it is not read-only and not destructive — it APPENDS a transaction.
+			const res = await mcpRpc<{
+				tools: {
+					name: string;
+					annotations: { readOnlyHint: boolean; destructiveHint: boolean };
+				}[];
+			}>('tools/list', undefined, { key: s.writeKey.key });
+			const tools = res.body.result?.tools ?? [];
+			const write = tools.find((t) => t.name === 'create_transaction');
+			expect(write, 'write key must be shown create_transaction').toBeDefined();
+			expect(write?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
 		});
 	});
 
@@ -964,6 +981,216 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				example: '240'
 			});
 			expect(_note).toMatch(/never multiply by 100/i);
+		});
+	});
+
+	// ── 11b. create_transaction — the FIRST WRITE tool (#31) ──────────────────
+	//         decimal-string money (ADR-0004), echo-back naming the humans
+	//         (ADR-0006 + ADR-0003), audit provenance, and scope enforcement.
+
+	describe('tools/call create_transaction (#31)', () => {
+		/** The write key's Authorization value. */
+		const writeKeyOf = () => ({ key: s.writeKey.key });
+
+		/**
+		 * A fresh group of a GIVEN settlement currency owned by the suite user, plus the
+		 * creator's own member id (which is `isYou` for the write key). The default fixture
+		 * group settles in USD; the exponent matrix needs THB and JPY groups.
+		 */
+		async function groupWithCurrency(cur: string): Promise<{ groupId: string; me: string }> {
+			const g = await createGroup({
+				userId: s.user.id,
+				userName: s.user.name,
+				name: `${cur} group`,
+				settlementCurrency: cur
+			});
+			return { groupId: g.id, me: await creatorMemberId(g.id, s.user.id) };
+		}
+
+		/** The rows persisted for a group (to assert on `amountTotal` / row COUNT). */
+		async function txnRows(groupId: string) {
+			return db.select().from(transactionsTable).where(eq(transactionsTable.groupId, groupId));
+		}
+
+		/** The write result payload (the fields these tests read). */
+		interface CreatedWire {
+			recorded: TransactionWire & { id: string; groupId: string };
+			echo: string;
+			_note: string;
+		}
+
+		it('records "240.00" in a THB group as 24000 minor units — the ADR-0004 exponent', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [me] },
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			// The DATABASE holds the correct minor units — ฿240.00, not ฿2.40.
+			const rows = await txnRows(groupId);
+			expect(rows).toHaveLength(1);
+			expect(rows[0].amountTotal).toBe(24000);
+			// And the wire money is the decimal string in THB, never minor units.
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			expect(payload.recorded.amount).toMatchObject({ amount: '240.00', currency: 'THB' });
+		});
+
+		it('records "2400" in a JPY group as 2400 minor units — 0-exponent currency', async () => {
+			const { groupId, me } = await groupWithCurrency('JPY');
+
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Ramen', amount: '2400', splitBetween: [me] },
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const rows = await txnRows(groupId);
+			expect(rows).toHaveLength(1);
+			// JPY exponent 0: "2400" is 2400 minor units, NOT 240000.
+			expect(rows[0].amountTotal).toBe(2400);
+		});
+
+		it('OVER-PRECISION is a hard error, never a silent round ("240.005" in THB)', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.005', splitBetween: [me] },
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			// NOTHING was written — the reject happened before the insert.
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('rejects a negative amount at the Zod regex ("-5")', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '-5', splitBetween: [me] },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('rejects junk that is not a decimal ("abc")', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: 'abc', splitBetween: [me] },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+		});
+
+		it('a bogus `splitBetween` member id is a self-correctable validation_error, not internal_error (#31)', async () => {
+			// The IDS-ONLY re-validation story: `createTransaction` re-checks every member id
+			// against the group's active roster server-side and throws `TransactionValidationError`
+			// for an unknown / other-group / deactivated id. `mapToolError` must surface that as a
+			// `validation_error` the agent can fix — NOT the opaque `internal_error` a plain Error
+			// would fall through to.
+			const { groupId, me } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [me, 'mem_not_in_this_group'] },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			// The reject happened server-side before any row was written.
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('a currency other than the group settlement currency is refused (FX deferred)', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.00', currency: 'JPY', splitBetween: [me] },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			const env = toolErrorEnvelope(res.body.result);
+			expect(env.error.code).toBe('validation_error');
+			// The message names the group's actual settlement currency, so the agent can retry.
+			expect(env.error.message).toContain('THB');
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('ECHOES the interpretation back: names the humans, decimal money, wrapped copy', async () => {
+			// Split between YOU (the write key owner) and Bob, a real named member — the echo
+			// must name Bob for legibility (ADR-0006), AND carry his name wrapped (ADR-0003).
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Team lunch',
+					amount: '240.00',
+					splitBetween: [s.alice, s.bob]
+				},
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+
+			// PROSE (legibility): "you" for the caller, "Bob" for the other beneficiary, money
+			// as a decimal string in the settlement currency.
+			expect(payload.echo).toContain('paid by you');
+			expect(payload.echo).toContain('Bob');
+			expect(payload.echo).toContain('USD 240.00');
+			// WRAPPED copy (ADR-0003): Bob's name is ALSO present inside the untrusted envelope,
+			// and the result carries the untrusted-note so any name/title is treated as data.
+			const bobShare = payload.recorded.shares.find((sh) => sh.memberId === s.bob);
+			expect(bobShare?.displayName).toMatchObject({ _untrusted: true, value: 'Bob' });
+			expect(payload._note).toMatch(/untrusted/i);
+		});
+
+		it('writes an audit_log row carrying the WRITE KEY as `viaKey` provenance (§16.2)', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId: s.group.id, title: 'Coffee', amount: '12.00', splitBetween: [s.alice] },
+				writeKeyOf()
+			);
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			const txnId = payload.recorded.id;
+
+			const [row] = await db.select().from(auditLog).where(eq(auditLog.entityId, txnId));
+			expect(row).toBeDefined();
+			expect(row.action).toBe('create');
+			// The actor stays the USER; the key id rides in metadata (no schema change, §16.2).
+			expect(row.actorUserId).toBe(s.user.id);
+			expect((row.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
+		});
+
+		it('a READ key calling it is refused with forbidden_scope, and writes NOTHING (ADR-0002)', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId: s.group.id, title: 'Lunch', amount: '240.00', splitBetween: [s.alice] },
+				read
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
+			// The tool never ran — no transaction row exists in the group.
+			expect(await txnRows(s.group.id)).toHaveLength(0);
+		});
+
+		it('the WRITE key sees `create_transaction` in tools/list', async () => {
+			const res = await mcpRpc<{ tools: { name: string }[] }>(
+				'tools/list',
+				undefined,
+				writeKeyOf()
+			);
+			expect((res.body.result?.tools ?? []).map((t) => t.name)).toContain('create_transaction');
 		});
 	});
 

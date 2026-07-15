@@ -105,11 +105,27 @@ describe('the shipped registry (#28 + #29)', () => {
 		}
 	);
 
-	it('ships NO write tools yet — every tool is read-only (#29 is the read surface)', () => {
+	it('every tool that DECLARES read scope is annotated read-only (scope ↔ annotation agree)', () => {
 		for (const tool of MCP_TOOLS) {
-			expect(tool.scope).toBe('read');
-			expect(tool.definition.annotations.readOnlyHint).toBe(true);
+			if (tool.scope === 'read') {
+				expect(tool.definition.annotations.readOnlyHint).toBe(true);
+			}
 		}
+	});
+
+	it('ships `create_transaction` as the first WRITE tool — a non-destructive write (#31)', () => {
+		const tool = findTool('create_transaction');
+		expect(tool).toBeDefined();
+		expect(tool?.scope).toBe('write');
+		expect(tool?.rateLimitClass).toBe('write');
+		expect(tool?.definition.annotations).toMatchObject({
+			readOnlyHint: false,
+			destructiveHint: false,
+			idempotentHint: false
+		});
+		// It comes AFTER the whole read surface (ORDER IS A PROMPT: find your ids first).
+		const names = MCP_TOOLS.map((t) => t.definition.name);
+		expect(names.indexOf('create_transaction')).toBe(names.length - 1);
 	});
 
 	it('`get_balances` STEERS the model away from summing a list itself (ADR-0008)', () => {
