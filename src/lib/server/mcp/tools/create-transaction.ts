@@ -65,7 +65,7 @@ import {
 	type TransactionView
 } from '../view';
 import type { McpTool } from '../types';
-import { GROUP_ID_PROPERTY, groupIdArg } from './args';
+import { amountArg, GROUP_ID_PROPERTY, groupIdArg } from './args';
 import { loadGroupView, loadMemberViews } from './load';
 
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
@@ -83,24 +83,11 @@ interface CreatedPayload {
 	_note: string;
 }
 
-/**
- * The ADR-0004 amount shape: a decimal string, no floats, no negatives, at most 4
- * fractional digits (the widest exponent any supported currency uses). This is the
- * FIRST gate; `parseAmount` is the authoritative per-currency one, rejecting more
- * places than the SPECIFIC settlement currency allows (2 for THB, 0 for JPY).
- */
-const AMOUNT_REGEX = /^\d+(\.\d{1,4})?$/;
-
 const createTransactionArgs = z.strictObject({
 	groupId: groupIdArg,
 	title: z.string().min(1, 'A title is required.'),
-	amount: z
-		.string()
-		.regex(
-			AMOUNT_REGEX,
-			'Amount must be a plain decimal string like "240", "240.00", or "1234.5" — no ' +
-				'currency symbols, commas, or negative signs. State it exactly as the user said it.'
-		),
+	// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
+	amount: amountArg,
 	// OPTIONAL: FX is deferred, so this defaults to (and must equal) the group's
 	// settlement currency. See the header.
 	currency: z.string().min(1).optional(),

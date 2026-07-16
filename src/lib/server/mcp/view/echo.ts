@@ -33,8 +33,26 @@
 // Money in the prose stays a DECIMAL STRING + currency + minor units (ADR-0004's
 // echo example, "THB 240.00 (24000 minor units)") — never a float, never bare
 // minor units the model would misread as the amount.
+//
+// ── The settle-up DISAMBIGUATION note, and the ADR-0003 tension it creates ────
+// `buildSettleUpEchoBack` names a THIRD member ("the other 'Nan' is Nanthawat P."),
+// and that name is NOT in `recorded`: a settle-up's payers/shares cover only `from`
+// and `to`, so condition (b) above — every inlined name is also present, wrapped, in
+// the structured copy — is not satisfied by `recorded` alone.
+//
+// It is satisfied deliberately instead: the tool ships the SAME members it inlines as
+// `similarNames`, a structured list of untrusted envelopes, alongside `recorded`
+// (that is why this function takes an already-computed `similar` list rather than the
+// roster — the prose and the wrapped copy are built from ONE value and cannot
+// disagree about who was named). The alternative — dropping the name and saying "some
+// other member has a similar name, call `list_members`" — would satisfy ADR-0003 by
+// deleting the only thing that makes a wrong payee legible AT THE MOMENT it happens,
+// which is the entire control ADR-0006 relies on. We keep the name and keep it
+// wrapped.
 
 import type { TransactionView, PayerView, ShareView } from './transaction';
+import type { McpMoney } from './money';
+import type { SimilarMemberView } from './similar-names';
 
 /** A line in the transaction that names a member — the shape both payers and shares share. */
 type NamedLine = Pick<PayerView | ShareView, 'isYou' | 'displayName'>;
@@ -61,6 +79,15 @@ function joinNames(names: string[]): string {
 }
 
 /**
+ * Money as the prose always speaks it (ADR-0004): the decimal string, its currency,
+ * and the integer minor units the server actually stored — so a misparse (฿2.40 for
+ * "240 baht") is visible in the sentence rather than buried in the database.
+ */
+function proseMoney(money: McpMoney, minorUnits: number): string {
+	return `${money.currency} ${money.amount} (${minorUnits} minor units)`;
+}
+
+/**
  * Build the plain-language ECHO-BACK for a just-recorded spending (ADR-0004 /
  * ADR-0006). PURE. Restates, in one sentence, what the server persisted: the title,
  * the money as a decimal string in the settlement currency PLUS its minor-unit
@@ -79,9 +106,7 @@ export function buildEchoBack({
 	view: TransactionView;
 	minorUnits: number;
 }): string {
-	const money = view.settlementAmount;
-	// Decimal string + currency + minor units — ADR-0004's echo shape, no floats.
-	const amount = `${money.currency} ${money.amount} (${minorUnits} minor units)`;
+	const amount = proseMoney(view.settlementAmount, minorUnits);
 
 	const paidBy = joinNames(view.payers.map(proseName));
 	const beneficiaries = view.shares.map(proseName);
@@ -92,6 +117,69 @@ export function buildEchoBack({
 		`Recorded ${view.type} "${view.title.value}" — ${amount}, paid by ${paidBy}, ` +
 		`split equally ${ways}: ${joinNames(beneficiaries)}.`
 	);
+}
+
+/**
+ * The disambiguating clause — ADR-0006's *"(The other 'Nan' in this group is
+ * Nanthawat P. — not involved.)"*. Only ever called with a NON-EMPTY list: a note on
+ * every settle-up ("nobody else is named anything like this") would be noise, and
+ * noise is exactly what trains a model to stop reading the line on the one occasion
+ * it matters.
+ *
+ * It states a FACT about the roster and stops. It does not ask the agent to confirm,
+ * re-check or re-send anything: the echo is for the USER to read (the whole of
+ * ADR-0006's "legibility, not prevention"), and an echo that instructs the model is
+ * a confirmation prompt, which this module has never been.
+ */
+function disambiguation(similar: readonly SimilarMemberView[]): string {
+	// The names are member-authored (ADR-0003). Inlining them is the point — and they
+	// ride wrapped in the result's `similarNames`, which is what makes it legal here.
+	const names = joinNames(similar.map((s) => s.displayName.value));
+	return similar.length === 1
+		? `(The other similarly-named member in this group is ${names} — not involved in this settle-up.)`
+		: `(The other similarly-named members in this group are ${names} — none of them involved in this settle-up.)`;
+}
+
+/**
+ * Build the plain-language ECHO-BACK for a just-recorded SETTLE-UP (#34). PURE.
+ *
+ * *"Recorded settle-up: you → Nan Suphaporn, THB 1200.00 (120000 minor units)."*
+ *
+ * This is the acceptance criterion that carries the wrong-payee control: the payee is
+ * NAMED IN FULL, never left as an id, because "recorded settle-up to mem_7c1f" is
+ * unreadable and a user cannot catch a mistake in it. Where the roster holds someone
+ * else the agent might have meant, `similar` is non-empty and the sentence says so.
+ *
+ * `similar` is passed IN rather than computed here (see the header): the tool builds
+ * it once, inlines it here and ships it wrapped in the payload, so the prose can
+ * never name someone the structured copy omits.
+ *
+ * The money is the SETTLEMENT amount — for a settle-up that is not merely the honest
+ * choice it is in `buildEchoBack`, it is definitional: a settlement is denominated in
+ * the settlement currency at rate 1 (§16.4).
+ */
+export function buildSettleUpEchoBack({
+	view,
+	minorUnits,
+	similar
+}: {
+	view: TransactionView;
+	minorUnits: number;
+	/** The ADR-0006 "other Nan"s — `[]` when there is no collision (the common case). */
+	similar: readonly SimilarMemberView[];
+}): string {
+	// By construction a settle-up is ONE payer paying ONE beneficiary — the tool builds
+	// exactly that input and this view is a re-read of what was PERSISTED. If the ledger
+	// somehow holds another shape, describe it with the generic echo rather than invent
+	// a "→" between people who are not there.
+	if (view.payers.length !== 1 || view.shares.length !== 1) {
+		return buildEchoBack({ view, minorUnits });
+	}
+	const from = proseName(view.payers[0]);
+	const to = proseName(view.shares[0]);
+
+	const line = `Recorded settle-up: ${from} → ${to}, ${proseMoney(view.settlementAmount, minorUnits)}.`;
+	return similar.length === 0 ? line : `${line} ${disambiguation(similar)}`;
 }
 
 /** `3200` → "3 seconds"; `1000` → "1 second". Whole seconds — the age is not a stopwatch. */

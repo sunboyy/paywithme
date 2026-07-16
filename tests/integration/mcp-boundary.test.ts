@@ -43,6 +43,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
+import { addMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
 import { transactions as transactionsTable } from '$lib/server/db/transactions-schema';
@@ -352,7 +353,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			'list_currencies'
 		];
 		/** Read ∪ write, in registry order — the write tools join LAST (ORDER IS A PROMPT). */
-		const WRITE_KEY_TOOLS = [...READ_KEY_TOOLS, 'create_transaction'];
+		const WRITE_KEY_TOOLS = [...READ_KEY_TOOLS, 'create_transaction', 'settle_up'];
 
 		/** Every tool `tools/list` shows this key, in the order it was advertised. */
 		async function advertisedTo(options: { key: string }) {
@@ -1399,6 +1400,349 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			await createLunch({ title: 'Coffee', amount: '60.00' });
 
 			expect(await rows()).toHaveLength(2);
+		});
+	});
+
+	// ── 11d. settle_up — the RIGHT Nan (#34) ─────────────────────────────────
+	//         The default payer (ADR-0006's `isYou`), an explicit payer, the
+	//         echo-back that NAMES the human, and the disambiguation that makes a
+	//         wrong pick legible. Against real rows: the transfer that lands, the
+	//         balance it actually moves, and the audit row it writes.
+
+	describe('tools/call settle_up (#34)', () => {
+		const writeKeyOf = () => ({ key: s.writeKey.key });
+
+		/** The settle-up result payload (the fields these tests read). */
+		interface SettledWire {
+			recorded: TransactionWire & { id: string; type: string; category: { id: string } };
+			echo: string;
+			similarNames: { memberId: string; displayName: UntrustedWire }[];
+			replayed: boolean;
+			_note: string;
+		}
+
+		/** Call `settle_up` with the write key and return the raw wire result. */
+		async function settleUp(args: Record<string, unknown>) {
+			return mcpToolCall('settle_up', { groupId: s.group.id, ...args }, writeKeyOf());
+		}
+
+		/** Call `settle_up` and return its payload, asserting it succeeded. */
+		async function settleUpOk(args: Record<string, unknown>): Promise<SettledWire> {
+			const res = await settleUp(args);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			return res.body.result?.structuredContent as unknown as SettledWire;
+		}
+
+		/** Add a real, active member to the fixture group. */
+		async function addMemberNamed(displayName: string): Promise<string> {
+			return (await addMember({ userId: s.user.id, groupId: s.group.id, displayName })).id;
+		}
+
+		/** Every transaction row in the fixture group. */
+		async function rows() {
+			return db.select().from(transactionsTable).where(eq(transactionsTable.groupId, s.group.id));
+		}
+
+		it('DEFAULTS the payer to the caller’s own member — the agent never picks `from`', async () => {
+			// The overwhelmingly common settle-up: "I paid Bob back $12." `from` is omitted,
+			// and the server resolves it from the KEY's owner (ADR-0006's `isYou`) — the one
+			// identity in the request the model cannot influence.
+			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+			const persisted = await rows();
+			expect(persisted).toHaveLength(1);
+			expect(persisted[0].amountTotal).toBe(1200);
+			// The PAYER is the key owner's member, resolved server-side.
+			expect(payload.recorded.payers).toHaveLength(1);
+			expect(payload.recorded.payers[0]).toMatchObject({ memberId: s.alice, isYou: true });
+			// The PAYEE receives the whole amount.
+			expect(payload.recorded.shares).toHaveLength(1);
+			expect(payload.recorded.shares[0]).toMatchObject({ memberId: s.bob, isYou: false });
+		});
+
+		it('records it as a §16.4 TRANSFER under "Debt settlement" — no new domain logic', async () => {
+			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+			expect(payload.recorded.type).toBe('transfer');
+			expect(payload.recorded.category.id).toBe(DEBT_SETTLEMENT_CATEGORY);
+			expect(payload.recorded.title.value).toBe('Debt settlement');
+			// It is an ORDINARY transaction on the ledger, which is the whole point of the
+			// façade: `list_transactions` sees it exactly as the web app's settle flow (§8.4).
+			const [row] = await rows();
+			expect(row.type).toBe('transfer');
+			expect(row.categoryId).toBe(DEBT_SETTLEMENT_CATEGORY);
+		});
+
+		it('accepts an EXPLICIT `from`: recording that A paid B on others’ behalf is a real flow', async () => {
+			const carol = await addMemberNamed('Carol');
+
+			const payload = await settleUpOk({ from: carol, to: s.bob, amount: '12.00' });
+
+			expect(payload.recorded.payers[0]).toMatchObject({ memberId: carol, isYou: false });
+			expect(payload.recorded.shares[0]).toMatchObject({ memberId: s.bob });
+			// The echo names BOTH humans — neither of them is "you" here.
+			expect(payload.echo).toBe('Recorded settle-up: Carol → Bob, USD 12.00 (1200 minor units).');
+		});
+
+		it('MOVES THE BALANCE it says it moved — the suggestion list shrinks (§8.4)', async () => {
+			// A group-mate pays $90 for a dinner split equally: the caller owes $45 …
+			const mate = await linkBobToAStranger();
+			await createTransaction({
+				userId: mate.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.bob,
+					beneficiaryIds: [s.alice, s.bob],
+					amount: 9000,
+					title: 'Dinner'
+				})
+			});
+			expect(
+				(await callOk<BalancesWire>('get_balances', { groupId: s.group.id })).you?.balance.amount
+			).toBe('-45.00');
+
+			// … and settles it. The balance is recomputed from the ledger (§8.1), so a
+			// settle-up that did not really record a transfer would show up right here.
+			await settleUpOk({ to: s.bob, amount: '45.00' });
+
+			const after = await callOk<BalancesWire>('get_balances', { groupId: s.group.id });
+			expect(after.you?.balance.amount).toBe('0.00');
+			expect(after.you?.direction).toBe('settled');
+		});
+
+		it('does the exponent math SERVER-SIDE: "1200" in a THB group is ฿1,200.00 (ADR-0004)', async () => {
+			// A fresh THB group, so `parseAmount` runs against a real 2-decimal currency that
+			// is NOT the fixture's USD.
+			const g = await createGroup({
+				userId: s.user.id,
+				userName: s.user.name,
+				name: 'THB group',
+				settlementCurrency: 'THB'
+			});
+			// `from` is left to default to the caller's own member in this new group.
+			const nan = (
+				await addMember({ userId: s.user.id, groupId: g.id, displayName: 'Nan Suphaporn' })
+			).id;
+
+			const res = await mcpToolCall(
+				'settle_up',
+				{ groupId: g.id, to: nan, amount: '1200' },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+
+			// The DATABASE holds ฿1,200.00 — 120000 minor units, not 1200 and not 12000000.
+			const persisted = await db
+				.select()
+				.from(transactionsTable)
+				.where(eq(transactionsTable.groupId, g.id));
+			expect(persisted[0].amountTotal).toBe(120000);
+			expect(persisted[0].amountTotalSettlement).toBe(120000);
+		});
+
+		it('OVER-PRECISION is a hard error, never a silent round ("12.005" in USD)', async () => {
+			const res = await settleUp({ to: s.bob, amount: '12.005' });
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		// ── The ECHO-BACK: the wrong-payee control (ADR-0006) ───────────────────
+
+		it('ECHOES BACK NAMING THE PAYEE IN FULL — "you → Bob", never a bare id', async () => {
+			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+			expect(payload.echo).toBe('Recorded settle-up: you → Bob, USD 12.00 (1200 minor units).');
+			// The wrapped copy ships alongside it (ADR-0003), and the note marks names as data.
+			expect(payload.recorded.shares[0].displayName).toMatchObject({
+				_untrusted: true,
+				value: 'Bob'
+			});
+			expect(payload._note).toMatch(/untrusted/i);
+			// Nothing to disambiguate: no other member is named anything like "Bob".
+			expect(payload.similarNames).toEqual([]);
+			expect(payload.echo).not.toMatch(/similarly-named/);
+		});
+
+		it('DISAMBIGUATES the other Nan — ADR-0006’s example, against real rows', async () => {
+			// The failure this whole ticket exists for: the agent matched the user's "Nan"
+			// to one of two real people, and either write passes every guard. The server does
+			// not prevent it — it makes it READABLE at the moment it happens.
+			const nan = await addMemberNamed('Nan Suphaporn');
+			const nanthawat = await addMemberNamed('Nanthawat P.');
+
+			const payload = await settleUpOk({ to: nan, amount: '12.00' });
+
+			expect(payload.echo).toBe(
+				'Recorded settle-up: you → Nan Suphaporn, USD 12.00 (1200 minor units). ' +
+					'(The other similarly-named member in this group is Nanthawat P. — not involved ' +
+					'in this settle-up.)'
+			);
+			// ADR-0003: the prose inlines Nanthawat's name, and `recorded` cannot carry it —
+			// a settle-up's payers/shares only cover `from` and `to`. So it ships here,
+			// wrapped and attributed, exactly like every other member-authored string.
+			expect(payload.similarNames).toEqual([
+				{
+					memberId: nanthawat,
+					displayName: { _untrusted: true, value: 'Nanthawat P.', author: { kind: 'unknown' } }
+				}
+			]);
+		});
+
+		it('the disambiguation is PRESENTATIONAL: the wrong-named write still lands where it was aimed', async () => {
+			// The control is legibility, NOT prevention (ADR-0006). Settling up with the
+			// WRONG Nan must still record against the id the agent supplied — the server does
+			// not second-guess it, it reports it.
+			const nan = await addMemberNamed('Nan Suphaporn');
+			const nanthawat = await addMemberNamed('Nanthawat P.');
+
+			const payload = await settleUpOk({ to: nanthawat, amount: '12.00' });
+
+			expect(payload.recorded.shares[0].memberId).toBe(nanthawat);
+			expect(payload.echo).toContain('you → Nanthawat P.');
+			// …and it names the OTHER one, which is what would let the user catch it.
+			expect(payload.similarNames.map((n) => n.memberId)).toEqual([nan]);
+		});
+
+		it('an INJECTION planted in the payee’s name arrives demarcated (ADR-0003)', async () => {
+			await db
+				.update(membersTable)
+				.set({ displayName: INJECTION })
+				.where(eq(membersTable.id, s.bob));
+
+			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+			// The prose inlines it (that is the legibility trade echo.ts documents) …
+			expect(payload.echo).toContain(INJECTION);
+			// … and the structured copy marks it as somebody's words, verbatim.
+			expect(payload.recorded.shares[0].displayName).toEqual({
+				_untrusted: true,
+				value: INJECTION,
+				author: { kind: 'unknown' }
+			});
+			expect(payload._note).toMatch(/never instructions/i);
+		});
+
+		// ── The guards ─────────────────────────────────────────────────────────
+
+		it('an UNKNOWN payee id is a self-correctable validation_error, and writes NOTHING', async () => {
+			// The hallucinated-id half of the story: `createTransaction` re-validates every
+			// member id against the group's active roster and throws, and `mapToolError`
+			// surfaces that as a `validation_error` the agent can fix — not the opaque
+			// `internal_error` a plain Error would fall through to.
+			const res = await settleUp({ to: 'mem_not_in_this_group', amount: '12.00' });
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('an unknown explicit `from` is refused the same way', async () => {
+			const res = await settleUp({ from: 'mem_nobody', to: s.bob, amount: '12.00' });
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('a self-settlement (`to` = your own member, `from` defaulted) is refused', async () => {
+			const res = await settleUp({ to: s.alice, amount: '12.00' });
+
+			expect(res.body.result?.isError).toBe(true);
+			const envelope = toolErrorEnvelope(res.body.result).error;
+			expect(envelope.code).toBe('validation_error');
+			expect(envelope.message).toMatch(/same member/i);
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('writes an audit_log row carrying the WRITE KEY as `viaKey` provenance (§12.1 / §16.2)', async () => {
+			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+			const [row] = await db
+				.select()
+				.from(auditLog)
+				.where(eq(auditLog.entityId, payload.recorded.id));
+			expect(row).toBeDefined();
+			expect(row.action).toBe('create');
+			// The actor stays the USER; the key id rides in metadata (no schema change, §16.2).
+			expect(row.actorUserId).toBe(s.user.id);
+			expect((row.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
+		});
+
+		it('a READ key calling it is refused forbidden_scope, and moves NO money (ADR-0002)', async () => {
+			const res = await mcpToolCall(
+				'settle_up',
+				{ groupId: s.group.id, to: s.bob, amount: '12.00' },
+				read
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('a group the write key cannot see is the conflated not_found — no existence oracle', async () => {
+			const stranger = await createTestUser('mcpsettlestranger');
+			const theirs = await createGroup({
+				userId: stranger.id,
+				userName: stranger.name,
+				name: 'not yours',
+				settlementCurrency: SETTLEMENT_CURRENCY
+			});
+
+			const res = await mcpToolCall(
+				'settle_up',
+				{ groupId: theirs.id, to: 'mem_whatever', amount: '12.00' },
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			expect(toolErrorEnvelope(res.body.result).error.code).toBe('not_found');
+		});
+
+		// ── Idempotency, inherited from the create path (#33) ───────────────────
+
+		it('inherits the server-derived window: an identical retry → ONE payment, replayed', async () => {
+			vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-16T12:00:00.000Z') });
+			try {
+				const first = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+				// "That didn't seem to go through" — 3 seconds later.
+				vi.setSystemTime(new Date(Date.now() + 3000));
+				const retry = await settleUpOk({ to: s.bob, amount: '12.00' });
+
+				// ONE payment on the ledger. Paying someone back twice is the failure that
+				// starts an argument in a shared ledger.
+				expect(await rows()).toHaveLength(1);
+				expect(retry.recorded.id).toBe(first.recorded.id);
+				expect(retry.replayed).toBe(true);
+				// Surfaced, never hidden — and it still names the human (ADR-0005).
+				expect(retry.echo).toContain('already recorded 3 seconds ago');
+				expect(retry.echo).toContain('you → Bob');
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('never dedups against `create_transaction` — `toolName` is in the derived key (#33)', async () => {
+			vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-16T12:00:00.000Z') });
+			try {
+				await settleUpOk({ to: s.bob, amount: '12.00' });
+				// A create whose arguments overlap, in the same group, in the same window.
+				const created = await mcpToolCall(
+					'create_transaction',
+					{ groupId: s.group.id, title: 'Debt settlement', amount: '12.00', splitBetween: [s.bob] },
+					writeKeyOf()
+				);
+
+				expect(created.body.result?.isError, JSON.stringify(created.body.result)).toBeUndefined();
+				// Two DIFFERENT intents → two rows. One tool's writes must never absorb another's.
+				expect(await rows()).toHaveLength(2);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 

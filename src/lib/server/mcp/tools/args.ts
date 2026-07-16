@@ -38,6 +38,28 @@ export const GROUP_INPUT_SCHEMA = {
 	additionalProperties: false
 } as const;
 
+/**
+ * The ADR-0004 amount shape, shared by EVERY write tool: a decimal string, no floats,
+ * no negatives, at most 4 fractional digits (the widest exponent any supported
+ * currency uses). This is the FIRST gate; `parseAmount(amount, settlementCurrency)`
+ * is the authoritative per-currency one, rejecting more places than the SPECIFIC
+ * currency allows (2 for THB, 0 for JPY) as a HARD error rather than a silent round.
+ *
+ * It lives here, not in one tool, because a second write tool that gated amounts even
+ * SLIGHTLY differently would be a second money contract — and ADR-0004 is one
+ * contract: the model never does exponent arithmetic, on any tool.
+ */
+export const AMOUNT_REGEX = /^\d+(\.\d{1,4})?$/;
+
+/** The decimal-string `amount` argument every write tool takes (ADR-0004). */
+export const amountArg = z
+	.string()
+	.regex(
+		AMOUNT_REGEX,
+		'Amount must be a plain decimal string like "240", "240.00", or "1234.5" — no ' +
+			'currency symbols, commas, or negative signs. State it exactly as the user said it.'
+	);
+
 /** The `inputSchema` for a tool that takes no arguments at all. */
 export const NO_INPUT_SCHEMA = {
 	type: 'object',

@@ -221,17 +221,21 @@ describe('tools/list (ADR-0002: scope-filtered)', () => {
 		expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
 	});
 
-	it('a WRITE key ALSO sees `create_transaction`, after the read surface (#31)', async () => {
+	it('a WRITE key ALSO sees the write tools, after the read surface (#31, #34)', async () => {
 		verifyApiKey.mockResolvedValue({
 			...VALID_KEY,
 			key: { ...VALID_KEY.key, permissions: { api: ['read', 'write'] } }
 		});
 
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-		// Read ⊆ write: the whole read surface, THEN the write tool last.
+		// Read ⊆ write: the whole read surface, THEN the write tools last. Spelled out
+		// literally, not derived from `MCP_TOOLS` — adding a write tool must fail HERE, so
+		// a human confirms it was meant to be hidden from read keys (the read-key
+		// expectation above is the half that proves it is).
 		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual([
 			...READ_TOOLS,
-			'create_transaction'
+			'create_transaction',
+			'settle_up'
 		]);
 	});
 });

@@ -16,7 +16,8 @@ import type { MemberListItem } from '$lib/server/members';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { toMemberView } from './member';
 import { toTransactionView } from './transaction';
-import { buildEchoBack, buildReplayEchoBack } from './echo';
+import { similarlyNamedMembers } from './similar-names';
+import { buildEchoBack, buildReplayEchoBack, buildSettleUpEchoBack } from './echo';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
@@ -129,6 +130,178 @@ describe('buildEchoBack', () => {
 			2400
 		);
 		expect(echo).toContain('JPY 2400 (2400 minor units)');
+	});
+});
+
+// ── The SETTLE-UP echo-back (ADR-0006, #34) ─────────────────────────────────
+//
+// The one echo that carries a security control rather than a courtesy. The server
+// cannot stop an agent settling up with the wrong real person — "Nan" matches both
+// `Nan Suphaporn` and `Nanthawat P.`, and either write passes every guard. ADR-0006's
+// control is that the user READS who was paid, in full, in the transcript, at the
+// moment it happens. These tests pin that sentence.
+
+describe('buildSettleUpEchoBack', () => {
+	/** A THB settle-up: `from` pays `to` the whole amount (the §16.4 transfer shape). */
+	function settleUp({
+		from = 'mem_me',
+		to = 'mem_nan',
+		minor = 120000
+	}: { from?: string; to?: string; minor?: number } = {}) {
+		return toTransactionView({
+			detail: detail({
+				type: 'transfer',
+				title: 'Debt settlement',
+				categoryId: 'transfer-debt-settlement',
+				categoryName: 'Debt settlement',
+				categoryIcon: 'handshake',
+				currency: 'THB',
+				settlementCurrency: 'THB',
+				amountTotal: minor,
+				amountTotalSettlement: minor,
+				payers: [{ memberId: from, amountPaid: minor }],
+				shares: [{ memberId: to, amountOwed: minor }]
+			}),
+			members,
+			principal
+		});
+	}
+
+	it('names the payee IN FULL — the ADR-0006 sentence, verbatim in shape', () => {
+		// THE acceptance criterion: "Recorded settle-up: you → Nan Suphaporn, THB
+		// 1,200.00" — never "recorded settle-up to mem_nan", which no user can check.
+		const echo = buildSettleUpEchoBack({ view: settleUp(), minorUnits: 120000, similar: [] });
+
+		expect(echo).toBe('Recorded settle-up: you → Nan Suphaporn, THB 1200.00 (120000 minor units).');
+	});
+
+	it('states the money as a decimal + minor units, so a misparse is visible (ADR-0004)', () => {
+		const echo = buildSettleUpEchoBack({
+			view: settleUp({ minor: 24000 }),
+			minorUnits: 24000,
+			similar: []
+		});
+		// ฿240.00, not ฿2.40 — the exponent is legible in the sentence.
+		expect(echo).toContain('THB 240.00 (24000 minor units)');
+	});
+
+	it('names a payer who is NOT you — recording that A paid B is a real flow', () => {
+		const echo = buildSettleUpEchoBack({
+			view: settleUp({ from: 'mem_bob', to: 'mem_nan' }),
+			minorUnits: 120000,
+			similar: []
+		});
+		expect(echo).toBe('Recorded settle-up: Bob → Nan Suphaporn, THB 1200.00 (120000 minor units).');
+	});
+
+	it('says NOTHING about similar names when there is no collision', () => {
+		// Point 4 of the design: an echo that always appended "(nobody else is named
+		// anything like this)" would train the model to skip the line entirely.
+		const echo = buildSettleUpEchoBack({ view: settleUp(), minorUnits: 120000, similar: [] });
+
+		expect(echo).not.toMatch(/similarly-named/);
+		expect(echo).not.toMatch(/not involved/);
+	});
+
+	it('DISAMBIGUATES when the roster holds another member the agent might have meant', () => {
+		// The ADR's own example. `similar` is computed by `similarlyNamedMembers` — driven
+		// here through the real function so the prose is exercised over a real collision,
+		// not a hand-made list.
+		const withOtherNan = [
+			...members,
+			...[
+				{
+					id: 'mem_nanthawat',
+					displayName: 'Nanthawat P.',
+					userId: 'user_nt',
+					deactivatedAt: null,
+					isLinked: true
+				}
+			].map((m) => toMemberView(m, principal))
+		];
+		const similar = similarlyNamedMembers({
+			members: withOtherNan,
+			targetId: 'mem_nan',
+			excludeIds: ['mem_me']
+		});
+
+		const echo = buildSettleUpEchoBack({ view: settleUp(), minorUnits: 120000, similar });
+
+		expect(echo).toBe(
+			'Recorded settle-up: you → Nan Suphaporn, THB 1200.00 (120000 minor units). ' +
+				'(The other similarly-named member in this group is Nanthawat P. — not involved ' +
+				'in this settle-up.)'
+		);
+	});
+
+	it('lists SEVERAL near-namesakes in one readable clause', () => {
+		const similar = [
+			{
+				memberId: 'mem_1',
+				displayName: {
+					_untrusted: true as const,
+					value: 'Nanthawat P.',
+					author: { kind: 'unknown' as const }
+				}
+			},
+			{
+				memberId: 'mem_2',
+				displayName: {
+					_untrusted: true as const,
+					value: 'Nannapat K.',
+					author: { kind: 'unknown' as const }
+				}
+			}
+		];
+
+		const echo = buildSettleUpEchoBack({ view: settleUp(), minorUnits: 120000, similar });
+
+		expect(echo).toContain(
+			'(The other similarly-named members in this group are Nanthawat P. and Nannapat K. — ' +
+				'none of them involved in this settle-up.)'
+		);
+	});
+
+	it('is not a confirmation prompt: it states a fact and stops', () => {
+		// ADR-0006 is legibility, NOT prevention, and echo.ts is explicit that the echo is
+		// never something the model acts on. A note that told the agent to re-check would
+		// invite it to re-send the write it just made.
+		const similar = [
+			{
+				memberId: 'mem_1',
+				displayName: {
+					_untrusted: true as const,
+					value: 'Nanthawat P.',
+					author: { kind: 'unknown' as const }
+				}
+			}
+		];
+		const echo = buildSettleUpEchoBack({ view: settleUp(), minorUnits: 120000, similar });
+
+		expect(echo).not.toMatch(/confirm|are you sure|retry|call .* again/i);
+	});
+
+	it('falls back to the generic echo if the persisted shape is not one payer → one payee', () => {
+		// Unreachable by construction (the tool builds exactly that input, and this view is
+		// a re-read of what was stored) — but it must degrade to describing the ledger
+		// rather than inventing a "→" between people who are not there.
+		const twoPayers = toTransactionView({
+			detail: detail({
+				type: 'transfer',
+				payers: [
+					{ memberId: 'mem_me', amountPaid: 12000 },
+					{ memberId: 'mem_bob', amountPaid: 12000 }
+				],
+				shares: [{ memberId: 'mem_nan', amountOwed: 24000 }]
+			}),
+			members,
+			principal
+		});
+
+		const echo = buildSettleUpEchoBack({ view: twoPayers, minorUnits: 24000, similar: [] });
+
+		expect(echo).not.toContain('→');
+		expect(echo).toBe(buildEchoBack({ view: twoPayers, minorUnits: 24000 }));
 	});
 });
 

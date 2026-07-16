@@ -33,6 +33,7 @@ import { listTransactionsTool } from './tools/list-transactions';
 import { getTransactionTool } from './tools/get-transaction';
 import { listCurrenciesTool } from './tools/list-currencies';
 import { createTransactionTool } from './tools/create-transaction';
+import { settleUpTool } from './tools/settle-up';
 
 /**
  * Erase a tool's `Args` generic so heterogeneous tools share one registry list.
@@ -64,7 +65,9 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
  * ADR-0002's WRITE tools join the list LAST, with `scope: 'write'` — so they are
  * automatically hidden from read keys (`filterToolsByScope`) and appear only AFTER
  * the whole read surface a write key needs to find its ids first. #31 lands the
- * first one, `create_transaction`; `settle_up` and the rest follow the same way.
+ * first one, `create_transaction`; #34 adds `settle_up` after it — a settle-up is
+ * the rarer intent, and an agent that reaches for a write tool by proximity should
+ * meet the one that merely records a shared expense first.
  */
 export const MCP_TOOLS: readonly RegisteredTool[] = [
 	// ── Read surface (#28–#30) ──
@@ -76,7 +79,8 @@ export const MCP_TOOLS: readonly RegisteredTool[] = [
 	registerTool(getTransactionTool),
 	registerTool(listCurrenciesTool),
 	// ── Write surface (#31+) — hidden from read keys by `filterToolsByScope` ──
-	registerTool(createTransactionTool)
+	registerTool(createTransactionTool),
+	registerTool(settleUpTool)
 ];
 
 /**

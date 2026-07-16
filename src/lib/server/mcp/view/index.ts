@@ -56,4 +56,5 @@ export {
 	toTransactionListItemView
 } from './transaction';
 export { type CurrencyView, CURRENCIES_NOTE, toCurrencyViews } from './currency';
-export { buildEchoBack, buildReplayEchoBack } from './echo';
+export { type SimilarMemberView, similarlyNamedMembers } from './similar-names';
+export { buildEchoBack, buildSettleUpEchoBack, buildReplayEchoBack } from './echo';

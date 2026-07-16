@@ -1,11 +1,13 @@
 // Unit tests for the tool registry, the ADR-0002 scope filter, and the
 // `tools/call` dispatcher.
 //
-// The registry currently holds ONE tool, so the scope FILTER is proved against a
-// synthetic registry that also contains a write tool — that is the surface #32
-// lands on, and it must already be correct. `list_groups` itself is driven through
-// the real dispatcher with `listGroupsForUser` mocked, so the mapping (and the
-// dropped internal `deletedAt`) is asserted on what an agent would actually see.
+// The FILTER and the DISPATCHER are proved against a synthetic registry (the real
+// tools plus a stand-in write tool, below), so their logic is pinned independently of
+// whatever the registry happens to ship — and provable without a tool that talks to a
+// database. The registry's own CONTENTS are asserted separately, by name.
+// `list_groups` is driven through the real dispatcher with `listGroupsForUser` mocked,
+// so the mapping (and the dropped internal `deletedAt`) is asserted on what an agent
+// would actually see.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { z } from 'zod';
@@ -46,36 +48,50 @@ function envelopeOf(result: McpToolResult): { code: string; message: string; det
 	return JSON.parse(result.content[0].text).error;
 }
 
-/** A synthetic write tool — the shape #32 will add (ADR-0002). */
-const settleUpSpy = vi.fn();
-const fakeWriteTool: RegisteredTool = registerTool({
+/**
+ * A synthetic write tool, used to drive the FILTER and the DISPATCHER over a registry
+ * whose contents these tests control.
+ *
+ * It was originally named `settle_up`, standing in for the write tool #32 would add.
+ * #34 landed the real one — so the stand-in is renamed to a name that is NOT and will
+ * never be in `MCP_TOOLS`. That is not cosmetic: `findTool` returns the FIRST match,
+ * so a fake sharing a real tool's name would silently shadow it, and the dispatcher
+ * tests below would assert against this spy while believing they had exercised the
+ * registry's own entry. The real `settle_up` is asserted on directly, further down.
+ *
+ * The stand-in still earns its place: `dispatchToolCall`'s scope and rate-limit
+ * behaviour must be provable WITHOUT running a tool that talks to a database, and the
+ * filter must be proved against a registry that is not simply whatever we shipped.
+ */
+const probeSpy = vi.fn();
+const probeWriteTool: RegisteredTool = registerTool({
 	scope: 'write',
 	rateLimitClass: 'write',
 	args: z.strictObject({ groupId: z.string() }),
 	definition: {
-		name: 'settle_up',
-		title: 'Settle up',
+		name: 'probe_write_tool',
+		title: 'Probe',
 		description: 'Move money.',
 		inputSchema: { type: 'object', properties: { groupId: { type: 'string' } } },
 		annotations: {
-			title: 'Settle up',
+			title: 'Probe',
 			readOnlyHint: false,
 			destructiveHint: false,
 			idempotentHint: false,
 			openWorldHint: false
 		}
 	},
-	run: settleUpSpy
+	run: probeSpy
 });
 
-const REGISTRY_WITH_WRITE: RegisteredTool[] = [...MCP_TOOLS, fakeWriteTool];
+const REGISTRY_WITH_WRITE: RegisteredTool[] = [...MCP_TOOLS, probeWriteTool];
 
 const allowed = { allowed: true, count: 1, lastRequest: Date.now(), retryAfterMs: 0 };
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	consumeRateLimit.mockResolvedValue(allowed);
-	settleUpSpy.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
+	probeSpy.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
 });
 
 describe('the shipped registry (#28 + #29)', () => {
@@ -114,19 +130,38 @@ describe('the shipped registry (#28 + #29)', () => {
 		}
 	});
 
-	it('ships `create_transaction` as the first WRITE tool — a non-destructive write (#31)', () => {
-		const tool = findTool('create_transaction');
+	/** The write surface, in registry order: #31's create, then #34's settle-up. */
+	const WRITE_TOOLS = ['create_transaction', 'settle_up'];
+
+	it.each(WRITE_TOOLS)('ships `%s` as a non-destructive WRITE tool (#31, #34)', (name) => {
+		const tool = findTool(name);
 		expect(tool).toBeDefined();
+		// `scope: 'write'` is what hides it from a read key (`filterToolsByScope`) and what
+		// the dispatcher enforces — declaring it is the whole of the tool's ADR-0002 duty.
 		expect(tool?.scope).toBe('write');
 		expect(tool?.rateLimitClass).toBe('write');
 		expect(tool?.definition.annotations).toMatchObject({
 			readOnlyHint: false,
 			destructiveHint: false,
+			// A bounded ~60s window is not the unqualified promise this flag makes (#33).
 			idempotentHint: false
 		});
-		// It comes AFTER the whole read surface (ORDER IS A PROMPT: find your ids first).
+	});
+
+	it('the WRITE tools join LAST, in order — ORDER IS A PROMPT (find your ids first)', () => {
+		// `tools/list` is emitted in registry order, so the list reads as the path the
+		// agent should walk. A write tool advertised before the reads that hand out the
+		// ids it needs would be an invitation to guess one.
 		const names = MCP_TOOLS.map((t) => t.definition.name);
-		expect(names.indexOf('create_transaction')).toBe(names.length - 1);
+		expect(names.slice(-WRITE_TOOLS.length)).toEqual(WRITE_TOOLS);
+	});
+
+	it('`settle_up` tells the model `from` defaults to it, and that ids are not names (#34)', () => {
+		// The wrong-payer and wrong-payee controls are only controls if the model reads
+		// them where it decides: the tool description (ADR-0006).
+		const description = findTool('settle_up')?.definition.description ?? '';
+		expect(description).toMatch(/IDS ONLY, NEVER NAMES/);
+		expect(description).toMatch(/defaults to you/i);
 	});
 
 	it('`get_balances` STEERS the model away from summing a list itself (ADR-0008)', () => {
@@ -144,12 +179,15 @@ describe('filterToolsByScope (ADR-0002)', () => {
 	it('a READ key is never SHOWN a write tool — it cannot form the intent to call it', () => {
 		const names = filterToolsByScope('read', REGISTRY_WITH_WRITE).map((t) => t.name);
 		expect(names).toContain('list_groups');
+		expect(names).not.toContain('probe_write_tool');
+		// The REAL write tools are hidden by the same rule, from the same list.
+		expect(names).not.toContain('create_transaction');
 		expect(names).not.toContain('settle_up');
 	});
 
 	it('a WRITE key sees everything (write ⊇ read)', () => {
 		const names = filterToolsByScope('write', REGISTRY_WITH_WRITE).map((t) => t.name);
-		expect(names).toEqual([...MCP_TOOLS.map((t) => t.definition.name), 'settle_up']);
+		expect(names).toEqual([...MCP_TOOLS.map((t) => t.definition.name), 'probe_write_tool']);
 		expect(names).toContain('settle_up');
 	});
 });
@@ -166,7 +204,7 @@ describe('dispatchToolCall', () => {
 
 	it('a READ key calling a WRITE tool gets forbidden_scope — and burns NO rate budget', async () => {
 		const outcome = await dispatchToolCall(
-			{ name: 'settle_up', arguments: { groupId: 'grp_1' } },
+			{ name: 'probe_write_tool', arguments: { groupId: 'grp_1' } },
 			principalWith('read'),
 			REGISTRY_WITH_WRITE
 		);
@@ -177,19 +215,19 @@ describe('dispatchToolCall', () => {
 		expect(outcome.result.isError).toBe(true);
 		expect(envelopeOf(outcome.result).code).toBe('forbidden_scope');
 		// Defence in depth: the tool never ran, and a denied call costs no budget.
-		expect(settleUpSpy).not.toHaveBeenCalled();
+		expect(probeSpy).not.toHaveBeenCalled();
 		expect(consumeRateLimit).not.toHaveBeenCalled();
 	});
 
 	it('a WRITE key may call the write tool (write ⊇ read)', async () => {
 		const outcome = await dispatchToolCall(
-			{ name: 'settle_up', arguments: { groupId: 'grp_1' } },
+			{ name: 'probe_write_tool', arguments: { groupId: 'grp_1' } },
 			principalWith('write'),
 			REGISTRY_WITH_WRITE
 		);
 
 		expect(outcome.kind).toBe('result');
-		expect(settleUpSpy).toHaveBeenCalledOnce();
+		expect(probeSpy).toHaveBeenCalledOnce();
 		expect(consumeRateLimit).toHaveBeenCalledWith('key_1', 'write');
 	});
 
