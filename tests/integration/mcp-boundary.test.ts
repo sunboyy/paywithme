@@ -14,9 +14,11 @@
 //   2. AUTH       — missing / invalid / expired / revoked all collapse to the SAME
 //      401 carrying `WWW-Authenticate: Bearer resource_metadata="…"` (ADR-0009).
 //   3. ORIGIN     — validated on every request (the spec's DNS-rebinding MUST).
-//   4. SCOPE      — `tools/list` is scope-filtered (ADR-0002); #28 ships read tools
-//      only, so a read key and a write key see the same list — and it is all
-//      `readOnlyHint`.
+//   4. SCOPE      — `tools/list` is scope-filtered (ADR-0002). The full matrix, per
+//      key: a read key is advertised EXACTLY the seven read tools (a write tool does
+//      not exist to it), a write key those seven PLUS the write tools. A read key
+//      that names a write tool anyway is still refused `forbidden_scope` — the
+//      filter is defence in depth, `requireWriteScope` is the guard (#32).
 //   5. NO ORACLE  — another user's group is not "denied", it is ABSENT. Identical
 //      to a group that does not exist (ADR-0009's conflation rule).
 //   6. RATE LIMIT — the tier-2 READ counter (100/60s), the SAME one `/api/v1`
@@ -332,54 +334,80 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 	// ── 4. TOOL SURFACE (ADR-0002) ─────────────────────────────────────────────
 
 	describe('tools/list', () => {
-		it('advertises the whole READ surface, with the annotations Claude requires', async () => {
+		/**
+		 * The advertised matrix of ADR-0002, spelled out LITERALLY. These lists are
+		 * deliberately NOT derived from `MCP_TOOLS`: an expectation computed from the
+		 * registry would agree with whatever the filter did — including nothing at all —
+		 * and this is the one place that proves a read key and a write key are shown
+		 * DIFFERENT surfaces. The hard-coding is the feature: adding a write tool must
+		 * fail here loudly, so a human confirms it was meant to be hidden from read keys.
+		 */
+		const READ_KEY_TOOLS = [
+			'list_groups',
+			'get_group',
+			'list_members',
+			'get_balances',
+			'list_transactions',
+			'get_transaction',
+			'list_currencies'
+		];
+		/** Read ∪ write, in registry order — the write tools join LAST (ORDER IS A PROMPT). */
+		const WRITE_KEY_TOOLS = [...READ_KEY_TOOLS, 'create_transaction'];
+
+		/** Every tool `tools/list` shows this key, in the order it was advertised. */
+		async function advertisedTo(options: { key: string }) {
 			const res = await mcpRpc<{
-				tools: { name: string; description: string; annotations: Record<string, boolean> }[];
-			}>('tools/list', undefined, read);
-
+				tools: {
+					name: string;
+					description: string;
+					annotations: { readOnlyHint: boolean; destructiveHint: boolean };
+				}[];
+			}>('tools/list', undefined, options);
 			expect(res.status).toBe(200);
-			const tools = res.body.result?.tools ?? [];
-			expect(tools.map((t) => t.name)).toEqual([
-				'list_groups',
-				'get_group',
-				'list_members',
-				'get_balances',
-				'list_transactions',
-				'get_transaction',
-				'list_currencies'
-			]);
+			return res.body.result?.tools ?? [];
+		}
 
+		it('a READ key is advertised EXACTLY the read surface — no write tool EXISTS to it', async () => {
+			// The scope filter (`filterToolsByScope`) hides write tools from a read key, so
+			// a read key can never even FORM the intent to move money (ADR-0002). Asserting
+			// the list EXACTLY (not `not.toContain('create_transaction')`) is what makes this
+			// hold for write tools that do not exist yet.
+			const tools = await advertisedTo(read);
+
+			expect(tools.map((t) => t.name)).toEqual(READ_KEY_TOOLS);
 			for (const tool of tools) {
 				expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
 				expect(tool.description).toBeTruthy();
 			}
 		});
 
-		it('a READ key sees NO write tool — every tool it is shown is read-only', async () => {
-			// The scope filter (`filterToolsByScope`) hides write tools from a read key, so
-			// a read key can never even FORM the intent to move money (ADR-0002).
-			const res = await mcpRpc<{
-				tools: { name: string; annotations: { readOnlyHint: boolean } }[];
-			}>('tools/list', undefined, read);
-			const tools = res.body.result?.tools ?? [];
-			expect(tools.length).toBeGreaterThan(0);
-			expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
-			expect(tools.map((t) => t.name)).not.toContain('create_transaction');
+		it('a WRITE key is advertised the read surface PLUS the write tools (write ⊇ read)', async () => {
+			const tools = await advertisedTo({ key: s.writeKey.key });
+
+			expect(tools.map((t) => t.name)).toEqual(WRITE_KEY_TOOLS);
+			// The first write tool's annotations say plainly what it is: not read-only, and
+			// not destructive — it APPENDS a transaction (#31).
+			const write = tools.find((t) => t.name === 'create_transaction');
+			expect(write?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
 		});
 
-		it('a WRITE key DOES see `create_transaction`, annotated as a non-destructive write (#31)', async () => {
-			// The first write tool: a write key sees it (read ⊆ write), and its annotations
-			// say plainly it is not read-only and not destructive — it APPENDS a transaction.
-			const res = await mcpRpc<{
-				tools: {
-					name: string;
-					annotations: { readOnlyHint: boolean; destructiveHint: boolean };
-				}[];
-			}>('tools/list', undefined, { key: s.writeKey.key });
-			const tools = res.body.result?.tools ?? [];
-			const write = tools.find((t) => t.name === 'create_transaction');
-			expect(write, 'write key must be shown create_transaction').toBeDefined();
-			expect(write?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+		it('the tools a write key sees and a read key does not are EXACTLY the non-read-only ones', async () => {
+			// The inverse of the two assertions above, derived from the LIVE responses rather
+			// than from either literal list. It catches a mis-declared registry entry in both
+			// directions: a write tool marked `scope: 'read'` (it would leak into the read
+			// key's list) and a read tool marked `scope: 'write'` (it would be needlessly
+			// hidden — the annotation and the scope must always agree).
+			const [readTools, writeTools] = await Promise.all([
+				advertisedTo(read),
+				advertisedTo({ key: s.writeKey.key })
+			]);
+
+			const readNames = new Set(readTools.map((t) => t.name));
+			const hiddenFromReadKeys = writeTools.filter((t) => !readNames.has(t.name));
+			const notReadOnly = writeTools.filter((t) => !t.annotations.readOnlyHint);
+
+			expect(hiddenFromReadKeys.map((t) => t.name)).toEqual(notReadOnly.map((t) => t.name));
+			expect(hiddenFromReadKeys.length).toBeGreaterThan(0);
 		});
 	});
 
@@ -1182,15 +1210,6 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
 			// The tool never ran — no transaction row exists in the group.
 			expect(await txnRows(s.group.id)).toHaveLength(0);
-		});
-
-		it('the WRITE key sees `create_transaction` in tools/list', async () => {
-			const res = await mcpRpc<{ tools: { name: string }[] }>(
-				'tools/list',
-				undefined,
-				writeKeyOf()
-			);
-			expect((res.body.result?.tools ?? []).map((t) => t.name)).toContain('create_transaction');
 		});
 	});
 

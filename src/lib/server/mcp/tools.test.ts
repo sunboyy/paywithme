@@ -79,12 +79,13 @@ beforeEach(() => {
 });
 
 describe('the shipped registry (#28 + #29)', () => {
-	/** The whole READ surface of the Connector, after #29. */
+	/** The whole READ surface of the Connector, after #30. */
 	const READ_TOOLS = [
 		'list_groups',
 		'get_group',
 		'list_members',
 		'get_balances',
+		'list_transactions',
 		'get_transaction',
 		'list_currencies'
 	];
