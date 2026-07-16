@@ -16,7 +16,7 @@ import type { MemberListItem } from '$lib/server/members';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { toMemberView } from './member';
 import { toTransactionView } from './transaction';
-import { buildEchoBack } from './echo';
+import { buildEchoBack, buildReplayEchoBack } from './echo';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',
@@ -129,5 +129,64 @@ describe('buildEchoBack', () => {
 			2400
 		);
 		expect(echo).toContain('JPY 2400 (2400 minor units)');
+	});
+});
+
+// ── The REPLAY echo-back (ADR-0005, #33) ────────────────────────────────────
+//
+// When the server-derived idempotency window absorbs an agent's retry, the agent
+// must be TOLD. A silent replay is indistinguishable from a fresh create, so a model
+// that retried would cheerfully "confirm" a second lunch that does not exist. These
+// tests pin that the prose is honest in both directions: it says the transaction was
+// already recorded, says it was NOT duplicated, and still restates what IS on the
+// ledger.
+
+describe('buildReplayEchoBack', () => {
+	/** The prose the create produced the first time — what a replay must carry forward. */
+	const recordedEcho = echoFor();
+
+	it('leads with the news: already recorded N seconds ago, NOT duplicated', () => {
+		const echo = buildReplayEchoBack({ recordedEcho, replayedAfterMs: 3000 });
+
+		expect(echo).toContain('already recorded 3 seconds ago');
+		expect(echo).toMatch(/did not duplicate/i);
+		expect(echo).toMatch(/nothing new was written/i);
+	});
+
+	it('still restates what IS on the ledger — the original echo, verbatim', () => {
+		// The replay is a SUCCESS: the user's intent (one lunch, recorded) holds, so the
+		// agent still gets the full restatement naming the humans and the money.
+		const echo = buildReplayEchoBack({ recordedEcho, replayedAfterMs: 3000 });
+
+		expect(echo).toContain(recordedEcho);
+		expect(echo).toContain('THB 240.00 (24000 minor units)');
+		expect(echo).toContain('paid by you');
+	});
+
+	it('tells the agent how to record a genuinely SECOND identical transaction', () => {
+		// ADR-0005's accepted failure: a user who really means two identical coffees
+		// inside 60s gets one. The echo is what makes that recoverable rather than silent.
+		const echo = buildReplayEchoBack({ recordedEcho, replayedAfterMs: 1000 });
+
+		expect(echo).toMatch(/wait a minute|distinguishing title/i);
+	});
+
+	it('singularizes one second and rounds to whole seconds — it is not a stopwatch', () => {
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: 1000 })).toContain(
+			'already recorded 1 second ago'
+		);
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: 1400 })).toContain('1 second ago');
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: 2600 })).toContain('3 seconds ago');
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: 59_000 })).toContain(
+			'59 seconds ago'
+		);
+	});
+
+	it('reads sensibly at the extremes (0ms, and a skewed negative age)', () => {
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: 0 })).toContain('0 seconds ago');
+		// Clock skew must never produce "-2 seconds ago".
+		expect(buildReplayEchoBack({ recordedEcho, replayedAfterMs: -2000 })).toContain(
+			'0 seconds ago'
+		);
 	});
 });

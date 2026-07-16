@@ -26,6 +26,7 @@
 
 import { z } from 'zod';
 import { apiErrorEnvelope, type ApiErrorCode } from '$lib/server/api/errors';
+import { IdempotencyConflictError } from '$lib/server/api/idempotency';
 import { GroupAccessError } from '$lib/server/groups';
 import {
 	TransactionCursorError,
@@ -169,6 +170,27 @@ export function mapToolError(err: unknown): McpToolResult {
 	}
 	if (err instanceof TransactionCursorError) {
 		return toolError('bad_request', 'The pagination cursor is invalid.');
+	}
+	// An idempotency conflict raised by the server-derived window (ADR-0005). MCP has
+	// no 409 to hand back, so — like every other domain failure (ADR-0009) — it becomes
+	// an `isError` RESULT the agent can read and act on, mirroring REST's `mapWriteError`
+	// shape (`code: 'conflict'` + `details.reason`) so the two channels agree.
+	//
+	// Both reasons MUST be mapped here even though only one is reachable: the derived
+	// key encodes the arguments, so `key_reused` (same key, different body) cannot occur
+	// on the MCP path. Leaving it unmapped would let a SHA-256 collision — or a future
+	// caller that derives keys differently — surface to an agent as an opaque
+	// `internal_error`, the one thing ADR-0009 forbids.
+	if (err instanceof IdempotencyConflictError) {
+		const message =
+			err.reason === 'in_progress'
+				? 'An identical create for this group is already in progress — most likely your own ' +
+					'immediately preceding call, which has NOT failed. Nothing was lost and nothing was ' +
+					'duplicated. Do NOT retry: wait a moment, then call `list_transactions` to confirm ' +
+					'it landed before deciding to act.'
+				: 'This write conflicts with one already recorded under the same idempotency key. Do ' +
+					'not retry it unchanged; call `list_transactions` to see what is actually on the ledger.';
+		return toolError('conflict', message, { reason: err.reason });
 	}
 	// The SHARED transaction schema rejecting server-side (a write tool re-validating an
 	// unknown / other-group / DEACTIVATED member id, a category/type mismatch, a §7.6

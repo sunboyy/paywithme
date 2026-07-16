@@ -39,7 +39,7 @@
 // Cleanup mirrors the `/api/v1` suite: `cleanupApiKeyRows()` then
 // `cleanupSuiteRows()`. A second consecutive run is green.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
@@ -1210,6 +1210,195 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
 			// The tool never ran — no transaction row exists in the group.
 			expect(await txnRows(s.group.id)).toHaveLength(0);
+		});
+	});
+
+	// ── 11c. create_transaction — the SERVER-DERIVED idempotency window (#33) ─
+	//         ADR-0005, against real rows: an agent that retries a create must not
+	//         double-charge the user, and a genuinely repeated expense must still
+	//         be recorded. The unit suite (`src/lib/server/mcp/idempotency.test.ts`)
+	//         proves the mechanism; THIS proves it survives the real store — the
+	//         `jsonb` round-trip of the replayed payload, the real UNIQUE constraint,
+	//         and the real `created_at` column the sliding window measures against.
+
+	describe('tools/call create_transaction idempotency (#33)', () => {
+		/**
+		 * TIME IS THE FIXTURE HERE, so it is injected, never slept through: a window is
+		 * ~60s and no test may take a minute. Only `Date` is faked — the DB driver's timers
+		 * and sockets must keep running, so `toFake` is deliberately narrow. The MCP path
+		 * reads `new Date()` in-process (and writes `created_at` explicitly from it, rather
+		 * than letting Postgres default it), so a faked clock reaches all the way into the
+		 * stored row.
+		 *
+		 * This `afterEach` is nested, so it restores real timers BEFORE the suite-level
+		 * cleanup runs.
+		 */
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		/** Freeze the clock at an ISO instant. */
+		function freezeAt(iso: string) {
+			vi.useFakeTimers({ toFake: ['Date'], now: new Date(iso) });
+		}
+
+		/** Move the frozen clock forward by `seconds` (no waiting). */
+		function advance(seconds: number) {
+			vi.setSystemTime(new Date(Date.now() + seconds * 1000));
+		}
+
+		/** The ฿240 lunch of ADR-0005, sent EXACTLY as an agent would send it twice. */
+		const LUNCH = { title: 'Lunch', amount: '240.00' };
+
+		/** The write result payload, including #33's replay markers. */
+		interface CreatedWire {
+			recorded: { id: string };
+			echo: string;
+			replayed: boolean;
+			recordedAgoSeconds?: number;
+			_note: string;
+		}
+
+		/** Call `create_transaction` for the fixture group, split solo, and return the wire result. */
+		async function createLunch(extra: Record<string, unknown> = {}) {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.alice], ...extra },
+				{ key: s.writeKey.key }
+			);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			return res.body.result?.structuredContent as unknown as CreatedWire;
+		}
+
+		/** Every transaction row in the fixture group — the ledger, as it really is. */
+		async function rows() {
+			return db.select().from(transactionsTable).where(eq(transactionsTable.groupId, s.group.id));
+		}
+
+		it('a content-identical retry INSIDE the window → ONE transaction, replayed from the store', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const first = await createLunch();
+
+			// "That didn't seem to go through, let me try again." — 3 seconds later.
+			advance(3);
+			const retry = await createLunch();
+
+			// THE ACCEPTANCE CRITERION: one ฿240 lunch on the ledger, not two.
+			expect(await rows()).toHaveLength(1);
+			// The retry replayed the STORED response (#20's store — no new persistence):
+			// the same transaction id comes back, so the agent is not told about a row that
+			// does not exist.
+			expect(retry.recorded.id).toBe(first.recorded.id);
+			expect(retry.replayed).toBe(true);
+			expect(first.replayed).toBe(false);
+		});
+
+		it('the replay is SURFACED in the echo-back — "already recorded 3 seconds ago", not hidden', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+			await createLunch();
+			advance(3);
+			const retry = await createLunch();
+
+			// A silent replay would be indistinguishable from a fresh create, and the agent
+			// would "confirm" a second lunch that does not exist (ADR-0005).
+			expect(retry.echo).toContain('already recorded 3 seconds ago');
+			expect(retry.echo).toMatch(/did not duplicate/i);
+			expect(retry.recordedAgoSeconds).toBe(3);
+			// It is a SUCCESS, not an error — and the wrapped view still ships (ADR-0003).
+			expect(retry.echo).toContain('USD 240.00');
+			expect(retry._note).toMatch(/untrusted/i);
+		});
+
+		it('a replay re-runs NOTHING: no second transaction AND no second audit row (§16.6)', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const first = await createLunch();
+			advance(5);
+			await createLunch();
+
+			// "Idempotency replays write no audit row (they re-run nothing)" — §16.6.
+			const audit = await db
+				.select()
+				.from(auditLog)
+				.where(eq(auditLog.entityId, first.recorded.id));
+			expect(audit).toHaveLength(1);
+		});
+
+		it('the same expense AFTER the window → a NEW transaction (the second coffee is recorded)', async () => {
+			// Duplicate expenses are LEGITIMATE. Swallowing this one would silently
+			// under-bill the user — the failure a naive content hash would cause.
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const first = await createLunch();
+
+			advance(3600); // an hour later: a real second purchase, not a retry.
+			const second = await createLunch();
+
+			expect(await rows()).toHaveLength(2);
+			expect(second.recorded.id).not.toBe(first.recorded.id);
+			expect(second.replayed).toBe(false);
+			expect(second.echo).not.toMatch(/already recorded/i);
+		});
+
+		it('a retry STRADDLING a bucket boundary still de-duplicates (sliding, not bucketed)', async () => {
+			// THE criterion. A naive `floor(now / 60s)` bucket lets these two land in
+			// DIFFERENT buckets, so the retry duplicates anyway — the exact failure the
+			// mechanism exists to prevent (ADR-0005).
+			freezeAt('2026-07-16T12:00:59.000Z'); // t = 59s — bucket N-1
+			const first = await createLunch();
+
+			advance(2); // t = 12:01:01 — bucket N
+			const retry = await createLunch();
+
+			expect(await rows()).toHaveLength(1);
+			expect(retry.recorded.id).toBe(first.recorded.id);
+			expect(retry.replayed).toBe(true);
+			expect(retry.echo).toContain('already recorded 2 seconds ago');
+		});
+
+		it('scopes the window to the CALLING key — another write key’s identical create is its own', async () => {
+			// §16.6: the store is scoped to the calling key, and the derived key carries
+			// `keyId`. Two keys are two callers; neither dedups against the other.
+			freezeAt('2026-07-16T12:00:00.000Z');
+			await createLunch();
+
+			const other = await mintApiKey(s.user.id, 'write', 'second write key');
+			advance(1);
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.alice] },
+				{ key: other.key }
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			expect(await rows()).toHaveLength(2);
+		});
+
+		it('a REJECTED create never enters the window — the corrected retry is unimpeded', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+
+			// An over-precise amount: rejected before the ledger is touched (#31).
+			const bad = await mcpToolCall(
+				'create_transaction',
+				{ groupId: s.group.id, title: 'Lunch', amount: '240.005', splitBetween: [s.alice] },
+				{ key: s.writeKey.key }
+			);
+			expect(bad.body.result?.isError).toBe(true);
+
+			// The agent fixes the amount and retries immediately. The guard starts AFTER
+			// validation, so nothing was stored and this is a clean create.
+			advance(1);
+			const good = await createLunch();
+			expect(good.replayed).toBe(false);
+			expect(await rows()).toHaveLength(1);
+		});
+
+		it('a DIFFERENT expense inside the window is recorded, not mistaken for a retry', async () => {
+			// The derived key encodes the arguments, so only an IDENTICAL call replays.
+			freezeAt('2026-07-16T12:00:00.000Z');
+			await createLunch();
+			advance(1);
+			await createLunch({ title: 'Coffee', amount: '60.00' });
+
+			expect(await rows()).toHaveLength(2);
 		});
 	});
 

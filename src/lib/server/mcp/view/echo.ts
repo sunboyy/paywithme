@@ -93,3 +93,40 @@ export function buildEchoBack({
 		`split equally ${ways}: ${joinNames(beneficiaries)}.`
 	);
 }
+
+/** `3200` → "3 seconds"; `1000` → "1 second". Whole seconds — the age is not a stopwatch. */
+function humanizeAge(ms: number): string {
+	const seconds = Math.max(0, Math.round(ms / 1000));
+	return seconds === 1 ? '1 second' : `${seconds} seconds`;
+}
+
+/**
+ * The echo-back for a REPLAYED write (ADR-0005). PURE.
+ *
+ * When the server-derived idempotency window absorbs an agent's retry, the agent
+ * must be TOLD — a silent replay looks identical to a fresh create, so a model that
+ * retried once would happily "confirm" a second lunch that does not exist, and a
+ * model debugging a failure would keep retrying against a wall it cannot see. So the
+ * replay leads with the news ("already recorded 3 seconds ago — not duplicating
+ * it"), then restates what IS on the ledger by carrying the original echo verbatim.
+ *
+ * It is a SUCCESS, not an error: the user's intent — one lunch on the ledger — is
+ * satisfied. The result still returns the full wrapped `recorded` view alongside
+ * this prose, so the untrusted-envelope discipline (ADR-0003/0006) holds on a replay
+ * exactly as it does on a create.
+ */
+export function buildReplayEchoBack({
+	recordedEcho,
+	replayedAfterMs
+}: {
+	/** The prose {@link buildEchoBack} produced when the create actually ran. */
+	recordedEcho: string;
+	replayedAfterMs: number;
+}): string {
+	return (
+		`That transaction was already recorded ${humanizeAge(replayedAfterMs)} ago — this call ` +
+		`did not duplicate it, and nothing new was written. It is on the ledger exactly once. ` +
+		`${recordedEcho} If the user genuinely means to record a SECOND, separate transaction ` +
+		`with these same details, wait a minute or give it a distinguishing title.`
+	);
+}

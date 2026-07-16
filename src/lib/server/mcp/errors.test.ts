@@ -10,6 +10,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { GroupAccessError } from '$lib/server/groups';
+import { IdempotencyConflictError } from '$lib/server/api/idempotency';
 import {
 	TransactionCursorError,
 	TransactionNotFoundError,
@@ -132,6 +133,32 @@ describe('mapToolError', () => {
 
 	it('maps a bad pagination cursor to bad_request', () => {
 		expect(envelopeOf(mapToolError(new TransactionCursorError())).code).toBe('bad_request');
+	});
+
+	it('maps an in_progress idempotency conflict to a readable `conflict` RESULT (#33)', () => {
+		// A concurrent retry lost the pending-first race (§16.6). MCP has no 409, and an
+		// `IdempotencyConflictError` extends plain `Error` — so without this branch it
+		// would reach the agent as an opaque `internal_error` telling it a SERVER failed,
+		// when in fact its own create is fine and in flight. ADR-0009: a domain failure is
+		// a result the agent can act on.
+		const envelope = envelopeOf(mapToolError(new IdempotencyConflictError('in_progress')));
+
+		expect(envelope.code).toBe('conflict');
+		// Mirrors REST's `mapWriteError` shape, so the two channels name the sub-case alike.
+		expect(envelope.details).toEqual({ reason: 'in_progress' });
+		// The guidance an agent needs: its write was NOT lost, and retrying is wrong.
+		expect(envelope.message).toMatch(/do not retry/i);
+		expect(envelope.message).toMatch(/list_transactions/);
+	});
+
+	it('maps a key_reused conflict too — unreachable on the MCP path, but never opaque (#33)', () => {
+		// The derived key encodes the arguments (ADR-0005), so "same key, different body"
+		// cannot occur here. It is mapped anyway: a SHA-256 collision, or a future caller
+		// that derives keys differently, must not surface to an agent as `internal_error`.
+		const envelope = envelopeOf(mapToolError(new IdempotencyConflictError('key_reused')));
+
+		expect(envelope.code).toBe('conflict');
+		expect(envelope.details).toEqual({ reason: 'key_reused' });
 	});
 
 	it('maps a ZodError to a self-correctable validation_error with field details', () => {

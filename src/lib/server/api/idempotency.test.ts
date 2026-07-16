@@ -146,6 +146,9 @@ describe('withIdempotency — winner runs the create ONCE', () => {
 	});
 });
 
+/** The insert time a stored row carries (`createdAt`); only the MCP path reads it. */
+const RECORDED_AT = new Date('2026-07-12T00:00:00.000Z');
+
 describe('withIdempotency — loser (row already exists)', () => {
 	it('REPLAYS a completed row with a matching body — fn never runs', async () => {
 		const hash = fingerprintRequestBody('{"amount":100}');
@@ -155,7 +158,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 				requestHash: hash,
 				status: 'completed',
 				responseStatus: 201,
-				responseBody: { id: 't1' }
+				responseBody: { id: 't1' },
+				createdAt: RECORDED_AT
 			}
 		});
 		const fn = vi.fn(
@@ -175,6 +179,56 @@ describe('withIdempotency — loser (row already exists)', () => {
 		expect(store.completed).toHaveLength(0);
 	});
 
+	it('reports the STORED ROW to `onReplay` — where the MCP echo-back gets its "3s ago"', async () => {
+		// The MCP path (ADR-0005) must SURFACE a replay rather than hide it, and needs the
+		// row's `createdAt` to say how long ago the original landed. Reported here so a
+		// replay stays ONE round-trip instead of a re-`load` by the caller.
+		const store = makeStore({
+			won: false,
+			existing: {
+				requestHash: fingerprintRequestBody('{"amount":100}'),
+				status: 'completed',
+				responseStatus: 201,
+				responseBody: { id: 't1' },
+				createdAt: RECORDED_AT
+			}
+		});
+		const onReplay = vi.fn();
+
+		const res = await withIdempotency({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			rawBody: '{"amount":100}',
+			store,
+			fn: vi.fn(),
+			onReplay
+		});
+
+		expect(onReplay).toHaveBeenCalledTimes(1);
+		expect(onReplay.mock.calls[0][0]).toMatchObject({
+			createdAt: RECORDED_AT,
+			status: 'completed'
+		});
+		// A notification, not a hook: the replayed response is unchanged by it.
+		expect(res).toEqual({ status: 201, body: { id: 't1' } });
+	});
+
+	it('does NOT call `onReplay` when the create actually RAN', async () => {
+		const store = makeStore({ won: true });
+		const onReplay = vi.fn();
+
+		await withIdempotency({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			rawBody: '{}',
+			store,
+			fn: async () => ({ status: 201, body: { id: 't1' } }),
+			onReplay
+		});
+
+		expect(onReplay).not.toHaveBeenCalled();
+	});
+
 	it('409 key_reused when the same key was used with a DIFFERENT body', async () => {
 		const store = makeStore({
 			won: false,
@@ -182,7 +236,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 				requestHash: fingerprintRequestBody('{"amount":100}'),
 				status: 'completed',
 				responseStatus: 201,
-				responseBody: { id: 't1' }
+				responseBody: { id: 't1' },
+				createdAt: RECORDED_AT
 			}
 		});
 		const fn = vi.fn();
@@ -204,7 +259,13 @@ describe('withIdempotency — loser (row already exists)', () => {
 		const hash = fingerprintRequestBody('{"amount":100}');
 		const store = makeStore({
 			won: false,
-			existing: { requestHash: hash, status: 'pending', responseStatus: null, responseBody: null }
+			existing: {
+				requestHash: hash,
+				status: 'pending',
+				responseStatus: null,
+				responseBody: null,
+				createdAt: RECORDED_AT
+			}
 		});
 
 		const err = await withIdempotency({
@@ -310,16 +371,25 @@ describe('createDbIdempotencyStore — pending-first insert race', () => {
 		).rejects.toBe(wrapped);
 	});
 
-	it('load returns the mapped row or null', async () => {
+	it('load returns the mapped row (INCLUDING createdAt) or null', async () => {
 		const store = createDbIdempotencyStore();
 		selectRows.current = [
-			{ requestHash: 'h', status: 'completed', responseStatus: 201, responseBody: { id: 't1' } }
+			{
+				requestHash: 'h',
+				status: 'completed',
+				responseStatus: 201,
+				responseBody: { id: 't1' },
+				createdAt: RECORDED_AT
+			}
 		];
+		// `createdAt` is projected because the MCP sliding window measures elapsed time
+		// against it (ADR-0005). An EXISTING column — no schema change.
 		expect(await store.load('key_1', 'abc')).toEqual({
 			requestHash: 'h',
 			status: 'completed',
 			responseStatus: 201,
-			responseBody: { id: 't1' }
+			responseBody: { id: 't1' },
+			createdAt: RECORDED_AT
 		});
 		selectRows.current = [];
 		expect(await store.load('key_1', 'abc')).toBeNull();
