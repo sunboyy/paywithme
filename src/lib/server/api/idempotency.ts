@@ -17,6 +17,7 @@
 import { createHash } from 'node:crypto';
 import { and, eq, lte } from 'drizzle-orm';
 import { db } from '$lib/server/db';
+import { isUniqueViolation } from '$lib/server/db/pg-errors';
 import { idempotencyKey as idempotencyKeyTable } from '$lib/server/db/idempotency-schema';
 
 /** How long a stored idempotency record is honored before TTL cleanup (24h, §16.6). */
@@ -185,32 +186,13 @@ export async function withIdempotency({
 }
 
 /**
- * A Postgres unique-violation (`23505`) — the pending-first insert lost the race.
- *
- * The code is looked up along the CAUSE CHAIN, not just on the thrown value: Drizzle
- * wraps every driver failure in a `DrizzleQueryError` whose own `code` is undefined
- * and whose `cause` is the `pg` error carrying `code: '23505'`. Checking only the
- * top-level object made the duplicate insert escape as an uncaught error — i.e. a
- * REPLAY (§16.6) surfaced as a 500 instead of the stored response. Only a real-DB
- * test can catch that (a stubbed store throws whatever it is told to), which is why
- * `tests/integration/api-idempotency-rate-limit.test.ts` exists.
- */
-function isUniqueViolation(e: unknown): boolean {
-	const UNIQUE_VIOLATION = '23505';
-	// Bounded walk — a cause chain is short, and the bound rules out a cycle.
-	for (let current: unknown = e, depth = 0; current != null && depth < 5; depth++) {
-		if (typeof current === 'object' && 'code' in current) {
-			if ((current as { code: unknown }).code === UNIQUE_VIOLATION) return true;
-		}
-		current = (current as { cause?: unknown }).cause;
-	}
-	return false;
-}
-
-/**
  * The production {@link IdempotencyStore} over the Drizzle `db`. The pending-first
  * insert relies on the UNIQUE `(key_id, idempotency_key)` constraint: a duplicate
- * insert throws `23505`, which we translate to `insertPending → false`.
+ * insert throws `23505`, which we translate to `insertPending → false`. A duplicate
+ * insert escaping as an uncaught error would surface a REPLAY (§16.6) as a 500
+ * instead of the stored response, so the check walks Drizzle's wrapped cause chain
+ * ({@link isUniqueViolation}) — covered by
+ * `tests/integration/api-idempotency-rate-limit.test.ts`.
  */
 export function createDbIdempotencyStore(): IdempotencyStore {
 	return {

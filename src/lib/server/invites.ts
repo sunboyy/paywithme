@@ -41,6 +41,7 @@
 import { randomBytes } from 'node:crypto';
 import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from './db';
+import { isUniqueViolation } from './db/pg-errors';
 import { groups, invites, members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog } from './audit';
@@ -385,18 +386,12 @@ export type AcceptResult =
 	| { status: 'slot_taken' }
 	| { status: 'accepted'; groupId: string; memberId: string };
 
-/**
- * A Postgres unique-violation error code (`23505`). The partial unique index
- * `(group_id, user_id) WHERE user_id IS NOT NULL` (task 3.1) backstops a race on
- * the OPEN-invite path: two concurrent accepts by the same user would both pass
- * the membership pre-check, then one insert wins and the other trips this — we
- * map that to a friendly `already_member` rather than a 500.
- */
-function isUniqueViolation(e: unknown): boolean {
-	return (
-		typeof e === 'object' && e !== null && 'code' in e && (e as { code: unknown }).code === '23505'
-	);
-}
+// The partial unique index `(group_id, user_id) WHERE user_id IS NOT NULL` (task
+// 3.1) backstops a race on the OPEN-invite path: two concurrent accepts by the same
+// user both pass the membership pre-check, then one insert wins and the other trips
+// `23505` — mapped to a friendly `already_member` rather than a 500. The shared
+// `isUniqueViolation` walks Drizzle's wrapped cause chain, so the backstop fires
+// against real Postgres (not just the unwrapped stub the unit tests throw).
 
 /**
  * The invitee's CHOICE at accept time (PLAN §6.2 step 3):

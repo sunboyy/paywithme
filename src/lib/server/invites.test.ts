@@ -537,6 +537,24 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		expect(insertCalls).toHaveLength(0);
 	});
 
+	it("mode 'existing' race: backstop fires on Drizzle's WRAPPED 23505 (cause chain)", async () => {
+		// Real Postgres via Drizzle throws a wrapper whose own `code` is undefined and
+		// whose `cause` carries `23505`. The own-`code`-only check missed this, so the
+		// backstop never fired against a real DB (issue #26). Pin the wrapped shape.
+		queueSelects([validInviteRow()], []);
+		const pgError = Object.assign(new Error('duplicate key value'), { code: '23505' });
+		updateThrow.error = Object.assign(new Error('Failed query'), { cause: pgError });
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'existing', memberId: 'm5' }
+		});
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+	});
+
 	it('existing membership: one-per-user-per-group → already_member (no mutation)', async () => {
 		// (1) resolve → valid; (2) membership check FINDS an existing linked member.
 		queueSelects([validInviteRow()], [{ id: 'existing-member' }]);
@@ -572,6 +590,23 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		// trips the partial unique index `(group_id, user_id)`.
 		queueSelects([validInviteRow()], []);
 		insertThrow.error = { code: '23505' }; // Postgres unique_violation
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+	});
+
+	it("mode 'new' race: backstop fires on Drizzle's WRAPPED 23505 (cause chain)", async () => {
+		// As above, but on the new-member INSERT path — the wrapped shape real Postgres
+		// throws, which the pre-#26 own-`code`-only check let escape as a 500.
+		queueSelects([validInviteRow()], []);
+		const pgError = Object.assign(new Error('duplicate key value'), { code: '23505' });
+		insertThrow.error = Object.assign(new Error('Failed query'), { cause: pgError });
 
 		const result = await acceptInvite({
 			userId: 'u9',
