@@ -13,6 +13,7 @@ import { GroupAccessError } from '$lib/server/groups';
 import { IdempotencyConflictError } from '$lib/server/api/idempotency';
 import {
 	TransactionCursorError,
+	TransactionDeletedError,
 	TransactionNotFoundError,
 	TransactionValidationError
 } from '$lib/server/transactions';
@@ -189,6 +190,34 @@ describe('mapToolError', () => {
 		// Field-level details, shaped identically to the ZodError branch (REST parity).
 		expect(envelope.details).toMatchObject({ fieldErrors: expect.any(Object) });
 		// And NOT the opaque internal-error retry guidance.
+		expect(envelope.message).not.toMatch(/server-side failure/i);
+	});
+
+	it('maps a TransactionDeletedError to validation_error, NOT not_found (#35)', () => {
+		// `update_transaction` against a soft-deleted txn. The txn is still VISIBLE to
+		// `get_transaction` (that is what makes restoring it possible), so conflating this
+		// into `not_found` would tell the agent an id that demonstrably works is gone — and
+		// would hide the one action that fixes it. It is a state rule, and a self-correctable
+		// one: restore, then edit.
+		const envelope = envelopeOf(mapToolError(new TransactionDeletedError()));
+
+		expect(envelope.code).toBe('validation_error');
+		// It carries the DOMAIN message (which names the restore-first rule), and is NOT
+		// conflated with a genuinely absent id.
+		expect(envelope.message).not.toBe('The requested resource was not found.');
+		expect(mapToolError(new TransactionDeletedError())).not.toEqual(
+			mapToolError(new TransactionNotFoundError())
+		);
+	});
+
+	it('a deleted-txn edit is NOT an opaque internal_error — the regression this branch guards', () => {
+		// `TransactionDeletedError` extends plain `Error`, so with no dedicated branch it
+		// falls through to `internal_error` — telling the agent a SERVER broke and not to
+		// retry, when in fact its request is fixable in one call. Mirrors REST's
+		// `mapWriteError`, which maps the same class to a 422 for the same reason.
+		const envelope = envelopeOf(mapToolError(new TransactionDeletedError()));
+
+		expect(envelope.code).not.toBe('internal_error');
 		expect(envelope.message).not.toMatch(/server-side failure/i);
 	});
 

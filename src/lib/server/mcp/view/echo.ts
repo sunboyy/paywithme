@@ -106,6 +106,28 @@ export function buildEchoBack({
 	view: TransactionView;
 	minorUnits: number;
 }): string {
+	return `Recorded ${describeTransaction({ view, minorUnits })}.`;
+}
+
+/**
+ * The CLAUSE every echo in this module is built from: *`spending "Lunch" — THB 240.00
+ * (24000 minor units), paid by you, split equally 2 ways: you and Nan Suphaporn`*.
+ * PURE, and deliberately NOT a sentence — each caller supplies the verb ("Recorded",
+ * "Deleted", "Restored", "It was").
+ *
+ * It exists because #35 added three more echoes, and a transaction described one way
+ * by `create_transaction` and a subtly different way by `delete_transaction` is a
+ * transaction the user has to read twice to recognise as the same one. The wrong-pick
+ * and misparse controls (ADR-0004 / ADR-0006) only work if the restatement is the same
+ * restatement everywhere: one shape, one place to get it right.
+ */
+function describeTransaction({
+	view,
+	minorUnits
+}: {
+	view: TransactionView;
+	minorUnits: number;
+}): string {
 	const amount = proseMoney(view.settlementAmount, minorUnits);
 
 	const paidBy = joinNames(view.payers.map(proseName));
@@ -114,8 +136,8 @@ export function buildEchoBack({
 	const ways = splitCount === 1 ? '1 way' : `${splitCount} ways`;
 
 	return (
-		`Recorded ${view.type} "${view.title.value}" — ${amount}, paid by ${paidBy}, ` +
-		`split equally ${ways}: ${joinNames(beneficiaries)}.`
+		`${view.type} "${view.title.value}" — ${amount}, paid by ${paidBy}, ` +
+		`split equally ${ways}: ${joinNames(beneficiaries)}`
 	);
 }
 
@@ -180,6 +202,199 @@ export function buildSettleUpEchoBack({
 
 	const line = `Recorded settle-up: ${from} → ${to}, ${proseMoney(view.settlementAmount, minorUnits)}.`;
 	return similar.length === 0 ? line : `${line} ${disambiguation(similar)}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The REVERSIBILITY echoes — `update` / `delete` / `restore` (issue #35).
+//
+// ADR-0003 rests its whole risk appetite on writes being RECOVERABLE: "an injected
+// write is visible, attributable to a specific key, and undoable". Undoable is only
+// true if the undo is FINDABLE — so these echoes are not decoration on top of the
+// mechanism, they are half of it. A delete that answers `{ ok: true }` leaves the
+// user with a changed balance, no statement of what left the ledger, and no idea
+// that `restore_transaction` exists. That is a silent, unattributed edit to a shared
+// ledger, which is precisely the outcome the ADR claims we do not have.
+//
+// So each of the three NAMES WHAT CHANGED, in the same clause shape the create path
+// uses (`describeTransaction`), and the delete echo names its own undo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The fields `update_transaction` can replace — the vocabulary a change list speaks. */
+export type ChangedField = 'title' | 'amount' | 'category' | 'paidBy' | 'splitBetween';
+
+/** How each changed field is spoken in the echo's prose. */
+const CHANGE_PROSE: Record<ChangedField, string> = {
+	title: 'the title',
+	amount: 'the amount',
+	category: 'the category',
+	paidBy: 'who paid',
+	splitBetween: 'who it is split between'
+};
+
+/** Do two member-line lists name the SAME members? Order-insensitive — a re-ordered `splitBetween` is not a change. */
+function sameMembers(
+	a: readonly { memberId: string }[],
+	b: readonly { memberId: string }[]
+): boolean {
+	if (a.length !== b.length) return false;
+	const left = [...a.map((x) => x.memberId)].sort();
+	const right = [...b.map((x) => x.memberId)].sort();
+	return left.every((id, i) => id === right[i]);
+}
+
+/**
+ * Which fields an update actually REPLACED, by comparing the persisted before/after
+ * views. PURE.
+ *
+ * Computed from what the LEDGER holds, never from which arguments the model happened
+ * to send: an `update_transaction` that passes `title: "Lunch"` when the title is
+ * already "Lunch" has changed nothing, and saying otherwise would train the user to
+ * ignore the line. This is also why an identical replay reads "Changed: nothing"
+ * rather than inventing a diff.
+ *
+ * The amount is compared on the SETTLEMENT figure — the one §8 reads and the one the
+ * echo speaks, so "the amount changed" always means "what people owe each other
+ * changed".
+ */
+export function changedFields({
+	before,
+	after
+}: {
+	before: TransactionView;
+	after: TransactionView;
+}): ChangedField[] {
+	const changed: ChangedField[] = [];
+	if (before.title.value !== after.title.value) changed.push('title');
+	if (before.settlementAmount.amount !== after.settlementAmount.amount) changed.push('amount');
+	if (before.category.id !== after.category.id) changed.push('category');
+	if (!sameMembers(before.payers, after.payers)) changed.push('paidBy');
+	if (!sameMembers(before.shares, after.shares)) changed.push('splitBetween');
+	return changed;
+}
+
+/**
+ * The echo-back for a just-REPLACED transaction (#35). PURE.
+ *
+ * *"Replaced spending "Lunch". It WAS: … It is NOW: … Changed: the title and the
+ * amount."*
+ *
+ * An edit is the one write where the ECHO IS THE ONLY RECORD THE USER READS of what
+ * they lost: the create path's echo describes something that did not exist before, so
+ * there is nothing to compare it against, but a replacement silently overwrites a real
+ * row (§16.6: last-write-wins, no `If-Match`). Both states are therefore stated in
+ * full — not just the new one — so a wrong replacement is legible on the spot rather
+ * than at the end of the trip.
+ *
+ * `changed` is passed IN rather than computed here so the tool can ship the SAME list
+ * machine-readably alongside the prose; the two can never disagree about what moved.
+ */
+export function buildUpdateEchoBack({
+	before,
+	after,
+	beforeMinorUnits,
+	afterMinorUnits,
+	changed
+}: {
+	/** The view of what was on the ledger BEFORE the replacement. */
+	before: TransactionView;
+	/** The view of what is on the ledger NOW. */
+	after: TransactionView;
+	beforeMinorUnits: number;
+	afterMinorUnits: number;
+	changed: readonly ChangedField[];
+}): string {
+	const summary =
+		changed.length === 0
+			? 'Changed: nothing — the replacement is identical to what was already recorded.'
+			: `Changed: ${joinNames(changed.map((f) => CHANGE_PROSE[f]))}.`;
+
+	return (
+		`Replaced the ${before.type} that was recorded as "${before.title.value}". ` +
+		`It WAS: ${describeTransaction({ view: before, minorUnits: beforeMinorUnits })}. ` +
+		`It is NOW: ${describeTransaction({ view: after, minorUnits: afterMinorUnits })}. ` +
+		summary
+	);
+}
+
+/**
+ * The echo-back for a just-DELETED transaction (#35). PURE.
+ *
+ * *"Deleted spending "Lunch" — THB 240.00 (24000 minor units), paid by you, split
+ * equally 2 ways: you and Nan Suphaporn. It no longer counts toward anyone's balance.
+ * This is a SOFT delete: call `restore_transaction` with id txn_1 to undo it."*
+ *
+ * Three things this line must do, and each is load-bearing:
+ *   - NAME what left the ledger. A balance that moved with no statement of what moved
+ *     it is the shape of a silent edit (ADR-0003).
+ *   - Say that BALANCES CHANGED. A model holding "deleted: true" will not volunteer it,
+ *     and the balance is the number the user actually cares about (ADR-0008).
+ *   - Name the UNDO, with the id. `restore_transaction` is the mechanism ADR-0003's
+ *     risk appetite rests on; an undo nobody can find is not an undo.
+ *
+ * `wasAlreadyDeleted` renders the §16.6 NO-OP honestly (the service is guarded by
+ * `isNull(deleted_at)`, so a repeat delete transitions nothing and writes no audit
+ * row). Telling the agent "Deleted" a second time would invite it to report a second
+ * deletion that never happened — the same lie the replay echo exists to prevent.
+ */
+export function buildDeleteEchoBack({
+	view,
+	minorUnits,
+	wasAlreadyDeleted
+}: {
+	/** The transaction as it stands AFTER the delete (`isDeleted` is true either way). */
+	view: TransactionView;
+	minorUnits: number;
+	/** TRUE when the txn was ALREADY soft-deleted, so this call transitioned nothing. */
+	wasAlreadyDeleted: boolean;
+}): string {
+	const what = describeTransaction({ view, minorUnits });
+	const undo =
+		`This is a SOFT delete: call \`restore_transaction\` with id ${view.id} to undo it, ` +
+		`and the balances go back exactly as they were.`;
+
+	if (wasAlreadyDeleted) {
+		return (
+			`That transaction was ALREADY deleted — this call changed nothing and wrote nothing. ` +
+			`It is off the ledger exactly once: ${what}. ${undo}`
+		);
+	}
+	return `Deleted ${what}. It no longer counts toward anyone's balance. ${undo}`;
+}
+
+/**
+ * The echo-back for a just-RESTORED transaction (#35). PURE.
+ *
+ * *"Restored spending "Lunch" — THB 240.00 (24000 minor units), paid by you, split
+ * equally 2 ways: you and Nan Suphaporn. It counts toward balances again."*
+ *
+ * The mirror of the delete echo, and the sentence ADR-0003's "reversible" claim cashes
+ * out to: it names what came BACK, and says plainly that the balances moved with it —
+ * because a restore whose effect on the owed figure goes unmentioned leaves the user
+ * unable to tell whether the undo actually undid anything.
+ *
+ * `wasAlreadyLive` renders the §16.6 no-op (restoring a live txn transitions nothing
+ * and writes no audit row) rather than claiming a restore that did not happen.
+ */
+export function buildRestoreEchoBack({
+	view,
+	minorUnits,
+	wasAlreadyLive
+}: {
+	/** The transaction as it stands AFTER the restore (`isDeleted` is false either way). */
+	view: TransactionView;
+	minorUnits: number;
+	/** TRUE when the txn was NOT deleted to begin with, so this call transitioned nothing. */
+	wasAlreadyLive: boolean;
+}): string {
+	const what = describeTransaction({ view, minorUnits });
+
+	if (wasAlreadyLive) {
+		return (
+			`That transaction was NOT deleted — this call changed nothing and wrote nothing. ` +
+			`It is on the ledger, counting toward balances, exactly as it was: ${what}.`
+		);
+	}
+	return `Restored ${what}. It counts toward balances again, exactly as it did before it was deleted.`;
 }
 
 /** `3200` → "3 seconds"; `1000` → "1 second". Whole seconds — the age is not a stopwatch. */

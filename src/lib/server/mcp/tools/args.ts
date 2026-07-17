@@ -30,6 +30,25 @@ export const GROUP_ID_PROPERTY = {
 /** Arguments for a tool that operates on one group. */
 export const groupArgs = z.strictObject({ groupId: groupIdArg });
 
+/**
+ * The transaction id the REVERSIBILITY tools take (#35). Ids only, exactly as for
+ * members: a tool that matched "the lunch one" against titles would be doing fuzzy
+ * matching over MEMBER-AUTHORED TEXT (ADR-0003) in order to decide which row to
+ * overwrite or delete — the agent matches the user's words to an id itself, visibly,
+ * against `list_transactions`.
+ */
+export const txnIdArg = z
+	.string()
+	.min(1, 'A transaction id is required. Call `list_transactions` to find it.');
+
+/** The JSON-Schema fragment describing that same argument to the model. */
+export const TXN_ID_PROPERTY = {
+	type: 'string',
+	description:
+		'The transaction id, exactly as returned by `list_transactions` or ' +
+		'`get_transaction`. Never a title, never a description of the transaction.'
+} as const;
+
 /** The `inputSchema` for a tool that takes only a group id. */
 export const GROUP_INPUT_SCHEMA = {
 	type: 'object',

@@ -56,6 +56,7 @@ import {
 	creatorMemberId,
 	spendingInput,
 	SETTLEMENT_CURRENCY,
+	SPENDING_CATEGORY,
 	DEBT_SETTLEMENT_CATEGORY,
 	type ApiScenario
 } from './api-fixtures';
@@ -353,7 +354,17 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			'list_currencies'
 		];
 		/** Read ∪ write, in registry order — the write tools join LAST (ORDER IS A PROMPT). */
-		const WRITE_KEY_TOOLS = [...READ_KEY_TOOLS, 'create_transaction', 'settle_up'];
+		const WRITE_KEY_TOOLS = [
+			...READ_KEY_TOOLS,
+			'create_transaction',
+			'settle_up',
+			// #35's reversibility tools, in the order a mistake is walked back. Confirmed
+			// deliberately: correcting, removing and restoring a transaction all move money,
+			// so all three are write-scoped and none may appear in `READ_KEY_TOOLS`.
+			'update_transaction',
+			'delete_transaction',
+			'restore_transaction'
+		];
 
 		/** Every tool `tools/list` shows this key, in the order it was advertised. */
 		async function advertisedTo(options: { key: string }) {
@@ -390,6 +401,23 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// not destructive — it APPENDS a transaction (#31).
 			const write = tools.find((t) => t.name === 'create_transaction');
 			expect(write?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+		});
+
+		it('`delete_transaction` is the ONLY tool advertised as destructive, to any key (#35)', async () => {
+			// ADR-0003's second layer, on the wire: Claude's approval UI gates a delete harder
+			// than a create BECAUSE exactly one tool claims the flag. A `destructiveHint: true`
+			// set defensively on everything that writes would gate a typo fix like a deletion,
+			// and the user would learn to click through both.
+			const [readTools, writeTools] = await Promise.all([
+				advertisedTo(read),
+				advertisedTo({ key: s.writeKey.key })
+			]);
+
+			expect(writeTools.filter((t) => t.annotations.destructiveHint).map((t) => t.name)).toEqual([
+				'delete_transaction'
+			]);
+			// A read key is shown nothing destructive at all — it is shown no write tool.
+			expect(readTools.filter((t) => t.annotations.destructiveHint)).toEqual([]);
 		});
 
 		it('the tools a write key sees and a read key does not are EXACTLY the non-read-only ones', async () => {
@@ -1743,6 +1771,537 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	// ── 11e. REVERSIBILITY — update / delete / restore (#35) ──────────────────
+	//         The tools ADR-0003's risk appetite is bought with. The ADR accepts that a
+	//         prompt-injected write CAN land, on the grounds that it is "visible,
+	//         attributable to a specific key, and undoable" — so THIS is where that last
+	//         word is proved against real rows and real balances, not asserted.
+	//
+	//         The centrepiece is the round trip: delete → the balance MOVES → restore →
+	//         the balance comes back to the value it held before. Against
+	//         `getGroupBalances` (§8.1), through the real `/mcp` route, on real rows.
+
+	describe('tools/call reversibility (#35)', () => {
+		const writeKeyOf = () => ({ key: s.writeKey.key });
+
+		/** Call a write tool with the write key and return the raw wire result. */
+		async function callWrite(name: string, args: Record<string, unknown>) {
+			return mcpToolCall(name, { groupId: s.group.id, ...args }, writeKeyOf());
+		}
+
+		/** Call a write tool and return its payload, asserting it succeeded. */
+		async function callWriteOk<T>(name: string, args: Record<string, unknown>): Promise<T> {
+			const res = await callWrite(name, args);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			return res.body.result?.structuredContent as unknown as T;
+		}
+
+		/** The caller's own $90 dinner, split with Bob — so the caller is owed $45. */
+		async function seedDinner(title = 'Dinner'): Promise<string> {
+			return createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [s.alice, s.bob],
+					amount: 9000,
+					title
+				})
+			});
+		}
+
+		/** The caller's own balance, as `get_balances` computes it server-side (§8.1). */
+		async function myBalance(): Promise<string | undefined> {
+			const view = await callOk<BalancesWire>('get_balances', { groupId: s.group.id });
+			return view.you?.balance.amount;
+		}
+
+		/** The audit rows for one transaction, oldest first. */
+		async function auditFor(txnId: string) {
+			return db.select().from(auditLog).where(eq(auditLog.entityId, txnId));
+		}
+
+		// ── THE ROUND TRIP — the acceptance criterion, against real balances ────
+
+		it('delete → the balance MOVES → restore → the balance RETURNS to its prior value', async () => {
+			// The proof ADR-0003 rests its whole injection stance on. Every figure here is
+			// computed by `getGroupBalances` from the ledger — nothing is cached, nothing is
+			// summed client-side, and the round trip is driven entirely through `/mcp`.
+			const txnId = await seedDinner();
+
+			// BEFORE: the caller paid $90 for a dinner split two ways → they are owed $45.
+			const before = await myBalance();
+			expect(before).toBe('45.00');
+
+			// DELETE: the transaction stops counting, and the balance moves to settled.
+			await callWriteOk('delete_transaction', { txnId });
+			expect(await myBalance()).toBe('0.00');
+			expect(await myBalance()).not.toBe(before);
+
+			// RESTORE: it counts again, and the balance comes back to EXACTLY what it was.
+			await callWriteOk('restore_transaction', { txnId });
+			expect(await myBalance()).toBe(before);
+		});
+
+		it('the round trip is idempotent at BOTH ends — repeats change nothing (§16.6)', async () => {
+			const txnId = await seedDinner();
+			const before = await myBalance();
+
+			// Two deletes, then two restores. `softDeleteTransaction` / `restoreTransaction`
+			// are guarded UPDATEs, so the second of each affects zero rows — the balance
+			// cannot drift, and no phantom "replay" error is invented (no ADR-0005 window
+			// guards these tools; the idempotence is in the data).
+			await callWriteOk('delete_transaction', { txnId });
+			await callWriteOk('delete_transaction', { txnId });
+			expect(await myBalance()).toBe('0.00');
+
+			await callWriteOk('restore_transaction', { txnId });
+			await callWriteOk('restore_transaction', { txnId });
+			expect(await myBalance()).toBe(before);
+		});
+
+		// ── delete_transaction ─────────────────────────────────────────────────
+
+		describe('delete_transaction', () => {
+			it('SOFT-deletes: the row survives, marked — which is what makes restore possible', async () => {
+				const txnId = await seedDinner();
+
+				const payload = await callWriteOk<{ deleted: TransactionWire; alreadyDeleted: boolean }>(
+					'delete_transaction',
+					{ txnId }
+				);
+
+				// Nothing was removed. The row is still there, stamped.
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row).toBeDefined();
+				expect(row.deletedAt).not.toBeNull();
+				expect(payload.deleted.isDeleted).toBe(true);
+				expect(payload.alreadyDeleted).toBe(false);
+			});
+
+			it('ECHOES what left the ledger and NAMES its own undo, with the id (ADR-0003)', async () => {
+				const txnId = await seedDinner();
+
+				const payload = await callWriteOk<{ echo: string; _note: string }>('delete_transaction', {
+					txnId
+				});
+
+				// Names the transaction, the money as a decimal string, and the humans.
+				expect(payload.echo).toContain('Deleted spending "Dinner"');
+				expect(payload.echo).toContain('USD 90.00 (9000 minor units)');
+				expect(payload.echo).toContain('paid by you');
+				expect(payload.echo).toContain('Bob');
+				// Says the balances moved, and hands over the undo — "undoable" is only true if
+				// the agent can find the undo.
+				expect(payload.echo).toContain("It no longer counts toward anyone's balance");
+				expect(payload.echo).toContain('`restore_transaction`');
+				expect(payload.echo).toContain(txnId);
+				expect(payload._note).toMatch(/untrusted/i);
+			});
+
+			it('writes a `delete` audit_log row carrying the WRITE KEY as `viaKey` (§12.1 / §16.2)', async () => {
+				const txnId = await seedDinner();
+
+				await callWriteOk('delete_transaction', { txnId });
+
+				const rows = await auditFor(txnId);
+				const del = rows.find((r) => r.action === 'delete');
+				expect(del).toBeDefined();
+				// The actor stays the USER; the key id rides in metadata (no schema change, §16.2).
+				expect(del?.actorUserId).toBe(s.user.id);
+				expect((del?.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
+			});
+
+			it('a NO-OP delete writes NO second audit row — audit records state transitions only (§16.6)', async () => {
+				const txnId = await seedDinner();
+				await callWriteOk('delete_transaction', { txnId });
+
+				const payload = await callWriteOk<{ echo: string; alreadyDeleted: boolean }>(
+					'delete_transaction',
+					{ txnId }
+				);
+
+				// The trail must not claim two deletions happened.
+				expect((await auditFor(txnId)).filter((r) => r.action === 'delete')).toHaveLength(1);
+				// And neither must the echo.
+				expect(payload.alreadyDeleted).toBe(true);
+				expect(payload.echo).toContain('was ALREADY deleted');
+			});
+
+			it('a READ key calling it is refused forbidden_scope, and deletes NOTHING (ADR-0002)', async () => {
+				const txnId = await seedDinner();
+
+				const res = await mcpToolCall('delete_transaction', { groupId: s.group.id, txnId }, read);
+
+				expect(res.body.result?.isError).toBe(true);
+				expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
+				// The ledger is untouched: the row is still live and the balance has not moved.
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.deletedAt).toBeNull();
+				expect(await myBalance()).toBe('45.00');
+			});
+		});
+
+		// ── restore_transaction ────────────────────────────────────────────────
+
+		describe('restore_transaction', () => {
+			it('clears the soft delete and ECHOES what came back', async () => {
+				const txnId = await seedDinner();
+				await callWriteOk('delete_transaction', { txnId });
+
+				const payload = await callWriteOk<{
+					restored: TransactionWire;
+					alreadyLive: boolean;
+					echo: string;
+				}>('restore_transaction', { txnId });
+
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.deletedAt).toBeNull();
+				expect(payload.restored.isDeleted).toBe(false);
+				expect(payload.alreadyLive).toBe(false);
+				expect(payload.echo).toContain('Restored spending "Dinner"');
+				expect(payload.echo).toContain('counts toward balances again');
+			});
+
+			it('writes a `restore` audit_log row with `viaKey` — the undo is as attributable as the damage', async () => {
+				const txnId = await seedDinner();
+				await callWriteOk('delete_transaction', { txnId });
+
+				await callWriteOk('restore_transaction', { txnId });
+
+				const restore = (await auditFor(txnId)).find((r) => r.action === 'restore');
+				expect(restore).toBeDefined();
+				expect(restore?.actorUserId).toBe(s.user.id);
+				expect((restore?.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
+			});
+
+			it('a NO-OP restore (the txn is live) writes NO audit row and says so (§16.6)', async () => {
+				const txnId = await seedDinner();
+
+				const payload = await callWriteOk<{ echo: string; alreadyLive: boolean }>(
+					'restore_transaction',
+					{ txnId }
+				);
+
+				expect((await auditFor(txnId)).filter((r) => r.action === 'restore')).toHaveLength(0);
+				expect(payload.alreadyLive).toBe(true);
+				expect(payload.echo).toContain('was NOT deleted');
+			});
+
+			it('a READ key calling it is refused forbidden_scope, and restores NOTHING (ADR-0002)', async () => {
+				// The most tempting tool to hand a read key — it only puts things BACK. It still
+				// moves balances, so it stays behind the write scope.
+				const txnId = await seedDinner();
+				await callWriteOk('delete_transaction', { txnId });
+
+				const res = await mcpToolCall('restore_transaction', { groupId: s.group.id, txnId }, read);
+
+				expect(res.body.result?.isError).toBe(true);
+				expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.deletedAt).not.toBeNull();
+			});
+		});
+
+		// ── update_transaction ─────────────────────────────────────────────────
+
+		describe('update_transaction', () => {
+			it('REPLACES the transaction, and the balance follows the new amount', async () => {
+				const txnId = await seedDinner();
+				expect(await myBalance()).toBe('45.00');
+
+				const payload = await callWriteOk<{ recorded: TransactionWire; changed: string[] }>(
+					'update_transaction',
+					{ txnId, title: 'Dinner', amount: '190.00', splitBetween: [s.alice, s.bob] }
+				);
+
+				// The DATABASE holds the corrected minor units — $190.00, not $1.90 (ADR-0004).
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.amountTotal).toBe(19000);
+				expect(payload.changed).toEqual(['amount']);
+				// $190 paid, split two ways → the caller is owed $95.
+				expect(await myBalance()).toBe('95.00');
+			});
+
+			it('KEEPS the existing payer when `paidBy` is omitted — an edit must not move money', async () => {
+				// THE money bug this tool is shaped to avoid. Bob's $90 dinner, corrected to $60
+				// by the CALLER's key: with `paidBy` defaulting to the caller (as it does on a
+				// create), Bob's dinner would silently become Alice's and the balance would flip
+				// sign. It must stay Bob's.
+				const txnId = await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.bob,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title: 'Lunch'
+					})
+				});
+				expect(await myBalance()).toBe('-45.00');
+
+				const payload = await callWriteOk<{ recorded: TransactionWire; changed: string[] }>(
+					'update_transaction',
+					{ txnId, title: 'Lunch', amount: '60.00', splitBetween: [s.alice, s.bob] }
+				);
+
+				// The payer is still BOB — the caller's key did not become the payer.
+				expect(payload.recorded.payers).toHaveLength(1);
+				expect(payload.recorded.payers[0]).toMatchObject({ memberId: s.bob, isYou: false });
+				expect(payload.changed).toEqual(['amount']);
+				// Still OWED by the caller (negative), just less of it.
+				expect(await myBalance()).toBe('-30.00');
+			});
+
+			it('KEEPS the §7.1 real-world date — an edit must not drag a backdated txn to today', async () => {
+				const txnId = await seedDinner();
+				const [seeded] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+
+				await callWriteOk('update_transaction', {
+					txnId,
+					title: 'Dinner',
+					amount: '95.00',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				// `created_at` is the EDITABLE real-world date (§7.1) — the one the list sorts and
+				// displays on. The shared schema would default an absent `date` to today.
+				const [after] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(after.createdAt).toEqual(seeded.createdAt);
+				// And `occurred_at` — the IMMUTABLE insert time — is untouched, as always.
+				expect(after.occurredAt).toEqual(seeded.occurredAt);
+			});
+
+			it('ECHOES both states and names what changed — the only record of what was overwritten', async () => {
+				const txnId = await seedDinner();
+
+				const payload = await callWriteOk<{
+					replaced: TransactionWire;
+					recorded: TransactionWire;
+					changed: string[];
+					echo: string;
+				}>('update_transaction', {
+					txnId,
+					title: 'Team dinner',
+					amount: '190.00',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				expect(payload.echo).toContain('It WAS: spending "Dinner" — USD 90.00 (9000 minor units)');
+				expect(payload.echo).toContain(
+					'It is NOW: spending "Team dinner" — USD 190.00 (19000 minor units)'
+				);
+				expect(payload.echo).toContain('Changed: the title and the amount.');
+				expect(payload.changed).toEqual(['title', 'amount']);
+				// Both titles ride WRAPPED (ADR-0003) — `replaced` is the only machine-readable
+				// record of what the edit destroyed.
+				expect(payload.replaced.title).toMatchObject({ _untrusted: true, value: 'Dinner' });
+				expect(payload.recorded.title).toMatchObject({ _untrusted: true, value: 'Team dinner' });
+			});
+
+			it('writes an `edit` audit_log row carrying the WRITE KEY as `viaKey` (§12.1 / §16.2)', async () => {
+				const txnId = await seedDinner();
+
+				await callWriteOk('update_transaction', {
+					txnId,
+					title: 'Dinner',
+					amount: '190.00',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				const edit = (await auditFor(txnId)).find((r) => r.action === 'edit');
+				expect(edit).toBeDefined();
+				expect(edit?.actorUserId).toBe(s.user.id);
+				expect((edit?.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
+			});
+
+			it('OVER-PRECISION is a hard error, never a silent round — and the row is untouched', async () => {
+				const txnId = await seedDinner();
+
+				const res = await callWrite('update_transaction', {
+					txnId,
+					title: 'Dinner',
+					amount: '90.005',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				expect(res.body.result?.isError).toBe(true);
+				expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.amountTotal).toBe(9000);
+			});
+
+			it('a DELETED transaction cannot be edited — restore first, and the error says so', async () => {
+				const txnId = await seedDinner();
+				await callWriteOk('delete_transaction', { txnId });
+
+				const res = await callWrite('update_transaction', {
+					txnId,
+					title: 'Dinner',
+					amount: '190.00',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				// NOT a `not_found`: the txn is still visible to `get_transaction` (that is what
+				// makes restoring it possible), so claiming the id is gone would be a lie the
+				// agent can disprove in one call.
+				expect(res.body.result?.isError).toBe(true);
+				const envelope = toolErrorEnvelope(res.body.result);
+				expect(envelope.error.code).toBe('validation_error');
+				expect(envelope.error.message).toMatch(/restore_transaction/);
+			});
+
+			it('REFUSES to flatten an ITEMIZED bill rather than destroy it irreversibly', async () => {
+				// The one write in #35 that reversibility does NOT cover: nothing undoes an
+				// overwrite (§16.6 — last-write-wins, no version column), and these arguments
+				// cannot express items, per-item shares or charges. So it is refused.
+				const txnId = await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: {
+						type: 'spending' as const,
+						title: 'Itemized dinner',
+						categoryId: SPENDING_CATEGORY,
+						amountTotal: 9000,
+						currency: SETTLEMENT_CURRENCY,
+						exchangeRate: '1',
+						amountTotalSettlement: 9000,
+						splitMode: 'itemized' as const,
+						payers: [{ memberId: s.alice, amountPaid: 9000 }],
+						beneficiaries: [],
+						items: [
+							{
+								label: 'Pad thai',
+								amount: 5000,
+								splitMode: 'equal' as const,
+								shares: [{ memberId: s.alice }]
+							},
+							{
+								label: 'Tom yum',
+								amount: 4000,
+								splitMode: 'equal' as const,
+								shares: [{ memberId: s.bob }]
+							}
+						],
+						charges: []
+					}
+				});
+
+				const res = await callWrite('update_transaction', {
+					txnId,
+					title: 'Itemized dinner',
+					amount: '95.00',
+					splitBetween: [s.alice, s.bob]
+				});
+
+				expect(res.body.result?.isError).toBe(true);
+				const envelope = toolErrorEnvelope(res.body.result);
+				expect(envelope.error.code).toBe('validation_error');
+				expect(envelope.error.message).toMatch(/paywithme app/i);
+				// The itemized breakdown survives, untouched.
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.splitMode).toBe('itemized');
+				expect(row.amountTotal).toBe(9000);
+			});
+
+			it('a READ key calling it is refused forbidden_scope, and changes NOTHING (ADR-0002)', async () => {
+				const txnId = await seedDinner();
+
+				const res = await mcpToolCall(
+					'update_transaction',
+					{
+						groupId: s.group.id,
+						txnId,
+						title: 'Hijacked',
+						amount: '999.00',
+						splitBetween: [s.alice]
+					},
+					read
+				);
+
+				expect(res.body.result?.isError).toBe(true);
+				expect(toolErrorEnvelope(res.body.result).error.code).toBe('forbidden_scope');
+				const [row] = await db
+					.select()
+					.from(transactionsTable)
+					.where(eq(transactionsTable.id, txnId));
+				expect(row.title).toBe('Dinner');
+				expect(row.amountTotal).toBe(9000);
+			});
+		});
+
+		// ── The INJECTION round trip — ADR-0003's own scenario, undone ──────────
+
+		it('an INJECTED transaction can be found, read as DATA, and UNDONE — ADR-0003 end to end', async () => {
+			// The ADR's premise, played out: a group-mate plants the attack, it lands on the
+			// ledger and moves a real balance, and the recovery path is the one this issue
+			// ships. This is the test that makes "an injected write is recoverable" a fact
+			// about the code rather than a hope in a document.
+			await linkBobToAStranger();
+			const txnId = await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.bob,
+					beneficiaryIds: [s.alice, s.bob],
+					amount: 9000,
+					title: INJECTION
+				})
+			});
+			expect(await myBalance()).toBe('-45.00');
+
+			const payload = await callWriteOk<{ deleted: TransactionWire; echo: string; _note: string }>(
+				'delete_transaction',
+				{ txnId }
+			);
+
+			// The attack text reaches the echo verbatim — ADR-0003 rejects filtering outright —
+			// but the payload ships it WRAPPED and attributed to its real author, and marks
+			// every such string as data.
+			expect(payload.echo).toContain(INJECTION);
+			expect(payload.deleted.title).toMatchObject({ _untrusted: true, value: INJECTION });
+			expect(payload.deleted.title.author.kind).toBe('member');
+			expect(payload._note).toMatch(/untrusted/i);
+
+			// UNDONE: the balance the injection moved is back to settled, and the trail records
+			// who removed it, via which key.
+			expect(await myBalance()).toBe('0.00');
+			const del = (await auditFor(txnId)).find((r) => r.action === 'delete');
+			expect((del?.metadata as { viaKey?: string }).viaKey).toBe(s.writeKey.id);
 		});
 	});
 

@@ -57,4 +57,13 @@ export {
 } from './transaction';
 export { type CurrencyView, CURRENCIES_NOTE, toCurrencyViews } from './currency';
 export { type SimilarMemberView, similarlyNamedMembers } from './similar-names';
-export { buildEchoBack, buildSettleUpEchoBack, buildReplayEchoBack } from './echo';
+export {
+	type ChangedField,
+	buildEchoBack,
+	buildSettleUpEchoBack,
+	buildReplayEchoBack,
+	buildUpdateEchoBack,
+	buildDeleteEchoBack,
+	buildRestoreEchoBack,
+	changedFields
+} from './echo';

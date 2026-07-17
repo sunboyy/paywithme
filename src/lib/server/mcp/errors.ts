@@ -30,6 +30,7 @@ import { IdempotencyConflictError } from '$lib/server/api/idempotency';
 import { GroupAccessError } from '$lib/server/groups';
 import {
 	TransactionCursorError,
+	TransactionDeletedError,
 	TransactionNotFoundError,
 	TransactionValidationError
 } from '$lib/server/transactions';
@@ -170,6 +171,20 @@ export function mapToolError(err: unknown): McpToolResult {
 	}
 	if (err instanceof TransactionCursorError) {
 		return toolError('bad_request', 'The pagination cursor is invalid.');
+	}
+	// Editing a SOFT-DELETED transaction (#35). A state-rule rejection, NOT a not-found:
+	// the txn is still visible to `get_transaction` precisely so it can be restored, so
+	// conflating it into `not_found` would tell the agent the id is gone while the id
+	// plainly works — and it would hide the one action that fixes it. `validation_error`
+	// carrying the domain message ("restore it first") is self-correctable: the agent's
+	// next move is `restore_transaction`, then the edit.
+	//
+	// This mirrors REST's `mapWriteError`, which maps the same class to a 422
+	// `validation_error` for the same reason. Without this branch the class would fall
+	// through to the opaque `internal_error` below — the one outcome ADR-0009 forbids
+	// for a failure the caller can actually fix.
+	if (err instanceof TransactionDeletedError) {
+		return toolError('validation_error', err.message);
 	}
 	// An idempotency conflict raised by the server-derived window (ADR-0005). MCP has
 	// no 409 to hand back, so — like every other domain failure (ADR-0009) — it becomes

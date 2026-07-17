@@ -221,7 +221,7 @@ describe('tools/list (ADR-0002: scope-filtered)', () => {
 		expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
 	});
 
-	it('a WRITE key ALSO sees the write tools, after the read surface (#31, #34)', async () => {
+	it('a WRITE key ALSO sees the write tools, after the read surface (#31, #34, #35)', async () => {
 		verifyApiKey.mockResolvedValue({
 			...VALID_KEY,
 			key: { ...VALID_KEY.key, permissions: { api: ['read', 'write'] } }
@@ -235,8 +235,26 @@ describe('tools/list (ADR-0002: scope-filtered)', () => {
 		expect((res.body.result?.tools ?? []).map((t) => t.name)).toEqual([
 			...READ_TOOLS,
 			'create_transaction',
-			'settle_up'
+			'settle_up',
+			// #35's reversibility tools. Confirmed deliberately: correcting, removing and
+			// restoring a transaction all MOVE MONEY, so all three are write-scoped and none
+			// of them may appear in the read-key expectation above.
+			'update_transaction',
+			'delete_transaction',
+			'restore_transaction'
 		]);
+	});
+
+	it('a READ key is never advertised the reversibility tools — not even the undo (#35)', async () => {
+		// `restore_transaction` is the most tempting one to hand a read key: it only puts
+		// things BACK. It still moves balances, so it stays behind the write scope — and
+		// ADR-0002's filter means a read key cannot form the intent to call it at all.
+		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+
+		const names = (res.body.result?.tools ?? []).map((t) => t.name);
+		for (const name of ['update_transaction', 'delete_transaction', 'restore_transaction']) {
+			expect(names, name).not.toContain(name);
+		}
 	});
 });
 

@@ -130,22 +130,82 @@ describe('the shipped registry (#28 + #29)', () => {
 		}
 	});
 
-	/** The write surface, in registry order: #31's create, then #34's settle-up. */
-	const WRITE_TOOLS = ['create_transaction', 'settle_up'];
+	/**
+	 * The write surface, in registry order: #31's create, #34's settle-up, then #35's
+	 * three reversibility tools (correct it → remove it → undo the removal).
+	 */
+	const WRITE_TOOLS = [
+		'create_transaction',
+		'settle_up',
+		'update_transaction',
+		'delete_transaction',
+		'restore_transaction'
+	];
 
-	it.each(WRITE_TOOLS)('ships `%s` as a non-destructive WRITE tool (#31, #34)', (name) => {
+	it.each(WRITE_TOOLS)('ships `%s` as a WRITE tool (#31, #34, #35)', (name) => {
 		const tool = findTool(name);
 		expect(tool).toBeDefined();
 		// `scope: 'write'` is what hides it from a read key (`filterToolsByScope`) and what
 		// the dispatcher enforces — declaring it is the whole of the tool's ADR-0002 duty.
 		expect(tool?.scope).toBe('write');
 		expect(tool?.rateLimitClass).toBe('write');
-		expect(tool?.definition.annotations).toMatchObject({
-			readOnlyHint: false,
-			destructiveHint: false,
-			// A bounded ~60s window is not the unqualified promise this flag makes (#33).
-			idempotentHint: false
-		});
+		expect(tool?.definition.annotations.readOnlyHint).toBe(false);
+	});
+
+	/** The two RECORDING tools — the ones a bounded ~60s window guards (#33). */
+	it.each(['create_transaction', 'settle_up'])(
+		'`%s` is non-destructive and NOT idempotent — the ~60s window is a bounded promise (#33)',
+		(name) => {
+			expect(findTool(name)?.definition.annotations).toMatchObject({
+				destructiveHint: false,
+				// A bounded ~60s window is not the unqualified promise this flag makes: past it,
+				// an identical call records a SECOND transaction on purpose.
+				idempotentHint: false
+			});
+		}
+	);
+
+	/** The three REVERSIBILITY tools — idempotent in the DATA, not in a window (#35). */
+	it.each(['update_transaction', 'delete_transaction', 'restore_transaction'])(
+		'`%s` declares `idempotentHint: true` — §16.6: "already idempotent" (#35)',
+		(name) => {
+			// Unlike a create, repeating any of these lands the SAME ledger: a full replacement
+			// replaces to the same values, and delete / restore are guarded UPDATES that affect
+			// zero rows the second time (and write no second audit row). The idempotence lives
+			// in the data, so it holds forever rather than for a minute — which is why no
+			// ADR-0005 derived window guards them.
+			expect(findTool(name)?.definition.annotations.idempotentHint).toBe(true);
+		}
+	);
+
+	it('`delete_transaction` is the ONLY destructive tool in the whole registry (#35)', () => {
+		// THE acceptance criterion, and the reason the flag carries information at all.
+		// ADR-0003's second layer is "annotate tools honestly … so Claude's own approval UI
+		// gates writes and gates DELETES harder" — which only works if exactly one tool
+		// claims it. A `destructiveHint: true` set defensively on everything that writes
+		// would gate a typo fix exactly like the one tool that takes a transaction off the
+		// ledger, and the user would learn to click through both.
+		const destructive = MCP_TOOLS.filter((t) => t.definition.annotations.destructiveHint);
+
+		expect(destructive.map((t) => t.definition.name)).toEqual(['delete_transaction']);
+	});
+
+	it('`restore_transaction` is NOT destructive — the recovery path must not gate like the damage path', () => {
+		// Friction on the undo and none on the delete would be exactly backwards, given which
+		// of the two an injected call is likely to be.
+		expect(findTool('restore_transaction')?.definition.annotations.destructiveHint).toBe(false);
+	});
+
+	it('the reversibility tools tell the model that ids are not names, and name each other (#35)', () => {
+		// The controls are only controls if the model reads them where it decides (ADR-0006).
+		for (const name of ['update_transaction', 'delete_transaction', 'restore_transaction']) {
+			expect(findTool(name)?.definition.description, name).toMatch(/IDS ONLY, NEVER NAMES/);
+		}
+		// A delete must advertise its own undo: ADR-0003's "an injected write is … undoable"
+		// is only true if the agent can find the undo.
+		expect(findTool('delete_transaction')?.definition.description).toMatch(/restore_transaction/);
+		// And a correction must not be done by delete-then-recreate, which loses the record.
+		expect(findTool('delete_transaction')?.definition.description).toMatch(/update_transaction/);
 	});
 
 	it('the WRITE tools join LAST, in order — ORDER IS A PROMPT (find your ids first)', () => {
@@ -180,15 +240,37 @@ describe('filterToolsByScope (ADR-0002)', () => {
 		const names = filterToolsByScope('read', REGISTRY_WITH_WRITE).map((t) => t.name);
 		expect(names).toContain('list_groups');
 		expect(names).not.toContain('probe_write_tool');
-		// The REAL write tools are hidden by the same rule, from the same list.
-		expect(names).not.toContain('create_transaction');
-		expect(names).not.toContain('settle_up');
+		// The REAL write tools are hidden by the same rule, from the same list. Asserting the
+		// read list EXACTLY (below) is what makes this hold for tools that do not exist yet;
+		// naming them here is what makes a regression legible.
+		expect(names).toEqual([
+			'list_groups',
+			'get_group',
+			'list_members',
+			'get_balances',
+			'list_transactions',
+			'get_transaction',
+			'list_currencies'
+		]);
+		for (const write of [
+			'create_transaction',
+			'settle_up',
+			'update_transaction',
+			'delete_transaction',
+			'restore_transaction'
+		]) {
+			expect(names, write).not.toContain(write);
+		}
 	});
 
 	it('a WRITE key sees everything (write ⊇ read)', () => {
 		const names = filterToolsByScope('write', REGISTRY_WITH_WRITE).map((t) => t.name);
 		expect(names).toEqual([...MCP_TOOLS.map((t) => t.definition.name), 'probe_write_tool']);
 		expect(names).toContain('settle_up');
+		// #35's reversibility tools — a write key is the only key that can undo anything.
+		expect(names).toEqual(
+			expect.arrayContaining(['update_transaction', 'delete_transaction', 'restore_transaction'])
+		);
 	});
 });
 
@@ -218,6 +300,29 @@ describe('dispatchToolCall', () => {
 		expect(probeSpy).not.toHaveBeenCalled();
 		expect(consumeRateLimit).not.toHaveBeenCalled();
 	});
+
+	it.each(['update_transaction', 'delete_transaction', 'restore_transaction'])(
+		'a READ key calling `%s` is refused forbidden_scope — through the REAL registry (#35)',
+		async (name) => {
+			// The acceptance criterion, driven through the real dispatcher against the real
+			// registry entry (not the stand-in). The scope check runs BEFORE `invoke`, so the
+			// tool never reaches a service — which is why this needs no database.
+			const outcome = await dispatchToolCall(
+				{ name, arguments: { groupId: 'grp_1', txnId: 'txn_1' } },
+				principalWith('read')
+			);
+
+			expect(outcome.kind).toBe('result');
+			if (outcome.kind !== 'result') throw new Error('expected a result');
+			expect(outcome.result.isError).toBe(true);
+			const envelope = envelopeOf(outcome.result);
+			expect(envelope.code).toBe('forbidden_scope');
+			// ADR-0009's guidance: a read key retrying will never succeed.
+			expect(envelope.message).toMatch(/read-only/i);
+			// And a denied call costs no rate budget.
+			expect(consumeRateLimit).not.toHaveBeenCalled();
+		}
+	);
 
 	it('a WRITE key may call the write tool (write ⊇ read)', async () => {
 		const outcome = await dispatchToolCall(

@@ -34,6 +34,9 @@ import { getTransactionTool } from './tools/get-transaction';
 import { listCurrenciesTool } from './tools/list-currencies';
 import { createTransactionTool } from './tools/create-transaction';
 import { settleUpTool } from './tools/settle-up';
+import { updateTransactionTool } from './tools/update-transaction';
+import { deleteTransactionTool } from './tools/delete-transaction';
+import { restoreTransactionTool } from './tools/restore-transaction';
 
 /**
  * Erase a tool's `Args` generic so heterogeneous tools share one registry list.
@@ -68,6 +71,14 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
  * first one, `create_transaction`; #34 adds `settle_up` after it — a settle-up is
  * the rarer intent, and an agent that reaches for a write tool by proximity should
  * meet the one that merely records a shared expense first.
+ *
+ * #35 closes the write surface with the three REVERSIBILITY tools, in the order a
+ * mistake is actually walked back: correct it → remove it → undo the removal. They
+ * come after the two RECORDING tools because that is the order of the work (you
+ * cannot fix what you have not recorded), and `restore_transaction` sits LAST, next
+ * to the `delete_transaction` it undoes — a model reading the list meets the undo in
+ * the same glance as the delete, which is the whole of ADR-0003's bet that a bogus
+ * write is recoverable.
  */
 export const MCP_TOOLS: readonly RegisteredTool[] = [
 	// ── Read surface (#28–#30) ──
@@ -80,7 +91,11 @@ export const MCP_TOOLS: readonly RegisteredTool[] = [
 	registerTool(listCurrenciesTool),
 	// ── Write surface (#31+) — hidden from read keys by `filterToolsByScope` ──
 	registerTool(createTransactionTool),
-	registerTool(settleUpTool)
+	registerTool(settleUpTool),
+	// ── Reversibility (#35) — the mechanism ADR-0003's risk appetite rests on ──
+	registerTool(updateTransactionTool),
+	registerTool(deleteTransactionTool),
+	registerTool(restoreTransactionTool)
 ];
 
 /**
