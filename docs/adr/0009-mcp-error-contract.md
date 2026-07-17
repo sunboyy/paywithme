@@ -9,7 +9,7 @@ MCP has **two** error channels, and the choice changes agent behaviour:
 
 - **HTTP / JSON-RPC protocol errors** — the agent sees a broken transport. It
   cannot reason about it and may retry blindly.
-- **Tool result with `isError: true`** — the agent reads the error *as content* and
+- **Tool result with `isError: true`** — the agent reads the error _as content_ and
   can self-correct ("that member id isn't in this group; let me call
   `list_members` again").
 
@@ -29,7 +29,7 @@ window becomes the only thing standing between us and a duplicate transaction.
 
 Returned from day one, even on the bearer path (ADR-0007). Claude does **not**
 honour `WWW-Authenticate` on a `200`; a missing `resource_metadata` pointer is the
-most common cause of *"Couldn't reach the MCP server."*
+most common cause of _"Couldn't reach the MCP server."_
 
 **Domain errors → `isError: true` tool results**, reusing the **existing envelope
 codes verbatim** (`validation_error`, `forbidden_scope`, `rate_limited`,
@@ -39,11 +39,11 @@ MCP-specific strings would be gratuitous divergence.
 Errors carry explicit retry guidance, because the agent will otherwise invent its
 own:
 
-| Code | Content guidance |
-| --- | --- |
-| `validation_error` | Self-correctable. Say *what* was wrong (e.g. "member `mem_zz` is not an active member of this group"). |
-| `forbidden_scope` | *"Do not retry. This key is read-only. Ask the user for a write key."* |
-| `rate_limited` | *"Do **NOT** retry immediately."* |
+| Code               | Content guidance                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `validation_error` | Self-correctable. Say _what_ was wrong (e.g. "member `mem_zz` is not an active member of this group"). |
+| `forbidden_scope`  | _"Do not retry. This key is read-only. Ask the user for a write key."_                                 |
+| `rate_limited`     | _"Do **NOT** retry immediately."_                                                                      |
 
 **404 stays conflated.** `/api/v1` deliberately conflates "not found" and "not
 yours" for groups the key cannot see. The MCP layer **must not** un-conflate this

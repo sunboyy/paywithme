@@ -17,7 +17,7 @@ user's utterance:
 > Agent: `create_transaction({ amount: 240, currency: "THB" })`
 > Recorded: **฿2.40**
 
-A 100× error, silently, in a money ledger. It is *worse* than a fixed off-by-100,
+A 100× error, silently, in a money ledger. It is _worse_ than a fixed off-by-100,
 because the exponent varies by currency — for `JPY`, `amount: 240` is **correct**.
 So the agent must look up each currency's exponent and multiply. That is precisely
 the kind of arithmetic LLMs get wrong often enough to matter, and it fails
@@ -47,8 +47,8 @@ SERVER
 A decimal **string**, never a float — PLAN's no-floats invariant is untouched, and
 parsing happens inside the module that already owns exponent logic.
 
-Tool results **echo the interpretation back** (ADR-0006): *"Recorded THB 240.00
-(24000 minor units)."* A misparse becomes visible in the transcript rather than
+Tool results **echo the interpretation back** (ADR-0006): _"Recorded THB 240.00
+(24000 minor units)."_ A misparse becomes visible in the transcript rather than
 buried in the database.
 
 ## Consequences
@@ -56,7 +56,7 @@ buried in the database.
 - The agent's job collapses to **echoing what the user said** — the one thing it
   is reliable at. It performs no exponent arithmetic.
 - Nearly free: `parseAmount` already exists.
-- The MCP contract now *differs* from the `/api/v1` contract for amounts. This is
+- The MCP contract now _differs_ from the `/api/v1` contract for amounts. This is
   intentional and is the first concrete instance of the divergence formalised in
   ADR-0006. `/api/v1` and its OpenAPI spec are unchanged.
 - More decimal places than the currency's exponent permits is a **hard error**, not

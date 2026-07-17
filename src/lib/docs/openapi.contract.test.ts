@@ -105,6 +105,7 @@ const listItem: TransactionListItem = {
 	id: 'txn_ramen',
 	type: 'spending',
 	title: 'Ramen',
+	createdBy: 'usr_ada',
 	categoryId: 'spending-food-drink',
 	categoryName: 'Food & drink',
 	categoryIcon: 'utensils',
@@ -126,6 +127,10 @@ const detail: TransactionDetail = {
 	categoryId: 'spending-food-drink',
 	categoryName: 'Food & drink',
 	categoryIcon: 'utensils',
+	// Internal-only authorship (who wrote the title): the MCP view attributes the
+	// untrusted envelope with it (ADR-0003). It is deliberately NOT on the `/api/v1`
+	// wire — the assertions below prove the DTO does not carry it.
+	createdBy: 'usr_author',
 	amountTotal: 3600,
 	currency: 'JPY',
 	amountTotalSettlement: 87840,

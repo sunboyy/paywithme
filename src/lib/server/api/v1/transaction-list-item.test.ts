@@ -11,6 +11,7 @@ function makeItem(overrides: Partial<TransactionListItem> = {}): TransactionList
 		id: 't1',
 		type: 'spending',
 		title: 'Dinner',
+		createdBy: 'u1',
 		categoryId: 'c1',
 		categoryName: 'Food',
 		categoryIcon: '🍜',
@@ -62,5 +63,12 @@ describe('toTransactionListItemDto', () => {
 		expect(dto).not.toHaveProperty('amountTotal');
 		expect(dto).not.toHaveProperty('amountTotalSettlement');
 		expect(dto).not.toHaveProperty('settlementCurrency');
+	});
+
+	it('drops the MCP-only `createdBy` — the frozen wire contract maps a fixed subset', () => {
+		// The field exists on the internal read model (the MCP list view attributes the
+		// title to its author, ADR-0003) but must never reach the `/api/v1` wire.
+		const dto = toTransactionListItemDto(makeItem());
+		expect(dto).not.toHaveProperty('createdBy');
 	});
 });

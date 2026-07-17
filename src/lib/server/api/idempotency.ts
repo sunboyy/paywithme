@@ -35,6 +35,16 @@ export interface IdempotencyRecord {
 	status: 'pending' | 'completed';
 	responseStatus: number | null;
 	responseBody: unknown;
+	/**
+	 * When the row was inserted — i.e. when the create it guards actually ran.
+	 *
+	 * REST ignores this (a replay is a replay, whenever it arrives, for the full 24h
+	 * TTL). The MCP path (ADR-0005) needs it twice: to enforce its ~60s SLIDING window
+	 * by ELAPSED time rather than by bucket arithmetic, and to tell the agent how long
+	 * ago the original landed ("already recorded 3s ago"). Projecting an existing
+	 * column — no schema change.
+	 */
+	createdAt: Date;
 }
 
 /** The row the pending-first insert writes. */
@@ -109,7 +119,8 @@ export async function withIdempotency({
 	rawBody,
 	store,
 	fn,
-	now = () => new Date()
+	now = () => new Date(),
+	onReplay
 }: {
 	keyId: string;
 	idempotencyKey: string;
@@ -117,6 +128,18 @@ export async function withIdempotency({
 	store: IdempotencyStore;
 	fn: () => Promise<IdempotentResponse>;
 	now?: () => Date;
+	/**
+	 * Called with the STORED row when this call REPLAYED it (and therefore did NOT
+	 * run `fn`). The return value is unchanged either way — this is a notification,
+	 * not a hook that can alter the outcome.
+	 *
+	 * REST does not pass it: a replayed 201 is byte-identical to the original, which
+	 * is the entire contract. The MCP path (ADR-0005) does, because there a replay
+	 * must be SURFACED rather than hidden — the echo-back says "already recorded 3s
+	 * ago", and `record.createdAt` is where that "3s" comes from. Reported here rather
+	 * than re-`load`ed by the caller so the replay stays ONE round-trip.
+	 */
+	onReplay?: (record: IdempotencyRecord) => void;
 }): Promise<IdempotentResponse> {
 	const requestHash = fingerprintRequestBody(rawBody);
 	const createdAt = now();
@@ -153,6 +176,7 @@ export async function withIdempotency({
 
 	// Same key + same body, already completed → REPLAY (re-execute nothing).
 	if (existing.status === 'completed') {
+		onReplay?.(existing);
 		return { status: existing.responseStatus ?? 200, body: existing.responseBody };
 	}
 
@@ -212,7 +236,10 @@ export function createDbIdempotencyStore(): IdempotencyStore {
 					requestHash: idempotencyKeyTable.requestHash,
 					status: idempotencyKeyTable.status,
 					responseStatus: idempotencyKeyTable.responseStatus,
-					responseBody: idempotencyKeyTable.responseBody
+					responseBody: idempotencyKeyTable.responseBody,
+					// The insert time — the MCP sliding window measures elapsed time against it
+					// and the replay echo-back reports it (ADR-0005). An existing column.
+					createdAt: idempotencyKeyTable.createdAt
 				})
 				.from(idempotencyKeyTable)
 				.where(
@@ -225,7 +252,8 @@ export function createDbIdempotencyStore(): IdempotencyStore {
 				requestHash: row.requestHash,
 				status: row.status as 'pending' | 'completed',
 				responseStatus: row.responseStatus,
-				responseBody: row.responseBody
+				responseBody: row.responseBody,
+				createdAt: row.createdAt
 			};
 		},
 		async markCompleted(keyId, key, response) {

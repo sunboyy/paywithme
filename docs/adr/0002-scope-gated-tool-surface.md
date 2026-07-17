@@ -21,10 +21,10 @@ and therefore its scope — is known at list time.
 
 `tools/list` returns a **scope-filtered** tool list.
 
-| Key scope | Tools advertised |
-| --- | --- |
-| `read` | `list_groups`, `get_group`, `list_members`, `get_balances`, `list_transactions`, `get_transaction`, `list_currencies` |
-| `write` | all of the above **plus** `create_transaction`, `update_transaction`, `delete_transaction`, `restore_transaction`, `settle_up` |
+| Key scope | Tools advertised                                                                                                               |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `read`    | `list_groups`, `get_group`, `list_members`, `get_balances`, `list_transactions`, `get_transaction`, `list_currencies`          |
+| `write`   | all of the above **plus** `create_transaction`, `update_transaction`, `delete_transaction`, `restore_transaction`, `settle_up` |
 
 `requireWriteScope` remains the enforcement point — a `read` key that somehow
 invoked a write tool still gets `forbidden_scope`. Filtering the list is defence
@@ -40,7 +40,7 @@ requires. `delete_transaction` is the one tool marked `destructiveHint: true`.
   already makes `read` vs `write` a conscious choice at the moment of creation —
   which is exactly where we want that decision made.
 - Filtering beats advertising-then-403: an agent that never sees `settle_up`
-  cannot form the intent to call it. A 403 arrives *after* the model has already
+  cannot form the intent to call it. A 403 arrives _after_ the model has already
   decided to move money.
 - "Read-only v1" and "full v1" are not separate products. They are the same
   server, behaving differently per key.

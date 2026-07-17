@@ -28,7 +28,7 @@ what the connector can then do is decided entirely by that credential's Key scop
 
 The permission carried by an API key: **Read key** or **Write key** (a Write key
 can also read). It is the user's own, deliberate choice of exposure, made when the
-key is minted — and for a Connector it is the *only* thing that decides whether an
+key is minted — and for a Connector it is the _only_ thing that decides whether an
 agent can move money in the ledger. A Read key that attempts a write is refused.
 
 ## Member-authored text

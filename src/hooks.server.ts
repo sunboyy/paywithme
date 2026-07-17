@@ -26,7 +26,7 @@
 // route), whereas here we only READ the session / VERIFY a key.
 
 import { auth } from '$lib/server/auth';
-import type { ApiKeyPrincipal } from '$lib/server/api/principal';
+import { extractBearerKey, verifyBearerKey } from '$lib/server/api/verify';
 import { apiErrorEnvelope, rateLimited } from '$lib/server/api/errors';
 import { json, type Handle, type HandleServerError } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
@@ -39,23 +39,6 @@ const API_V1_PREFIX = '/api/v1';
 /** True for `/api/v1` and any `/api/v1/<resource>` path; false for everything else. */
 function isApiV1Request(pathname: string): boolean {
 	return pathname === API_V1_PREFIX || pathname.startsWith(`${API_V1_PREFIX}/`);
-}
-
-/**
- * Extract the raw API key from an `Authorization: Bearer <key>` header.
- *
- * PURE and unit-testable. Returns the key with the `Bearer ` scheme stripped, or
- * `null` when the header is missing or malformed (no scheme, wrong scheme, or an
- * empty credential). The scheme match is case-insensitive per RFC 7235; the raw
- * key is passed straight to `verifyApiKey` (which reads no headers, so the
- * plugin's `x-api-key` default is bypassed — PLAN §16.3).
- */
-export function extractBearerKey(authorization: string | null | undefined): string | null {
-	if (!authorization) return null;
-	const match = /^Bearer[ ]+(.+)$/i.exec(authorization.trim());
-	if (!match) return null;
-	const key = match[1].trim();
-	return key.length > 0 ? key : null;
 }
 
 /**
@@ -85,14 +68,13 @@ const TIER1_WINDOW_SECONDS = 60;
 /**
  * Map the plugin's internal `RATE_LIMITED` (tier 1) onto the SAME 429 envelope the
  * tier-2 route limiter emits (PLAN §16.7): `{ scope: 'key', limit, windowSeconds,
- * retryAfterSeconds }` plus a `Retry-After` header. The plugin surfaces the retry
- * budget at `error.details.tryAgainIn` in MILLISECONDS remaining; we `Math.ceil`
- * it to whole seconds for both the header and the body. The tier-1 counter is
- * COMBINED (not per-class), so the scope is `'key'`.
+ * retryAfterSeconds }` plus a `Retry-After` header. `verifyBearerKey` surfaces the
+ * plugin's remaining budget in MILLISECONDS; we `Math.ceil` it to whole seconds for
+ * both the header and the body. The tier-1 counter is COMBINED (not per-class), so
+ * the scope is `'key'`.
  */
-function tier1RateLimited(tryAgainInMs: unknown): Response {
-	const ms = typeof tryAgainInMs === 'number' && tryAgainInMs > 0 ? tryAgainInMs : 0;
-	const retryAfterSeconds = Math.ceil(ms / 1000);
+function tier1RateLimited(tryAgainInMs: number): Response {
+	const retryAfterSeconds = Math.ceil(tryAgainInMs / 1000);
 	return rateLimited(
 		'Rate limit exceeded.',
 		{
@@ -146,64 +128,34 @@ const resolveSession: Handle = async ({ event, resolve }) => {
 /**
  * `/api/v1/*` authentication gate (PLAN §16.3).
  *
- * Non-api requests pass straight through. For an api request it extracts the
- * Bearer key, verifies it with `auth.api.verifyApiKey`, and short-circuits a
- * generic 401 on any missing/malformed/invalid/expired/revoked key. On success it
- * attaches the resolved principal to `event.locals.apiKey` and lets the route run.
+ * Non-api requests pass straight through. For an api request it delegates to the
+ * SHARED `verifyBearerKey` (`$lib/server/api/verify` — also used by the `/mcp`
+ * Connector, ADR-0001) and short-circuits a generic 401 on any missing / malformed
+ * / invalid / expired / revoked key. On success it attaches the resolved principal
+ * to `event.locals.apiKey` and lets the route run.
+ *
+ * The TIER-1 rate limit (PLAN §16.7) is the ONE non-valid outcome NOT collapsed
+ * into the generic 401: a client already HOLDS a valid key (rate limiting engages
+ * only after a successful match), so surfacing 429 leaks no enumeration signal.
  */
 const apiV1Guard: Handle = async ({ event, resolve }) => {
 	if (!isApiV1Request(event.url.pathname)) {
 		return resolve(event);
 	}
 
-	const key = extractBearerKey(event.request.headers.get('authorization'));
-	// Missing / malformed header → generic 401 (no distinct code — PLAN §16.5).
-	if (!key) {
-		return unauthorized();
+	const verification = await verifyBearerKey(event.request.headers.get('authorization'));
+
+	if (!verification.ok) {
+		return verification.reason === 'rate_limited'
+			? tier1RateLimited(verification.tryAgainInMs)
+			: unauthorized();
 	}
 
-	let result: Awaited<ReturnType<typeof auth.api.verifyApiKey>>;
-	try {
-		// `verifyApiKey` reads no headers, so passing the raw key bypasses the
-		// plugin's `x-api-key` default (PLAN §16.3).
-		result = await auth.api.verifyApiKey({ body: { key } });
-	} catch (error) {
-		// A thrown verify (e.g. a DB blip) is treated as an auth failure, not a 500 —
-		// same generic 401, no internal detail leaked.
-		console.error('[hooks.server] verifyApiKey threw', error);
-		return unauthorized();
-	}
-
-	// TIER-1 rate limit (PLAN §16.7): the plugin's per-key backstop tripped. This is
-	// the ONE non-valid outcome that is NOT collapsed into the generic 401 — a client
-	// already HOLDS a valid key (rate limiting only engages after a successful match),
-	// so surfacing 429 here leaks no enumeration signal. Map it to the shared 429
-	// envelope + `Retry-After` (details from `error.details.tryAgainIn`, ms remaining).
-	if (!result.valid && result.error?.code === 'RATE_LIMITED') {
-		return tier1RateLimited(
-			(result.error as { details?: { tryAgainIn?: unknown } }).details?.tryAgainIn
-		);
-	}
-
-	// Any OTHER invalid/expired/revoked/unknown key → the SAME generic 401. The
-	// plugin's internal `result.error.code` is deliberately never forwarded (no
-	// enumeration).
-	if (!result.valid || !result.key) {
-		return unauthorized();
-	}
-
-	// Verified. Attach the minimal principal (PLAN §16.4). The plugin stores the
-	// owning user under `referenceId`; surface it as `userId`. `permissions` is the
-	// key's scope, read by the §16.2 per-route write-guard (a LATER ticket).
-	// `name` is the key's label, carried ONLY as audit provenance (§16.2 — it lands in
-	// the audit row's summary suffix + `metadata.keyName`), never as authority.
-	const principal: ApiKeyPrincipal = {
-		keyId: result.key.id,
-		name: result.key.name ?? null,
-		userId: result.key.referenceId,
-		permissions: result.key.permissions ?? null
-	};
-	event.locals.apiKey = principal;
+	// Verified. Attach the minimal principal (PLAN §16.4): the owning user + the
+	// key's `permissions` (read by the §16.2 write-guard) + `name`, which is carried
+	// ONLY as audit provenance (§16.2 — it lands in the audit row's summary suffix +
+	// `metadata.keyName`), never as authority.
+	event.locals.apiKey = verification.principal;
 
 	return resolve(event);
 };
@@ -247,5 +199,7 @@ export const handleError: HandleServerError = ({ error, event, message }) => {
 	return { message };
 };
 
-// Exported for focused unit coverage of the guard in isolation.
-export { resolveSession, apiV1Guard };
+// Exported for focused unit coverage of the guard in isolation. `extractBearerKey`
+// now lives in `$lib/server/api/verify` (shared with the `/mcp` Connector) and is
+// re-exported here so the hook's public surface is unchanged.
+export { resolveSession, apiV1Guard, extractBearerKey };
