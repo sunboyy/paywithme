@@ -64,6 +64,16 @@ describe('idempotencyKey drizzle table', () => {
 		expect(columns.createdAt.notNull).toBe(true);
 	});
 
+	it('does NOT reference api_key — key_id is an opaque per-caller bucket, not an FK', () => {
+		// Regression: an FK `key_id → api_key.id` rejected every OAuth-originated write,
+		// whose principal `keyId` is the composed `${clientId}:${userId}` (`mcp/auth.ts`)
+		// with no matching `api_key` row — surfacing as an opaque `internal_error`. The
+		// column MUST stay FK-free so both credential kinds can insert; the 24h TTL sweep
+		// bounds the table without a cascade.
+		const { foreignKeys } = getTableConfig(idempotencyKey);
+		expect(foreignKeys).toHaveLength(0);
+	});
+
 	it('has a UNIQUE (key_id, idempotency_key) constraint — the pending-first race guard', () => {
 		const { uniqueConstraints } = getTableConfig(idempotencyKey);
 		expect(uniqueConstraints).toHaveLength(1);

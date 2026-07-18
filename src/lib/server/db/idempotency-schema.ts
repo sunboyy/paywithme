@@ -1,5 +1,4 @@
 import { pgTable, text, integer, timestamp, jsonb, unique } from 'drizzle-orm/pg-core';
-import { apikey } from './api-key-schema';
 
 // Hand-authored store table backing `/api/v1` write idempotency (PLAN §16.6).
 //
@@ -28,18 +27,22 @@ import { apikey } from './api-key-schema';
 //   - `response_body` is `jsonb` (a raw object, like `audit_log.metadata`) — the
 //     stored DTO is a plain object, so jsonb avoids a stringify/parse round-trip
 //     and lets the replay hand the object straight back to `json()`.
-//   - `key_id` → `api_key.id` is `onDelete: 'cascade'`: a key's idempotency rows go
-//     with it when the key is deleted (they are meaningless without the key).
+//   - `key_id` is an OPAQUE per-caller isolation bucket, NOT a foreign key. On the
+//     api-key path it holds an `api_key.id`; on the OAuth path it holds the composed
+//     `${clientId}:${userId}` principal id (`mcp/auth.ts`), which has NO `api_key`
+//     row — so an FK here would reject every OAuth-originated write. Cleanup does not
+//     depend on the key: the 24h `expires_at` TTL sweep (`cleanupExpiredIdempotencyKeys`)
+//     bounds the table on its own, which is why dropping the FK costs nothing.
 export const idempotencyKey = pgTable(
 	'idempotency_key',
 	{
 		id: text('id')
 			.primaryKey()
 			.$defaultFn(() => crypto.randomUUID()),
-		// The CALLING API key's id — scopes every row to its owning key (§16.6).
-		keyId: text('key_id')
-			.notNull()
-			.references(() => apikey.id, { onDelete: 'cascade' }),
+		// The CALLING principal's isolation id — scopes every row to its caller (§16.6).
+		// An `api_key.id` on the api-key path, or the composed `${clientId}:${userId}` on
+		// the OAuth path (`mcp/auth.ts`). Deliberately NOT an FK — see the header note.
+		keyId: text('key_id').notNull(),
 		// The client-supplied `Idempotency-Key` header value.
 		idempotencyKey: text('idempotency_key').notNull(),
 		// Fingerprint of the request body (SHA-256 hex) → a DIFFERENT body under the
