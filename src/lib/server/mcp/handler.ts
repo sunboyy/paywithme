@@ -16,12 +16,14 @@
 //
 // ── Order of operations (each step is a test) ────────────────────────────────
 //   1. `Origin` — the spec's DNS-rebinding MUST. Refused BEFORE anything is read.
-//   2. AUTH — the shared `verifyBearerKey` (the same code path `/api/v1` uses).
-//      A failure is a `401` + `WWW-Authenticate: Bearer resource_metadata="…"`
-//      (ADR-0009), never a `200` carrying an error — Claude ignores the header on
-//      a `200`. Authentication is HTTP-layer for the whole endpoint, including
-//      `initialize`: an unauthenticated caller learns nothing at all, not even the
-//      tool list.
+//   2. AUTH — `resolveMcpAuth` (mcp/auth.ts): EITHER an OAuth access token OR an
+//      API key, converged on ONE `ApiKeyPrincipal` (ADR-0010 §Decision(3)). OAuth
+//      is tried first, the api-key path is the fallback (it is how Claude Code /
+//      Cursor connect). A failure is a `401` + `WWW-Authenticate: Bearer
+//      resource_metadata="…"` (ADR-0009), never a `200` carrying an error — Claude
+//      ignores the header on a `200`. Authentication is HTTP-layer for the whole
+//      endpoint, including `initialize`: an unauthenticated caller learns nothing
+//      at all, not even the tool list.
 //   3. PARSE — malformed JSON / not-a-JSON-RPC-message → `400` with a JSON-RPC
 //      error body and a `null` id (there is no id to echo).
 //   4. NOTIFICATION (no `id`, e.g. `notifications/initialized`) → `202` + an empty
@@ -33,7 +35,7 @@
 
 import { env } from '$env/dynamic/private';
 import type { RequestEvent } from '@sveltejs/kit';
-import { verifyBearerKey } from '$lib/server/api/verify';
+import { resolveMcpAuth } from './auth';
 import { getApiKeyScope } from '$lib/server/api/scope';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import {
@@ -132,8 +134,10 @@ export async function handleMcpPost(event: RequestEvent): Promise<Response> {
 		return mcpForbiddenOrigin();
 	}
 
-	// 2. Bearer auth — HTTP layer, with the `resource_metadata` pointer (ADR-0009).
-	const verification = await verifyBearerKey(request.headers.get('authorization'));
+	// 2. Auth — HTTP layer, with the `resource_metadata` pointer (ADR-0009).
+	// EITHER an OAuth access token OR an API key, converged on one principal
+	// (ADR-0010 §Decision(3)); only the api-key fallback rate-limits.
+	const verification = await resolveMcpAuth(request);
 	if (!verification.ok) {
 		// The TIER-1 per-key backstop (§16.7). Practically unreachable on the read
 		// surface — the tier-2 read counter (100/60s) trips first — but a valid key
