@@ -191,6 +191,38 @@ describe('auth instance wiring', () => {
 		expect(mcpPlugin.options?.loginPage).toBe('/login');
 	});
 
+	it('advertises read/write as grantable OAuth scopes with a consent page (ADR-0010 §Decision(4), #41)', async () => {
+		const { auth, OAUTH_CONSENT_PATH } = await import('./auth');
+		const mcpPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'mcp') as {
+			options?: {
+				oidcConfig?: {
+					scopes?: string[];
+					consentPage?: string;
+					metadata?: { scopes_supported?: string[] };
+				};
+			};
+		};
+		const oidc = mcpPlugin.options?.oidcConfig;
+		// GRANTABLE: the plugin's grantable set becomes `[...base, ...scopes]`, and
+		// `/mcp/authorize` refuses any scope outside it (`invalid_scope`). Exactly the
+		// two custom scopes, no more (an accidental extra scope must fail HERE).
+		expect(oidc?.scopes).toEqual(['read', 'write']);
+		// ADVERTISED: read/write appear in the RFC 9728 protected-resource discovery
+		// document (#39), alongside the base OIDC scopes.
+		expect(oidc?.metadata?.scopes_supported).toEqual([
+			'openid',
+			'profile',
+			'email',
+			'offline_access',
+			'read',
+			'write'
+		]);
+		// The conscious read/write consent choice (ADR-0007) is reproduced at this
+		// route — and the config points at the SAME literal the route lives at.
+		expect(oidc?.consentPage).toBe(OAUTH_CONSENT_PATH);
+		expect(OAUTH_CONSENT_PATH).toBe('/oauth/consent');
+	});
+
 	it('resolves OAuth discovery metadata against the wired auth instance (ADR-0010)', async () => {
 		// Proves the mcp plugin is actually wired into `auth`: the discovery helper
 		// resolves the AS metadata from the instance without a live DB or request
@@ -211,6 +243,22 @@ describe('auth instance wiring', () => {
 		expect(metadata.authorization_endpoint).toContain('/api/auth/mcp/authorize');
 		expect(metadata.token_endpoint).toContain('/api/auth/mcp/token');
 		expect(Array.isArray(metadata.response_types_supported)).toBe(true);
+	});
+
+	it('advertises read/write in the RFC 9728 protected-resource discovery document (#41 acceptance)', async () => {
+		// The END-TO-END advertisement: not just the config, but the metadata the
+		// discovery route actually serves. `getMCPProtectedResourceMetadata` sources
+		// `scopes_supported` from our `oidcConfig.metadata`, so a real connector
+		// discovers that `read`/`write` exist. Driven through the SAME real helper the
+		// `/.well-known/oauth-protected-resource` route wraps, no live DB needed.
+		const { oAuthProtectedResourceMetadata } = await import('better-auth/plugins');
+		const { auth } = await import('./auth');
+		const handler = oAuthProtectedResourceMetadata(auth);
+		const response = await handler(
+			new Request('http://localhost/.well-known/oauth-protected-resource')
+		);
+		const metadata = (await response.json()) as { scopes_supported?: string[] };
+		expect(metadata.scopes_supported).toEqual(expect.arrayContaining(['read', 'write']));
 	});
 
 	it('registers the api-key plugin BEFORE sveltekit-cookies, with sveltekit-cookies last (PLAN §16.1)', async () => {

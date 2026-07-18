@@ -25,15 +25,17 @@
 
 import { auth } from '$lib/server/auth';
 import { verifyBearerKey, type BearerVerification } from '$lib/server/api/verify';
-import { scopeToPermissions } from '$lib/server/api/scope';
+import { scopeToPermissions, OAUTH_WRITE_SCOPE } from '$lib/server/api/scope';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 /**
  * The OAuth scope token that grants write. The MCP OAuth server advertises
  * `read`/`write` as its scopes (#41 owns that config + the consent screen); here
- * we only CONSUME whatever `scopes` the returned token carries.
+ * we only CONSUME whatever `scopes` the returned token carries. Sourced from the
+ * shared {@link OAUTH_WRITE_SCOPE} constant so the token the config ADVERTISES and
+ * the token this resolver MATCHES on can never drift.
  */
-const WRITE_SCOPE = 'write';
+const WRITE_SCOPE = OAUTH_WRITE_SCOPE;
 
 /**
  * Map an OAuth access token's `scopes` onto the plugin `permissions` shape the
