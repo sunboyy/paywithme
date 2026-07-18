@@ -61,7 +61,7 @@ export const OAUTH_CONSENT_PATH = '/oauth/consent';
 // `loginPage`; the `OIDCOptions` TYPE also requires `loginPage` on `oidcConfig`
 // (the plugin then OVERRIDES it with the top-level value), so we pass the same
 // literal in both places from this one constant to keep them in lock-step.
-const OAUTH_LOGIN_PATH = '/login';
+const OAUTH_LOGIN_PATH = '/oauth/login';
 
 // The base OIDC scopes the mcp plugin ALWAYS supports (better-auth appends our
 // custom `read`/`write` after these). We repeat them here ONLY to build the
@@ -416,9 +416,10 @@ export const auth = betterAuth({
 		// `sveltekitCookies` (which stays last), alongside `magicLink` / `passkey` /
 		// `apiKey`.
 		//
-		// `loginPage: '/login'` — where the plugin redirects an unauthenticated
-		// resource-owner to establish a session before the authorization/consent
-		// step. Issuer / baseURL is the already-configured `BETTER_AUTH_URL`
+		// `loginPage: '/oauth/login'` — the DEDICATED login surface the plugin
+		// redirects an unauthenticated resource-owner to (keeping the everyday
+		// `/login` free of OAuth concerns); it establishes a session and then resumes
+		// the authorization. Issuer / baseURL is the already-configured `BETTER_AUTH_URL`
 		// (`baseURL` above), so PRODUCTION NEEDS NO NEW ENV; the flow reuses the same
 		// session/CSRF machinery and is gated by the same `BETTER_AUTH_SECRET`.
 		//

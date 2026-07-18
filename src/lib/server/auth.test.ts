@@ -180,15 +180,16 @@ describe('auth instance wiring', () => {
 		expect(cookiesIndex).toBe(pluginIds.length - 1);
 	});
 
-	it('configures the mcp OAuth login page as /login (ADR-0010 §Decision(1))', async () => {
-		// The AS redirects an unauthenticated resource-owner here to establish a
-		// session before the authorization/consent step.
+	it('configures the mcp OAuth login page as the dedicated /oauth/login (ADR-0010 §Decision(1))', async () => {
+		// The AS redirects an unauthenticated resource-owner to this DEDICATED login
+		// surface (not the everyday /login) to establish a session before the
+		// authorization/consent step; that page then resumes the authorization.
 		const { auth } = await import('./auth');
 		const mcpPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'mcp') as {
 			options?: { loginPage?: string };
 		};
 		expect(mcpPlugin).toBeDefined();
-		expect(mcpPlugin.options?.loginPage).toBe('/login');
+		expect(mcpPlugin.options?.loginPage).toBe('/oauth/login');
 	});
 
 	it('advertises read/write as grantable OAuth scopes with a consent page (ADR-0010 §Decision(4), #41)', async () => {

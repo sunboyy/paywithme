@@ -3,7 +3,7 @@
 //
 // When Claude.ai (or any registered MCP client) asks this app for a user-scoped
 // access token, better-auth's mcp/oidc-provider plugin logs the user in
-// (`loginPage: '/login'`) and then, when consent is required, REDIRECTS the
+// (`loginPage: '/oauth/login'`) and then, when consent is required, REDIRECTS the
 // already-logged-in resource-owner here with `consent_code`, `client_id`, and the
 // requested `scope` (space-separated) as query params (see the plugin's
 // `authorize()` — `oidcConfig.consentPage` branch).
