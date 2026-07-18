@@ -178,7 +178,7 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 		expect(arg.settlementCurrency).toBe('THB');
 		// §16.2 audit provenance is forwarded so the settle-up audit row records WHICH key
 		// moved the money (the actor stays the user).
-		expect(arg.via).toEqual({ keyId: 'key_w', keyName: 'agent key' });
+		expect(arg.via).toEqual({ kind: 'key', keyId: 'key_w', keyName: 'agent key' });
 		expect(arg.input).toMatchObject({
 			type: 'transfer',
 			title: 'Debt settlement',

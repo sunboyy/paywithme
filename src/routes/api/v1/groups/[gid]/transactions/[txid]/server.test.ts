@@ -188,7 +188,7 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 			input: validInput,
 			actorUserId: 'user_1',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
-			via: { keyId: 'key_w', keyName: 'agent key' }
+			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.amount).toEqual({ amount: 9000, currency: 'THB' });
 		expect(body).not.toHaveProperty('input');
@@ -269,7 +269,7 @@ describe('DELETE /api/v1/groups/{gid}/transactions/{txid}', () => {
 			txnId: 't1',
 			actorUserId: 'user_1',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
-			via: { keyId: 'key_w', keyName: 'agent key' }
+			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.deletedAt).toBe('2026-01-03T10:00:00.000Z');
 	});

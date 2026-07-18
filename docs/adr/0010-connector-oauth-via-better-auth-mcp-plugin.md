@@ -22,7 +22,7 @@ connector uses and the only ungated route.
 project — "RFC 9728 protected-resource metadata, RFC 8414 AS metadata, DCR **or**
 CIMD, PKCE S256, refresh-token rotation." But the app's **existing** auth stack —
 **better-auth 1.6.18**, already wiring `magicLink` + `passkey` + `apiKey` — ships
-the **`mcp` plugin** (built on `oidcProvider`), which implements *all* of it:
+the **`mcp` plugin** (built on `oidcProvider`), which implements _all_ of it:
 
 - an OAuth 2.0 authorization server over the **existing user table**;
 - **Dynamic Client Registration** (Claude.ai self-registers — no manual client);
@@ -85,5 +85,5 @@ into `src/lib/server/db/auth-schema.ts` with a matching migration. This is the
   better-auth's own, exercised by the same session/CSRF machinery as the rest of
   auth, and gated by the same `BETTER_AUTH_SECRET`.
 - Audit provenance (`viaKey`) assumed an API key. OAuth-originated mutations need an
-  equivalent actor tag (`viaOAuth` / client id) so `audit_log` still records *how*
+  equivalent actor tag (`viaOAuth` / client id) so `audit_log` still records _how_
   a change entered — called out so review catches any tool that assumes a key.

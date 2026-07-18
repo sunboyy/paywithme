@@ -10,7 +10,10 @@ import {
 	scopeToPermissions,
 	getApiKeyScope,
 	hasWriteScope,
-	requireWriteScope
+	requireWriteScope,
+	OAUTH_READ_SCOPE,
+	OAUTH_WRITE_SCOPE,
+	OAUTH_SCOPES
 } from './scope';
 
 describe('scopeToPermissions — encoding convention', () => {
@@ -45,6 +48,24 @@ describe('getApiKeyScope — least privilege by default', () => {
 		expect(getApiKeyScope({ permissions: { api: [] } })).toBe('read');
 		// An unrelated resource key never grants write.
 		expect(getApiKeyScope({ permissions: { other: ['write'] } })).toBe('read');
+	});
+});
+
+describe('OAuth scope tokens (ADR-0010 §Decision(4)) — the connector maps 1:1 onto §16.2', () => {
+	it('exposes read/write as the grantable OAuth scopes (the SAME two tokens as ApiScope)', () => {
+		// These are what `lib/server/auth.ts` advertises as `oidcConfig.scopes` and what
+		// #40's resolver matches on — one source of truth, so config + resolver can't drift.
+		expect(OAUTH_READ_SCOPE).toBe('read');
+		expect(OAUTH_WRITE_SCOPE).toBe('write');
+		expect([...OAUTH_SCOPES]).toEqual(['read', 'write']);
+	});
+
+	it('an OAuth `write` grant resolves to a write principal (can move money)', () => {
+		expect(getApiKeyScope({ permissions: scopeToPermissions(OAUTH_WRITE_SCOPE) })).toBe('write');
+	});
+
+	it('an OAuth `read` grant resolves to a read principal (cannot move money)', () => {
+		expect(getApiKeyScope({ permissions: scopeToPermissions(OAUTH_READ_SCOPE) })).toBe('read');
 	});
 });
 

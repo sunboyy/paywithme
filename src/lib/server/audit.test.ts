@@ -295,3 +295,80 @@ describe('writeAuditLog — API-key provenance (PLAN §16.2)', () => {
 		expect(insertCalls[0].values.metadata).toEqual({ amount: [800, 950] });
 	});
 });
+
+// --- OAuth-connection provenance (ADR-0010 §Consequences; #42) ----------------
+// The OAuth arm of the SAME `via` mechanism: a `/mcp` OAuth-originated mutation is
+// tagged `{ viaOAuth: <clientId> }` (the actor tag §Consequences names) + a
+// "(via OAuth connection)" suffix — the equivalent of `viaKey`, so `audit_log`
+// still records HOW a change entered. `actorUserId` stays the user; no schema change.
+describe('writeAuditLog — OAuth-connection provenance (ADR-0010 §Consequences)', () => {
+	const via = { kind: 'oauth', clientId: 'client_1' } as const;
+
+	it('merges {viaOAuth} into metadata and suffixes the summary — actor UNCHANGED', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, metadata: { amount: [800, 950] }, via });
+
+		const values = insertCalls[0].values;
+		// The OAuth token carries no independent authority: the actor is still the USER.
+		expect(values.actorUserId).toBe('user-42');
+		expect(values.metadata).toEqual({ amount: [800, 950], viaOAuth: 'client_1' });
+		expect(values.summary).toBe("Edited 'Dinner' — amount ฿800 → ฿950 (via OAuth connection)");
+		// No new column, no `viaKey`/`keyName`: only the OAuth tag lands, at the top level.
+		expect(values.metadata).not.toHaveProperty('viaKey');
+		expect(values.metadata).not.toHaveProperty('keyName');
+		expect(Object.keys(values).sort()).toEqual([
+			'action',
+			'actorUserId',
+			'entityId',
+			'entityType',
+			'groupId',
+			'metadata',
+			'summary'
+		]);
+	});
+
+	it('with NO metadata, the {viaOAuth} object becomes the metadata (not null)', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, via });
+
+		expect(insertCalls[0].values.metadata).toEqual({ viaOAuth: 'client_1' });
+	});
+
+	it('a non-object metadata is preserved under `details`, the OAuth tag stays top-level', async () => {
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, { ...baseEntry, metadata: 'legacy note', via });
+
+		expect(insertCalls[0].values.metadata).toEqual({
+			details: 'legacy note',
+			viaOAuth: 'client_1'
+		});
+	});
+
+	it('the durable suffix lives in the single suffix function', async () => {
+		expect(viaKeySummarySuffix(via)).toBe(' (via OAuth connection)');
+	});
+
+	it('the KEY path is byte-identical alongside the OAuth path (regression)', async () => {
+		// The two origins share one writer; proving them side by side guards the key
+		// output from drifting when the OAuth arm is added.
+		const { tx, insertCalls } = makeTx();
+
+		await writeAuditLog(tx, {
+			...baseEntry,
+			metadata: { amount: [800, 950] },
+			via: { kind: 'key', keyId: 'key_abc', keyName: 'agent key' }
+		});
+
+		expect(insertCalls[0].values.metadata).toEqual({
+			amount: [800, 950],
+			viaKey: 'key_abc',
+			keyName: 'agent key'
+		});
+		expect(insertCalls[0].values.summary).toBe(
+			"Edited 'Dinner' — amount ฿800 → ฿950 (via API key 'agent key')"
+		);
+	});
+});

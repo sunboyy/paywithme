@@ -27,6 +27,28 @@ import { forbiddenScope } from './errors';
 export type ApiScope = 'read' | 'write';
 
 /**
+ * The OAuth scope TOKENS the MCP connector may request (ADR-0010 §Decision(4)).
+ *
+ * They are deliberately the SAME two strings as {@link ApiScope}: an OAuth `read`
+ * / `write` grant maps 1:1 onto the api-key scope model, so a `read`-only
+ * Claude.ai connection still cannot move money. Exported as the SINGLE source of
+ * truth so three places can't drift:
+ *   - `lib/server/auth.ts` advertises them as the grantable `oidcConfig.scopes`,
+ *   - `lib/server/mcp/auth.ts` (#40's resolver) matches the returned token's
+ *     `write` scope against {@link OAUTH_WRITE_SCOPE},
+ *   - the `/oauth/consent` screen labels the requested scopes with them.
+ */
+export const OAUTH_READ_SCOPE: ApiScope = 'read';
+export const OAUTH_WRITE_SCOPE: ApiScope = 'write';
+
+/**
+ * The grantable OAuth scopes, in advertise order. Fed to the mcp plugin's
+ * `oidcConfig.scopes` (making them grantable) and into the discovery
+ * `scopes_supported` (making them advertised).
+ */
+export const OAUTH_SCOPES = [OAUTH_READ_SCOPE, OAUTH_WRITE_SCOPE] as const;
+
+/**
  * The single synthetic resource key under which the scope is stored in the
  * plugin's `permissions` map. Not a real REST resource — there are no
  * per-resource scopes in v1; it is just the slot the `read`/`write` actions live

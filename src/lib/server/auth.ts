@@ -23,7 +23,7 @@
 
 import { betterAuth, type BetterAuthRateLimitOptions } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { magicLink } from 'better-auth/plugins';
+import { magicLink, mcp } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { passkey } from '@better-auth/passkey';
 import { apiKey } from '@better-auth/api-key';
@@ -32,6 +32,7 @@ import { building } from '$app/environment';
 import { env } from '$env/dynamic/private';
 import { db } from './db';
 import { sendMagicLinkEmail } from './email';
+import { OAUTH_SCOPES } from './api/scope';
 
 // rpName is the constant the OS passkey prompt shows (PLAN §5.2) — not an env var.
 const RP_NAME = 'Pay with me';
@@ -45,6 +46,30 @@ const RP_NAME = 'Pay with me';
 // convention for making a prefix identifiable.
 const API_KEY_PREFIX_LIVE = 'pwm_live_';
 const API_KEY_PREFIX_TEST = 'pwm_test_';
+
+// ── MCP OAuth connector: scopes + consent screen (ADR-0010 §Decision(4), #41) ──
+// Where the AS redirects an already-logged-in resource-owner to make the conscious
+// read/write (can-it-move-money) consent choice. The mcp plugin appends this as
+// `oidcConfig.consentPage` and redirects to it with `consent_code` / `client_id` /
+// `scope` query params. It MUST match the on-disk route `src/routes/oauth/consent`
+// (its `page.server.test.ts` asserts the two can't drift). Exported so that guard
+// (and the route itself) reads the value from HERE, its single source of truth.
+export const OAUTH_CONSENT_PATH = '/oauth/consent';
+
+// Where the AS sends an UNauthenticated resource-owner to establish a session
+// before authorization/consent. The mcp plugin drives login from its top-level
+// `loginPage`; the `OIDCOptions` TYPE also requires `loginPage` on `oidcConfig`
+// (the plugin then OVERRIDES it with the top-level value), so we pass the same
+// literal in both places from this one constant to keep them in lock-step.
+const OAUTH_LOGIN_PATH = '/login';
+
+// The base OIDC scopes the mcp plugin ALWAYS supports (better-auth appends our
+// custom `read`/`write` after these). We repeat them here ONLY to build the
+// discovery `scopes_supported` advertisement below — the plugin's own grantable
+// set is `[...these, ...oidcConfig.scopes]`, so keeping this list in sync with the
+// advertised set is what makes `read`/`write` show up as BOTH grantable and
+// advertised.
+const OIDC_BASE_SCOPES = ['openid', 'profile', 'email', 'offline_access'] as const;
 
 // Magic-link token lifetime. PLAN §5.3 wants tokens "single-use, short-lived";
 // each token is also consumed atomically on first verification by the plugin.
@@ -382,6 +407,47 @@ export const auth = betterAuth({
 				enabled: true,
 				timeWindow: 60_000,
 				maxRequests: 150
+			}
+		}),
+		// OAuth authorization server for the Claude.ai connector (ADR-0010, issue
+		// #37). The `mcp` plugin is a thin wrapper over `oidcProvider`: it turns
+		// better-auth into an OAuth AS so an MCP client (Claude.ai) can obtain
+		// user-scoped access tokens against this app. Registered BEFORE
+		// `sveltekitCookies` (which stays last), alongside `magicLink` / `passkey` /
+		// `apiKey`.
+		//
+		// `loginPage: '/login'` — where the plugin redirects an unauthenticated
+		// resource-owner to establish a session before the authorization/consent
+		// step. Issuer / baseURL is the already-configured `BETTER_AUTH_URL`
+		// (`baseURL` above), so PRODUCTION NEEDS NO NEW ENV; the flow reuses the same
+		// session/CSRF machinery and is gated by the same `BETTER_AUTH_SECRET`.
+		//
+		// Coupling: the backing `oauth_application` / `oauth_access_token` /
+		// `oauth_consent` tables are HAND-AUTHORED in `db/oauth-schema.ts` (exported
+		// under the model-name keys the adapter resolves). Registering the plugin
+		// here is construction-time only and touches no DB, so the config builds and
+		// the gate stays green. This ticket is JUST the AS + tables; the discovery
+		// routes, `/mcp` dual-auth, scope mapping, and audit provenance are separate
+		// tickets (#39–#42).
+		// `oidcConfig.scopes` makes `read`/`write` GRANTABLE (the plugin's grantable
+		// set becomes `[...OIDC_BASE_SCOPES, ...scopes]`, and `/mcp/authorize` rejects
+		// any scope outside it with `invalid_scope`). `#40`'s resolver
+		// (`lib/server/mcp/auth.ts`) then maps a granted `write` token onto a write
+		// principal — both sides read the SAME `OAUTH_SCOPES` constant, so they can't
+		// drift. `consentPage` is where the AS sends the logged-in user to make the
+		// conscious read/write choice (ADR-0007's key-minting choice, reproduced for
+		// OAuth). `metadata.scopes_supported` ADVERTISES the full grantable set in the
+		// RFC 9728 protected-resource discovery document (#39) so a connector can
+		// discover that `read`/`write` exist.
+		mcp({
+			loginPage: OAUTH_LOGIN_PATH,
+			oidcConfig: {
+				// `loginPage` is required by the `OIDCOptions` type; the plugin overrides
+				// it with the top-level value above — same literal, so no drift.
+				loginPage: OAUTH_LOGIN_PATH,
+				scopes: [...OAUTH_SCOPES],
+				consentPage: OAUTH_CONSENT_PATH,
+				metadata: { scopes_supported: [...OIDC_BASE_SCOPES, ...OAUTH_SCOPES] }
 			}
 		}),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
