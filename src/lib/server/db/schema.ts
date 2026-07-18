@@ -50,6 +50,14 @@
 //     per-key, class-aware `/api/v1` rate-limit counters. Mirrors `rate_limit`'s
 //     4-column shape, keyed `${apiKeyId}:${class}` (class ∈ read|write) with two
 //     independent counters (read 100/60s, write 20/60s).
+//   - oauth_application / oauth_access_token / oauth_consent (issue #38) →
+//     re-exported from `oauth-schema.ts`, hand-authored (ADR-0010) to back
+//     better-auth's `mcp` OAuth authorization server (the connector OAuth flow).
+//     The CLI can't generate them for this config (same `$app/server` constraint
+//     as `api_key` / `rate_limit`). The `mcp` plugin reuses the `oidcProvider`
+//     plugin's tables, so the export KEYS MUST be `oauthApplication`,
+//     `oauthAccessToken`, `oauthConsent` — the drizzle adapter resolves each
+//     model via `schema['oauthApplication']` etc.
 
 export * from './auth-schema';
 export * from './api-key-schema';
@@ -60,3 +68,4 @@ export * from './transactions-schema';
 export * from './audit-schema';
 export * from './idempotency-schema';
 export * from './api-key-class-rate-limit-schema';
+export * from './oauth-schema';

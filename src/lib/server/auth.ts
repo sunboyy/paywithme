@@ -23,7 +23,7 @@
 
 import { betterAuth, type BetterAuthRateLimitOptions } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { magicLink } from 'better-auth/plugins';
+import { magicLink, mcp } from 'better-auth/plugins';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { passkey } from '@better-auth/passkey';
 import { apiKey } from '@better-auth/api-key';
@@ -384,6 +384,27 @@ export const auth = betterAuth({
 				maxRequests: 150
 			}
 		}),
+		// OAuth authorization server for the Claude.ai connector (ADR-0010, issue
+		// #37). The `mcp` plugin is a thin wrapper over `oidcProvider`: it turns
+		// better-auth into an OAuth AS so an MCP client (Claude.ai) can obtain
+		// user-scoped access tokens against this app. Registered BEFORE
+		// `sveltekitCookies` (which stays last), alongside `magicLink` / `passkey` /
+		// `apiKey`.
+		//
+		// `loginPage: '/login'` — where the plugin redirects an unauthenticated
+		// resource-owner to establish a session before the authorization/consent
+		// step. Issuer / baseURL is the already-configured `BETTER_AUTH_URL`
+		// (`baseURL` above), so PRODUCTION NEEDS NO NEW ENV; the flow reuses the same
+		// session/CSRF machinery and is gated by the same `BETTER_AUTH_SECRET`.
+		//
+		// Coupling: the backing `oauth_application` / `oauth_access_token` /
+		// `oauth_consent` tables are HAND-AUTHORED in `db/oauth-schema.ts` (exported
+		// under the model-name keys the adapter resolves). Registering the plugin
+		// here is construction-time only and touches no DB, so the config builds and
+		// the gate stays green. This ticket is JUST the AS + tables; the discovery
+		// routes, `/mcp` dual-auth, scope mapping, and audit provenance are separate
+		// tickets (#39–#42).
+		mcp({ loginPage: '/login' }),
 		// MUST stay LAST in this array (better-auth requirement). This plugin runs
 		// its cookie handler in an `after` hook, so every server-side `auth.api.*`
 		// call (e.g. the logout `signOut` in task 2.10) routes its Set-Cookie
