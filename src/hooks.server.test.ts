@@ -13,7 +13,14 @@ vi.mock('$lib/server/auth', () => ({
 }));
 
 // Imported after the mock is registered.
-import { handle, handleError, resolveSession, apiV1Guard, extractBearerKey } from './hooks.server';
+import {
+	handle,
+	handleError,
+	csrfGuard,
+	resolveSession,
+	apiV1Guard,
+	extractBearerKey
+} from './hooks.server';
 
 /**
  * Minimal fake RequestEvent: only the bits the hooks touch (`request`, `url`,
@@ -24,6 +31,22 @@ function makeEvent(path = '/', headers?: Record<string, string>): RequestEvent {
 	return {
 		url,
 		request: new Request(url, { headers }),
+		locals: {} as App.Locals
+	} as RequestEvent;
+}
+
+/**
+ * Like `makeEvent` but lets a test set the request method + body so `csrfGuard`
+ * sees a real mutating request with a content type.
+ */
+function makePost(
+	path = '/',
+	{ method = 'POST', headers }: { method?: string; headers?: Record<string, string> } = {}
+): RequestEvent {
+	const url = new URL(`http://localhost${path}`);
+	return {
+		url,
+		request: new Request(url, { method, headers, body: 'a=b' }),
 		locals: {} as App.Locals
 	} as RequestEvent;
 }
@@ -53,6 +76,94 @@ describe('extractBearerKey', () => {
 		expect(extractBearerKey('Basic pwm_test_abc123')).toBeNull(); // wrong scheme
 		expect(extractBearerKey('Bearer')).toBeNull(); // scheme only
 		expect(extractBearerKey('Bearer    ')).toBeNull(); // empty credential
+	});
+});
+
+describe('csrfGuard (same-origin CSRF guard)', () => {
+	const FORM = 'application/x-www-form-urlencoded';
+
+	it('403s a cross-origin form POST to an app route', async () => {
+		const event = makePost('/groups', {
+			headers: { 'content-type': FORM, origin: 'https://evil.example' }
+		});
+		const resolve = vi.fn();
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).not.toHaveBeenCalled();
+		expect(response.status).toBe(403);
+		expect(await response.text()).toContain('forbidden');
+	});
+
+	it('403s a form POST with NO Origin header (missing != same-origin)', async () => {
+		const event = makePost('/groups', { headers: { 'content-type': FORM } });
+		const resolve = vi.fn();
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).not.toHaveBeenCalled();
+		expect(response.status).toBe(403);
+	});
+
+	it('allows a same-origin form POST to an app route', async () => {
+		const event = makePost('/groups', {
+			headers: { 'content-type': FORM, origin: 'http://localhost' }
+		});
+		const sentinel = new Response('ok');
+		const resolve = vi.fn().mockResolvedValue(sentinel);
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).toHaveBeenCalledWith(event);
+		expect(response).toBe(sentinel);
+	});
+
+	it('EXEMPTS the better-auth subtree: cross-origin OAuth token POST passes through', async () => {
+		// This is the exact request Claude.ai makes — cross-origin, no matching
+		// Origin, form-encoded — that SvelteKit used to 403 (the reported bug).
+		const event = makePost('/api/auth/mcp/token', {
+			headers: { 'content-type': FORM }
+		});
+		const sentinel = new Response('ok');
+		const resolve = vi.fn().mockResolvedValue(sentinel);
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).toHaveBeenCalledWith(event);
+		expect(response).toBe(sentinel);
+	});
+
+	it('ignores a cross-origin JSON POST (not a form content type) — e.g. /mcp, /api/v1', async () => {
+		const event = makePost('/api/v1/groups', {
+			headers: { 'content-type': 'application/json', origin: 'https://claude.ai' }
+		});
+		const sentinel = new Response('ok');
+		const resolve = vi.fn().mockResolvedValue(sentinel);
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).toHaveBeenCalledWith(event);
+		expect(response).toBe(sentinel);
+	});
+
+	it('ignores a safe method (GET) regardless of origin', async () => {
+		// GET requests carry no body, so build the event with `makeEvent`.
+		const event = makeEvent('/groups', { origin: 'https://evil.example' });
+		const sentinel = new Response('ok');
+		const resolve = vi.fn().mockResolvedValue(sentinel);
+
+		const response = await csrfGuard({ event, resolve });
+
+		expect(resolve).toHaveBeenCalledWith(event);
+		expect(response).toBe(sentinel);
+	});
+
+	it('matches the form content type even with a charset parameter', async () => {
+		const event = makePost('/groups', {
+			headers: { 'content-type': `${FORM}; charset=utf-8`, origin: 'https://evil.example' }
+		});
+		const response = await csrfGuard({ event, resolve: vi.fn() });
+		expect(response.status).toBe(403);
 	});
 });
 

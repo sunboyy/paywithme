@@ -28,7 +28,7 @@
 import { auth } from '$lib/server/auth';
 import { extractBearerKey, verifyBearerKey } from '$lib/server/api/verify';
 import { apiErrorEnvelope, rateLimited } from '$lib/server/api/errors';
-import { json, type Handle, type HandleServerError } from '@sveltejs/kit';
+import { json, text, type Handle, type HandleServerError } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 
 // The public API version prefix (PLAN §16.3). A request is an API-v1 request when
@@ -40,6 +40,70 @@ const API_V1_PREFIX = '/api/v1';
 function isApiV1Request(pathname: string): boolean {
 	return pathname === API_V1_PREFIX || pathname.startsWith(`${API_V1_PREFIX}/`);
 }
+
+// ── CSRF origin guard (replaces SvelteKit's built-in one) ────────────────────
+// SvelteKit's built-in `csrf.checkOrigin` is turned OFF in `vite.config.ts`
+// because it blanket-403s the OAuth token exchange (`POST /api/auth/mcp/token`),
+// which the Claude.ai connector makes server-to-server as an
+// `application/x-www-form-urlencoded` POST with NO `Origin` header — and the
+// built-in check runs before hooks, so it can't be exempted per-route. We re-add
+// the SAME protection here, scoped: every route EXCEPT the better-auth subtree
+// (`/api/auth/*`) gets a same-origin requirement on form-content-type mutating
+// requests, exactly as SvelteKit did. better-auth owns CSRF/Origin validation for
+// its own subtree (its `originCheckMiddleware` validates cookie-bearing requests),
+// and its OAuth token / DCR endpoints are DELIBERATELY reachable cross-origin.
+const AUTH_PREFIX = '/api/auth';
+
+// The content types a browser can produce from a plain <form> — these are the
+// CSRF-sensitive ones (mirrors SvelteKit's `is_form_content_type`). A JSON body
+// (`/api/v1`, `/mcp` JSON-RPC) is NOT form-reachable cross-site, so it's exempt.
+const FORM_CONTENT_TYPES = new Set([
+	'application/x-www-form-urlencoded',
+	'multipart/form-data',
+	'text/plain'
+]);
+
+// Mutating methods a cross-site <form> / fetch could trigger with a form body.
+const CSRF_UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** True when the request path is under the better-auth subtree (`/api/auth` or `/api/auth/…`). */
+function isBetterAuthRequest(pathname: string): boolean {
+	return pathname === AUTH_PREFIX || pathname.startsWith(`${AUTH_PREFIX}/`);
+}
+
+/** The request's bare content-type (no `; charset=…` params), lower-cased. */
+function formContentType(request: Request): string {
+	return request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? '';
+}
+
+/**
+ * Same-origin CSRF guard for form-content-type mutations (PLAN §12).
+ *
+ * Rejects (403) any `POST`/`PUT`/`PATCH`/`DELETE` carrying a browser-form content
+ * type whose `Origin` header is not the app's own origin — the exact rule
+ * SvelteKit's built-in `csrf.checkOrigin` enforced before we disabled it (a
+ * missing `Origin` also fails, since it can't equal `url.origin`). The
+ * `/api/auth/*` subtree is EXEMPT: better-auth performs its own Origin validation
+ * there, and its OAuth token/registration endpoints must accept the Claude.ai
+ * connector's cross-origin, no-Origin server-to-server POSTs. JSON APIs
+ * (`/api/v1`, `/mcp`) are naturally exempt — they are not a form content type.
+ *
+ * Unlike SvelteKit's built-in (production-only), this runs in EVERY environment,
+ * so dev matches prod; the app's own form actions POST same-origin and pass.
+ */
+const csrfGuard: Handle = async ({ event, resolve }) => {
+	const { request, url } = event;
+	if (
+		!isBetterAuthRequest(url.pathname) &&
+		CSRF_UNSAFE_METHODS.has(request.method) &&
+		FORM_CONTENT_TYPES.has(formContentType(request)) &&
+		request.headers.get('origin') !== url.origin
+	) {
+		// Byte-compatible with SvelteKit's own message/shape for this rejection.
+		return text(`Cross-site ${request.method} form submissions are forbidden`, { status: 403 });
+	}
+	return resolve(event);
+};
 
 /**
  * The single generic 401 envelope for the `/api/v1` auth gate (PLAN §16.5).
@@ -160,11 +224,11 @@ const apiV1Guard: Handle = async ({ event, resolve }) => {
 	return resolve(event);
 };
 
-// Composition seam (PLAN §16.3): cookie session resolution first, then the
-// `/api/v1` auth gate. `sequence` runs them in order — `resolveSession`'s
-// `resolve` is `apiV1Guard`, whose `resolve` is the real route handler — so a
-// non-api request is byte-for-byte unaffected (the guard is a no-op for it).
-export const handle: Handle = sequence(resolveSession, apiV1Guard);
+// Composition seam (PLAN §16.3): the same-origin CSRF guard runs FIRST (it can
+// reject before any session/DB work), then cookie session resolution, then the
+// `/api/v1` auth gate. `sequence` runs them in order — each hook's `resolve` is
+// the next — so a non-api, same-origin request is byte-for-byte unaffected.
+export const handle: Handle = sequence(csrfGuard, resolveSession, apiV1Guard);
 
 /**
  * Uncaught-error normalizer (PLAN §16.3, §16.5).
@@ -202,4 +266,4 @@ export const handleError: HandleServerError = ({ error, event, message }) => {
 // Exported for focused unit coverage of the guard in isolation. `extractBearerKey`
 // now lives in `$lib/server/api/verify` (shared with the `/mcp` Connector) and is
 // re-exported here so the hook's public surface is unchanged.
-export { resolveSession, apiV1Guard, extractBearerKey };
+export { csrfGuard, resolveSession, apiV1Guard, extractBearerKey };

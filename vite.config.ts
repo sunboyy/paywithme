@@ -19,7 +19,31 @@ export default defineConfig({
 			// Deploy to Vercel on the Node.js runtime (PLAN §3 "Runtime & driver").
 			// Node runtime keeps better-auth + WebAuthn and the `pg` driver simple;
 			// the edge runtime is intentionally NOT used in v1.
-			adapter: adapter({ runtime: 'nodejs22.x' })
+			adapter: adapter({ runtime: 'nodejs22.x' }),
+
+			// CSRF: turn OFF SvelteKit's built-in cross-origin form-POST rejection and
+			// enforce our OWN scoped origin check in `hooks.server.ts` (`csrfGuard`).
+			//
+			// WHY: SvelteKit blanket-403s any `application/x-www-form-urlencoded`
+			// (and multipart / text-plain) POST whose `Origin` header isn't the app's
+			// own — and it runs BEFORE hooks, so it can't be exempted per-route. The
+			// OAuth *token* endpoint (`POST /api/auth/mcp/token`) is precisely a
+			// form-encoded POST made SERVER-TO-SERVER by the Claude.ai connector, with
+			// NO `Origin` header at all — so SvelteKit rejected the code→token exchange
+			// with a 403 (`csrf_check_origin` is production-only, which is why it only
+			// bit on Vercel, not locally). `csrf.trustedOrigins` can't fix the
+			// no-Origin case, so we disable the blunt global check and re-add a
+			// targeted one that exempts the better-auth subtree (which does its own
+			// Origin validation) while still protecting the app's own form actions.
+			//
+			// NOTE: `checkOrigin` is deprecated by SvelteKit in favour of
+			// `csrf.trustedOrigins` (expect a build-time deprecation warning). We use
+			// it deliberately because `trustedOrigins` is an Origin ALLOWLIST and
+			// cannot permit the connector's no-Origin token POST; our own `csrfGuard`
+			// is the real protection. If a future Kit upgrade removes `checkOrigin`,
+			// the token endpoint would 403 again — the guard must move earlier or the
+			// check be disabled another way.
+			csrf: { checkOrigin: false }
 		}),
 		// Installable PWA (PLAN §11). Strategy = `generateSW` (Workbox); see
 		// `src/lib/pwa/workbox.ts` for why and how §11.1 (never cache authed
