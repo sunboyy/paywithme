@@ -95,7 +95,7 @@ describe('POST /api/v1/groups/{gid}/transactions/{txid}/restore', () => {
 			txnId: 't1',
 			actorUserId: 'user_1',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
-			via: { keyId: 'key_w', keyName: 'agent key' }
+			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(body.deletedAt).toBeNull();
 		expect(body).not.toHaveProperty('input');

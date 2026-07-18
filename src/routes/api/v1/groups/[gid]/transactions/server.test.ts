@@ -326,7 +326,7 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			groupId: 'g1',
 			input: validInput,
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
-			via: { keyId: 'key_w', keyName: 'agent key' }
+			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
 		});
 		expect(getTransactionDetail).toHaveBeenCalledWith({
 			userId: 'user_1',

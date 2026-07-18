@@ -21,10 +21,22 @@ import type { AuditVia } from '$lib/server/audit';
 import type { ApiKeyPrincipal } from './principal';
 
 /**
- * Project a resolved API-key principal into the audit-writer's provenance value.
- * Takes only the fields it needs, so a bare `{ keyId, name }` object works in
- * tests.
+ * Project a resolved principal into the audit-writer's provenance value, ORIGIN-
+ * AWARE (ADR-0010 §Consequences). Takes only the fields it needs, so a bare
+ * `{ keyId, name }` (or `{ oauthClientId }`) object works in tests.
+ *
+ * The origin is read off the principal: `oauthClientId` is set ONLY on the `/mcp`
+ * OAuth path (`mcp/auth.ts` `resolveOAuthPrincipal`), so its PRESENCE selects the
+ * OAuth arm → `{ kind: 'oauth', clientId }` (the `viaOAuth` actor tag). Otherwise —
+ * every api-key path, where it is absent — the key arm → `{ kind: 'key', keyId,
+ * keyName }` (byte-identical to before). No tool changes: a mutating tool still just
+ * threads `auditVia(principal)` through, and now records the right origin for free.
  */
-export function auditVia(principal: Pick<ApiKeyPrincipal, 'keyId' | 'name'>): AuditVia {
-	return { keyId: principal.keyId, keyName: principal.name };
+export function auditVia(
+	principal: Pick<ApiKeyPrincipal, 'keyId' | 'name' | 'oauthClientId'>
+): AuditVia {
+	if (principal.oauthClientId !== undefined) {
+		return { kind: 'oauth', clientId: principal.oauthClientId };
+	}
+	return { kind: 'key', keyId: principal.keyId, keyName: principal.name };
 }

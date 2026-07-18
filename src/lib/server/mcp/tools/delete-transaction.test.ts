@@ -210,7 +210,32 @@ describe('delete_transaction — the write', () => {
 
 		// We never write audit ourselves — `softDeleteTransaction` does, in the SAME DB
 		// transaction, and only on a real state transition (§16.6).
-		expect(softDeleteTransaction.mock.calls[0][0]).toMatchObject({ via: { keyId: 'key_1' } });
+		expect(softDeleteTransaction.mock.calls[0][0]).toMatchObject({
+			via: { kind: 'key', keyId: 'key_1' }
+		});
+	});
+
+	it('carries `viaOAuth` provenance when the caller came through an OAuth connection (ADR-0010 / #42)', async () => {
+		// An OAuth-resolved principal (its `oauthClientId` is set) must NOT be mis-tagged as
+		// a `viaKey` built from the composed `keyId`. The tool is origin-agnostic — it just
+		// threads `auditVia(principal)` — so the OAuth actor tag flows through unchanged.
+		const oauthPrincipal: ApiKeyPrincipal = {
+			keyId: 'client_1:user_me',
+			name: null,
+			userId: 'user_me',
+			permissions: { api: ['read', 'write'] },
+			oauthClientId: 'client_1'
+		};
+
+		const result = await deleteTransactionTool.run(
+			{ principal: oauthPrincipal },
+			deleteTransactionTool.args.parse(ARGS)
+		);
+		expect(result.isError, JSON.stringify(result.structuredContent)).toBeUndefined();
+
+		expect(softDeleteTransaction.mock.calls[0][0]).toMatchObject({
+			via: { kind: 'oauth', clientId: 'client_1' }
+		});
 	});
 
 	it('returns the transaction marked deleted — still fully readable, which is what makes restore possible', async () => {

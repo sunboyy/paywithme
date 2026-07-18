@@ -97,7 +97,14 @@ async function resolveOAuthPrincipal(request: Request): Promise<ApiKeyPrincipal 
 		// No human key label on the OAuth path.
 		name: null,
 		userId: session.userId,
-		permissions: oauthScopesToPermissions(session.scopes)
+		permissions: oauthScopesToPermissions(session.scopes),
+		// #42 (ADR-0010 §Consequences): the RAW client id (the connected app), carried as
+		// AUDIT PROVENANCE so a mutation over this OAuth connection is tagged
+		// `metadata.viaOAuth = <clientId>` — the OAuth equivalent of `viaKey`. Its mere
+		// PRESENCE marks this principal as OAuth-originated (`auditVia` branches on it).
+		// Deliberately the bare `clientId`, NOT the composed `keyId` above: the actor tag
+		// records which APP a change entered through, and the user is already `userId`.
+		oauthClientId: session.clientId
 	};
 }
 

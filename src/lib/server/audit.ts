@@ -89,29 +89,36 @@ export const GROUP_AUDIT_ENTITY_TYPES = AUDIT_ENTITY_TYPES.filter(
 export type GroupAuditEntityType = (typeof GROUP_AUDIT_ENTITY_TYPES)[number];
 
 /**
- * PROVENANCE for an API-key-driven mutation (PLAN §16.2, "Audit actor — zero
- * schema change").
+ * PROVENANCE for a CREDENTIAL-driven mutation (PLAN §16.2, "Audit actor — zero
+ * schema change"; ADR-0010 §Consequences for the OAuth arm).
  *
- * A key carries NO independent authority: it acts *as* its creating user, so
- * `actorUserId` stays the USER id. "Which key" is provenance only, and it is
- * recorded WITHOUT a schema change — no `actor_key_id` column (explicitly
- * rejected): the key id + label go into the existing nullable `metadata` jsonb as
- * `{ viaKey, keyName }`, and the durable `summary` gets a
- * "(via API key '<name>')" suffix so an old entry still reads correctly even if
- * the key is later revoked and hard-deleted. (A Postgres expression index on
- * `(metadata->>'viaKey')` can serve per-key lookups later without touching the
- * append-only table.)
+ * A credential carries NO independent authority: it acts *as* its owning user, so
+ * `actorUserId` stays the USER id regardless of origin. "How the change entered"
+ * is provenance only, recorded WITHOUT a schema change — no `actor_key_id` column
+ * (explicitly rejected): the tag goes into the existing nullable `metadata` jsonb,
+ * and the durable `summary` gets a suffix so an old entry still reads correctly
+ * even after the credential is revoked and hard-deleted.
  *
- * Absent (`undefined`) for a WEB-SESSION mutation — those rows get no suffix and
- * no `viaKey`/`keyName` metadata, which is exactly how the two origins are told
- * apart.
+ * A DISCRIMINATED UNION on `kind`, one arm per origin (both flow through the SAME
+ * suffix/metadata functions below — one place per format):
+ *   - `kind: 'key'` — an `/api/v1` (or MCP api-key) mutation. `{ viaKey, keyName }`
+ *     metadata + the "(via API key '<name>')" suffix. `kind` is OPTIONAL here so a
+ *     bare `{ keyId, keyName }` still types as the key arm (back-compat; absence of
+ *     `kind` reads as `'key'`) — the key path output is BYTE-IDENTICAL to before.
+ *   - `kind: 'oauth'` — a `/mcp` OAuth-connection mutation (ADR-0010). `{ viaOAuth:
+ *     clientId }` metadata (the client-id actor tag §Consequences names) + the
+ *     "(via OAuth connection)" suffix. No `keyName` — the client id is the ask; we
+ *     do NOT do an extra lookup for the app's display name.
+ *
+ * Absent (`undefined`) altogether for a WEB-SESSION mutation — those rows get no
+ * suffix and no provenance keys, which is how a session origin is told apart.
+ *
+ * (A Postgres expression index on `(metadata->>'viaKey')` / `(metadata->>'viaOAuth')`
+ * can serve per-credential lookups later without touching the append-only table.)
  */
-export interface AuditVia {
-	/** The API key's own id → `metadata.viaKey`. */
-	keyId: string;
-	/** The key's human label → `metadata.keyName` + the summary suffix. */
-	keyName: string | null;
-}
+export type AuditVia =
+	| { kind?: 'key'; keyId: string; keyName: string | null }
+	| { kind: 'oauth'; clientId: string };
 
 /**
  * The label used in the summary suffix when a key carries no name (the plugin's
@@ -121,23 +128,30 @@ export interface AuditVia {
 export const UNNAMED_API_KEY_LABEL = 'unnamed';
 
 /**
- * The durable "(via API key '<name>')" suffix (PLAN §16.2). Exported so tests and
- * any future audit writer compose the SAME string — the format lives in exactly
- * one place.
+ * The durable provenance suffix (PLAN §16.2; ADR-0010 §Consequences). Exported so
+ * tests and any future audit writer compose the SAME string — the format lives in
+ * exactly one place, per origin:
+ *   - key   → "(via API key '<name>')" — BYTE-IDENTICAL to before.
+ *   - oauth → "(via OAuth connection)".
+ * (Name kept as `viaKeySummarySuffix` — it now covers both credential origins.)
  */
 export function viaKeySummarySuffix(via: AuditVia): string {
+	if (via.kind === 'oauth') return ' (via OAuth connection)';
 	return ` (via API key '${via.keyName ?? UNNAMED_API_KEY_LABEL}')`;
 }
 
 /**
- * Merge `{ viaKey, keyName }` into an entry's existing `metadata` jsonb. A plain
+ * Merge the origin's provenance keys into an entry's existing `metadata` jsonb —
+ * `{ viaKey, keyName }` for a key, `{ viaOAuth }` for an OAuth connection. A plain
  * object is SPREAD (the service's changed-fields snapshot is preserved); anything
  * else (absent/null, or a non-object metadata value) is kept intact under
  * `details` so no information is lost and the provenance keys still sit at the top
- * level where an expression index on `metadata->>'viaKey'` can find them.
+ * level where an expression index on `metadata->>'viaKey'` / `->>'viaOAuth'` can
+ * find them.
  */
 function withViaMetadata(metadata: unknown, via: AuditVia): Record<string, unknown> {
-	const provenance = { viaKey: via.keyId, keyName: via.keyName };
+	const provenance =
+		via.kind === 'oauth' ? { viaOAuth: via.clientId } : { viaKey: via.keyId, keyName: via.keyName };
 	if (metadata === undefined || metadata === null) return provenance;
 	if (typeof metadata === 'object' && !Array.isArray(metadata)) {
 		return { ...(metadata as Record<string, unknown>), ...provenance };
@@ -180,11 +194,13 @@ export interface AuditEntry {
 	 */
 	metadata?: unknown;
 	/**
-	 * API-key provenance (PLAN §16.2) — set ONLY when the mutation came through
-	 * `/api/v1` with a key. {@link writeAuditLog} then appends the
-	 * "(via API key '<name>')" summary suffix and merges `{ viaKey, keyName }` into
-	 * `metadata`. `actorUserId` is UNCHANGED (still the user). Omitted for a
-	 * web-session mutation → that row carries no suffix and no provenance keys.
+	 * Credential provenance (PLAN §16.2; ADR-0010 §Consequences) — set ONLY when the
+	 * mutation came through a CREDENTIAL: an api key (`kind: 'key'`, via `/api/v1` or
+	 * MCP) or an OAuth connection (`kind: 'oauth'`, via `/mcp`). {@link writeAuditLog}
+	 * then appends the origin's summary suffix and merges its actor tag
+	 * (`{ viaKey, keyName }` or `{ viaOAuth }`) into `metadata`. `actorUserId` is
+	 * UNCHANGED (still the user). Omitted for a web-session mutation → that row carries
+	 * no suffix and no provenance keys.
 	 */
 	via?: AuditVia;
 }
@@ -200,11 +216,12 @@ export interface AuditEntry {
  * `id` and `occurredAt` are left to the schema defaults so the SERVER stamps the
  * immutable insert time; the caller cannot supply them.
  *
- * When `entry.via` is present (an API-key-driven mutation, PLAN §16.2) the row is
- * decorated with provenance HERE — the one place the format is defined: the
- * summary gets the "(via API key '<name>')" suffix and `metadata` gains
- * `{ viaKey, keyName }`. `actorUserId` is never rewritten (the key acts AS the
- * user), and NO schema change is involved.
+ * When `entry.via` is present (a CREDENTIAL-driven mutation, PLAN §16.2; ADR-0010
+ * §Consequences) the row is decorated with provenance HERE — the one place the
+ * format is defined: the summary gets the origin's suffix ("(via API key '<name>')"
+ * or "(via OAuth connection)") and `metadata` gains its actor tag (`{ viaKey,
+ * keyName }` or `{ viaOAuth }`). `actorUserId` is never rewritten (the credential
+ * acts AS the user), and NO schema change is involved.
  */
 export async function writeAuditLog(tx: AuditExecutor, entry: AuditEntry): Promise<void> {
 	await tx.insert(auditLog).values({

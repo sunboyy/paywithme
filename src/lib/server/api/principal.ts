@@ -29,4 +29,17 @@ export interface ApiKeyPrincipal {
 	 * per-route write-guard (a LATER ticket) — never for authentication here.
 	 */
 	permissions: Record<string, string[]> | null;
+	/**
+	 * OAUTH PROVENANCE (ADR-0010 §Consequences; #42) — the raw OAuth client id (the
+	 * registered CONNECTED APP, e.g. Claude.ai's connector), present ONLY when this
+	 * principal was resolved from an OAuth access token (`mcp/auth.ts`
+	 * `resolveOAuthPrincipal`). ABSENT (`undefined`) on the API-key path (`/api/v1`
+	 * `verify.ts`, and the api-key MCP fallback) — that absence is exactly how audit
+	 * provenance tells an OAuth-originated mutation (`viaOAuth`) from a key-driven one
+	 * (`viaKey`). This is the RAW `clientId`, NOT the composed `${clientId}:${userId}`
+	 * `keyId` (which folds in the user for per-caller isolation); the actor tag records
+	 * WHICH APP a change entered through, so it must be the client id alone. Carried as
+	 * AUDIT PROVENANCE only — never used for authentication or authorization.
+	 */
+	oauthClientId?: string;
 }

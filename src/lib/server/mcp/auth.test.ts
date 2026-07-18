@@ -79,11 +79,27 @@ describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 				keyId: 'client_1:user_oauth',
 				name: null,
 				userId: 'user_oauth',
-				permissions: { api: ['read', 'write'] }
+				permissions: { api: ['read', 'write'] },
+				// #42: the RAW client id, carried as audit provenance (`viaOAuth`).
+				oauthClientId: 'client_1'
 			}
 		});
 		// OAuth resolved — the key path was never consulted.
 		expect(verifyApiKey).not.toHaveBeenCalled();
+	});
+
+	it('sets `oauthClientId` to the session’s RAW clientId — the audit actor tag (#42)', async () => {
+		// ADR-0010 §Consequences: an OAuth-originated mutation needs a `viaOAuth` actor
+		// tag. That tag is the BARE client id (the connected app), NOT the composed
+		// `keyId`, so `auditVia` can record HOW the change entered.
+		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, clientId: 'app_xyz', userId: 'user_z' });
+
+		const result = await resolveMcpAuth(req('Bearer oat_abc'));
+
+		expect(result).toMatchObject({ ok: true, principal: { oauthClientId: 'app_xyz' } });
+		// It is the raw client id, distinct from the composed per-caller keyId.
+		expect(result.ok && result.principal.oauthClientId).toBe('app_xyz');
+		expect(result.ok && result.principal.keyId).toBe('app_xyz:user_z');
 	});
 
 	it('resolves a READ-only token to a read principal', async () => {
