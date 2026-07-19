@@ -93,6 +93,11 @@ export default defineConfig({
 				test: {
 					name: 'server',
 					environment: 'node',
+					// Keep auth wiring tests independent of an ignored local `.env` file.
+					// Better Auth's MCP discovery helpers run without a request context, so
+					// they need a canonical base URL on the constructed auth instance. Local
+					// runs previously got this from `.env`; a clean CI checkout did not.
+					env: { BETTER_AUTH_URL: 'http://localhost:5173' },
 					include: ['src/**/*.{test,spec}.{js,ts}'],
 					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}', 'tests/integration/**']
 				}

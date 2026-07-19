@@ -227,9 +227,9 @@ describe('auth instance wiring', () => {
 	it('resolves OAuth discovery metadata against the wired auth instance (ADR-0010)', async () => {
 		// Proves the mcp plugin is actually wired into `auth`: the discovery helper
 		// resolves the AS metadata from the instance without a live DB or request
-		// context. The issuer is the configured baseURL (BETTER_AUTH_URL); in the
-		// test env that is undefined, so we only assert the OAuth-shaped fields the
-		// plugin derives from the wired endpoints.
+		// context. The server test project supplies a deterministic BETTER_AUTH_URL,
+		// so this behaves identically in a clean CI checkout and on a machine with a
+		// local ignored `.env` file.
 		const { oAuthDiscoveryMetadata } = await import('better-auth/plugins');
 		const { auth } = await import('./auth');
 		const handler = oAuthDiscoveryMetadata(auth);
