@@ -125,6 +125,37 @@ describe('buildEchoBack', () => {
 		expect(echo).toContain('split equally 3 ways: you, Bob and Nan Suphaporn.');
 	});
 
+	it.each([
+		['amount', 'split by exact amounts among 2 ways'],
+		['share', 'split by share weights among 2 ways']
+	] as const)('describes a rich %s split without claiming it is equal', (splitMode, phrase) => {
+		const echo = echoFor({ splitMode });
+		expect(echo).toContain(phrase);
+		expect(echo).not.toContain('split equally');
+	});
+
+	it('describes an itemized spending by its persisted item count', () => {
+		const echo = echoFor({
+			splitMode: 'itemized',
+			items: [
+				{
+					label: 'Food',
+					amount: 20000,
+					splitMode: 'equal',
+					shares: [{ memberId: 'mem_me', amountOwed: 10000 }]
+				},
+				{
+					label: 'Drinks',
+					amount: 4000,
+					splitMode: 'equal',
+					shares: [{ memberId: 'mem_nan', amountOwed: 2000 }]
+				}
+			]
+		});
+		expect(echo).toContain('split by 2 items among 2 ways');
+		expect(echo).not.toContain('split equally');
+	});
+
 	it('renders a 0-exponent currency with no decimal point (JPY, ADR-0004)', () => {
 		const echo = echoFor(
 			{

@@ -45,11 +45,10 @@
 //   - the same expense AFTER the window is a NEW transaction — two ฿60 coffees in a
 //     day is normal, and swallowing the second would under-bill the user.
 //
-// v1 shape: a SPENDING with an EQUAL split and a SINGLE payer — the canonical minimal
-// shape, mirroring the `spendingInput` fixture the API suites are built on.
+// The legacy shape remains a single-payer equal spending. Rich calls add exact-amount,
+// weighted, and itemized splits without changing that established wire contract.
 
 import { z } from 'zod';
-import { parseAmount } from '$lib/money';
 import { categoriesFor } from '$lib/categories';
 import {
 	createTransaction,
@@ -69,8 +68,14 @@ import {
 	type TransactionView
 } from '../view';
 import type { McpTool } from '../types';
-import { amountArg, GROUP_ID_PROPERTY, groupIdArg } from './args';
+import { GROUP_ID_PROPERTY, groupIdArg } from './args';
 import { loadGroupView, loadMemberViews } from './load';
+import {
+	MCP_TRANSACTION_ARGUMENT_FIELDS,
+	McpTransactionArgumentError,
+	toTransactionInput,
+	validateMcpTransactionArguments
+} from './transaction-input';
 
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
 const TOOL_NAME = 'create_transaction';
@@ -81,24 +86,56 @@ const SPENDING_CATEGORY_IDS = categoriesFor('spending').map((category) => catego
 /** A genuinely generic fallback; the previous first-row fallback was Food & Drink. */
 const DEFAULT_SPENDING_CATEGORY_ID = 'spending-other';
 
-/** Translate internal transaction-schema paths back to the MCP argument vocabulary. */
-const MCP_FIELD_FOR_INTERNAL_FIELD: Readonly<Record<string, string>> = {
-	amountTotal: 'amount',
-	amountTotalSettlement: 'amount',
-	exchangeRate: 'amount',
-	payers: 'paidBy',
-	beneficiaries: 'splitBetween'
-};
-
-function remapTransactionValidationError(error: TransactionValidationError) {
+/** Translate a late service validation failure back to this tool's wire vocabulary. */
+function remapTransactionValidationError(
+	error: TransactionValidationError,
+	splitMode: 'equal' | 'amount' | 'share' | 'itemized',
+	charges: readonly { mode: 'percent' | 'absolute' }[] | undefined
+) {
 	return new TransactionValidationError(
 		error.issues.map((issue) => {
 			const [first, ...rest] = issue.path;
-			const mapped = typeof first === 'string' ? MCP_FIELD_FOR_INTERNAL_FIELD[first] : undefined;
-			return mapped === undefined ? issue : { ...issue, path: [mapped, ...rest] };
+			if (first === 'payers') return { ...issue, path: ['paidBy'] };
+			if (first === 'beneficiaries') {
+				return {
+					...issue,
+					path: [splitMode === 'equal' ? 'splitBetween' : 'beneficiaries', ...rest]
+				};
+			}
+			if (
+				first === 'amountTotal' ||
+				first === 'amountTotalSettlement' ||
+				first === 'exchangeRate'
+			) {
+				return { ...issue, path: [splitMode === 'itemized' ? 'charges' : 'amount'] };
+			}
+			return {
+				...issue,
+				path: issue.path.map((part, index) => {
+					if (part === 'rawAmount') return 'amount';
+					if (part !== 'value') return part;
+					const chargeIndex = issue.path[0] === 'charges' ? issue.path[index - 1] : undefined;
+					return typeof chargeIndex === 'number' && charges?.[chargeIndex]?.mode === 'absolute'
+						? 'amount'
+						: 'percent';
+				})
+			};
 		}),
 		error.message
 	);
+}
+
+function argumentErrorResult(error: McpTransactionArgumentError) {
+	const fieldErrors: Record<string, string[]> = {};
+	for (const issue of error.issues) {
+		const field = issue.path.join('.') || 'arguments';
+		(fieldErrors[field] ??= []).push(issue.message);
+		// Preserve the original top-level field contract (`splitBetween`, `amount`, …)
+		// while also providing the exact rich nested path an agent can correct.
+		const root = typeof issue.path[0] === 'string' ? issue.path[0] : undefined;
+		if (root !== undefined && root !== field) (fieldErrors[root] ??= []).push(issue.message);
+	}
+	return toolError('validation_error', error.message, { fieldErrors });
 }
 
 /**
@@ -113,29 +150,139 @@ interface CreatedPayload {
 	_note: string;
 }
 
-const createTransactionArgs = z.strictObject({
-	groupId: groupIdArg,
-	title: z
-		.string()
-		.min(1, 'A title is required.')
-		.max(200, 'Title must be 200 characters or fewer.')
-		.regex(/\S/, 'A title is required.'),
-	// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
-	amount: amountArg,
-	// OPTIONAL: FX is deferred, so this defaults to (and must equal) the group's
-	// settlement currency. See the header.
-	currency: z.string().min(1).optional(),
-	// OPTIONAL: defaults to the CALLER's own member (the `isYou` member).
-	paidBy: z.string().min(1).optional(),
-	// REQUIRED: the equal-split beneficiaries, by member id (never names, ADR-0006).
-	splitBetween: z.array(z.string().min(1)).min(1, 'List at least one member id to split between.'),
-	// OPTIONAL: defaults to the genuinely generic Other category. The enum is also
-	// advertised in JSON Schema, so the model can choose without guessing an id.
-	categoryId: z
-		.string()
-		.refine((id) => SPENDING_CATEGORY_IDS.includes(id), 'Choose a valid spending category id.')
-		.optional()
+const createTransactionArgs = z
+	.strictObject({
+		groupId: groupIdArg,
+		title: z
+			.string()
+			.min(1, 'A title is required.')
+			.max(200, 'Title must be 200 characters or fewer.')
+			.regex(/\S/, 'A title is required.'),
+		...MCP_TRANSACTION_ARGUMENT_FIELDS,
+		// OPTIONAL: FX is deferred, so this defaults to (and must equal) the group's
+		// settlement currency. See the header.
+		currency: z.string().min(1).optional(),
+		// OPTIONAL: defaults to the CALLER's own member (the `isYou` member).
+		paidBy: z.string().min(1).optional(),
+		// OPTIONAL: defaults to the genuinely generic Other category. The enum is also
+		// advertised in JSON Schema, so the model can choose without guessing an id.
+		categoryId: z
+			.string()
+			.refine((id) => SPENDING_CATEGORY_IDS.includes(id), 'Choose a valid spending category id.')
+			.optional()
+	})
+	.superRefine(validateMcpTransactionArguments);
+
+const MONEY_PROPERTY = {
+	type: 'string',
+	pattern: '^\\d+(\\.\\d{1,4})?$',
+	description:
+		'A non-negative amount as a DECIMAL STRING in the group settlement currency. ' +
+		'The server converts it to minor units; never multiply by 100.'
+} as const;
+const MEMBER_ID_PROPERTY = {
+	type: 'string',
+	minLength: 1,
+	description: 'Member id from `list_members`.'
+} as const;
+const EQUAL_BENEFICIARY_PROPERTY = {
+	type: 'object',
+	properties: { memberId: MEMBER_ID_PROPERTY },
+	required: ['memberId'],
+	additionalProperties: false
+} as const;
+const AMOUNT_BENEFICIARY_PROPERTY = {
+	type: 'object',
+	properties: {
+		memberId: MEMBER_ID_PROPERTY,
+		amount: { ...MONEY_PROPERTY, description: 'Exact amount owed by this beneficiary.' }
+	},
+	required: ['memberId', 'amount'],
+	additionalProperties: false
+} as const;
+const SHARE_BENEFICIARY_PROPERTY = {
+	type: 'object',
+	properties: {
+		memberId: MEMBER_ID_PROPERTY,
+		shareWeight: {
+			type: 'integer',
+			minimum: 0,
+			description: 'Integer weight; all beneficiaries’ weights must sum above zero.'
+		}
+	},
+	required: ['memberId', 'shareWeight'],
+	additionalProperties: false
+} as const;
+const beneficiaryArray = (
+	items:
+		| typeof EQUAL_BENEFICIARY_PROPERTY
+		| typeof AMOUNT_BENEFICIARY_PROPERTY
+		| typeof SHARE_BENEFICIARY_PROPERTY
+) => ({ type: 'array', minItems: 1, items }) as const;
+const itemProperty = (
+	splitMode: 'equal' | 'amount' | 'share',
+	beneficiaryItems:
+		| typeof EQUAL_BENEFICIARY_PROPERTY
+		| typeof AMOUNT_BENEFICIARY_PROPERTY
+		| typeof SHARE_BENEFICIARY_PROPERTY
+) =>
+	({
+		type: 'object',
+		properties: {
+			label: { type: 'string', minLength: 1, maxLength: 200 },
+			amount: MONEY_PROPERTY,
+			splitMode: { const: splitMode },
+			beneficiaries: beneficiaryArray(beneficiaryItems)
+		},
+		required: ['label', 'amount', 'splitMode', 'beneficiaries'],
+		additionalProperties: false
+	}) as const;
+const ITEM_PROPERTY = {
+	oneOf: [
+		itemProperty('equal', EQUAL_BENEFICIARY_PROPERTY),
+		itemProperty('amount', AMOUNT_BENEFICIARY_PROPERTY),
+		itemProperty('share', SHARE_BENEFICIARY_PROPERTY)
+	]
+} as const;
+const CHARGE_PROPERTY = {
+	oneOf: [
+		{
+			type: 'object',
+			properties: {
+				kind: { type: 'string', enum: ['service', 'vat', 'discount', 'tip'] },
+				mode: { const: 'percent' },
+				percent: {
+					type: 'string',
+					// Match the runtime's 1–3 digit representation while structurally
+					// capping the numeric value at 100 (including 100.0 / 100.00 only).
+					pattern: '^(?:(?:\\d{1,2}|0\\d{2})(?:\\.\\d{1,2})?|100(?:\\.0{1,2})?)$',
+					description: 'Human percentage string from "0" through "100", e.g. "7.25".'
+				},
+				base: { type: 'string', enum: ['items_subtotal', 'running_total'] }
+			},
+			required: ['kind', 'mode', 'percent', 'base'],
+			additionalProperties: false
+		},
+		{
+			type: 'object',
+			properties: {
+				kind: { type: 'string', enum: ['service', 'vat', 'discount', 'tip'] },
+				mode: { const: 'absolute' },
+				amount: MONEY_PROPERTY,
+				base: { type: 'string', enum: ['items_subtotal', 'running_total'] }
+			},
+			required: ['kind', 'mode', 'amount', 'base'],
+			additionalProperties: false
+		}
+	]
+} as const;
+
+const forbidProperties = (...fields: string[]) => ({
+	not: { anyOf: fields.map((field) => ({ required: [field] })) }
 });
+
+const AMOUNT_BENEFICIARIES_PROPERTY = beneficiaryArray(AMOUNT_BENEFICIARY_PROPERTY);
+const SHARE_BENEFICIARIES_PROPERTY = beneficiaryArray(SHARE_BENEFICIARY_PROPERTY);
 
 export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs>> = {
 	scope: 'write',
@@ -145,15 +292,20 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 		name: TOOL_NAME,
 		title: 'Record a spending',
 		description:
-			'Record a shared spending (an expense) split EQUALLY between members, with a single ' +
-			'payer. IDS ONLY, NEVER NAMES: `paidBy` and every id in `splitBetween` must be member ' +
-			'ids from `list_members` — match the person the user named ("split with Nan") to an id ' +
-			'YOURSELF and show your reasoning; this tool does no name matching. STATE THE AMOUNT ' +
-			'EXACTLY AS THE USER SAID IT ("240", "240.00", "1234.5") as a decimal string — the ' +
-			'server does the currency math, so never multiply by 100 or convert exponents. The ' +
+			'Record a shared spending with one payer. Omit `splitMode` for the legacy equal split: ' +
+			'pass `amount` and `splitBetween`. For an exact amount or weighted split, pass ' +
+			'`splitMode`, the total `amount`, and `beneficiaries` with an `amount` decimal string ' +
+			'or integer `shareWeight`. For `itemized`, omit the top-level amount and pass receipt ' +
+			'`items`; each item has its own equal/amount/share beneficiaries. Optional ordered ' +
+			'`charges` support service, VAT, discount, and tip as either a human `percent` string ' +
+			'or an absolute money `amount`; ARRAY ORDER IS APPLICATION ORDER, and the server derives ' +
+			'the final total and payer amount. IDS ONLY, NEVER NAMES: `paidBy` and every beneficiary ' +
+			'id must come from `list_members`; match people yourself and show your reasoning. Every ' +
+			'money amount is a DECIMAL STRING exactly as the user said it — the server does currency ' +
+			'math, so never multiply by 100 or convert exponents. The ' +
 			"amount must be in the group's settlement currency (logging a foreign currency via the " +
-			'assistant is not supported yet). Defaults: `paidBy` is you, `splitBetween` has no ' +
-			'default (you must list it), `currency` is the group settlement currency, and ' +
+			'assistant is not supported yet). Defaults: `paidBy` is you, `currency` is the group ' +
+			'settlement currency, and ' +
 			'`categoryId` defaults to Other. Choose another category from the enum advertised in ' +
 			'the input schema. The result echoes back what was recorded, naming the ' +
 			'people involved, so you and the user can confirm the interpretation. If a call seems ' +
@@ -173,13 +325,15 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					description: 'A short human title for the spending, e.g. "Lunch". Required.'
 				},
 				amount: {
-					type: 'string',
-					pattern: '^\\d+(\\.\\d{1,4})?$',
+					...MONEY_PROPERTY,
 					description:
-						'The amount as a DECIMAL STRING, stated exactly as the user said it: "240", ' +
-						'"240.00", "1234.5". No currency symbol, no thousands separators, no negative ' +
-						"sign. The server converts to the currency's minor units — do NOT do that math " +
-						'yourself.'
+						'Total amount. Required for equal, amount, and share splits; OMIT for itemized ' +
+						'because the server derives the total from items and ordered charges.'
+				},
+				splitMode: {
+					type: 'string',
+					enum: ['equal', 'amount', 'share', 'itemized'],
+					description: 'Omit for backward-compatible equal splitting.'
 				},
 				currency: {
 					type: 'string',
@@ -200,9 +354,26 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					type: 'array',
 					minItems: 1,
 					items: { type: 'string', minLength: 1 },
-					description:
-						'REQUIRED array of member ids (from `list_members`) to split the cost equally ' +
-						'between. Match each person the user named to an id yourself. Never names.'
+					description: 'Member ids for an equal split. Required for equal mode only.'
+				},
+				beneficiaries: {
+					type: 'array',
+					minItems: 1,
+					items: {
+						oneOf: [AMOUNT_BENEFICIARY_PROPERTY, SHARE_BENEFICIARY_PROPERTY]
+					},
+					description: 'Raw beneficiary inputs for top-level amount/share modes.'
+				},
+				items: {
+					type: 'array',
+					minItems: 1,
+					items: ITEM_PROPERTY,
+					description: 'Receipt items. Required for itemized mode.'
+				},
+				charges: {
+					type: 'array',
+					items: CHARGE_PROPERTY,
+					description: 'Optional itemized charges in application order.'
 				},
 				categoryId: {
 					type: 'string',
@@ -210,7 +381,35 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					description: `OPTIONAL spending category id. Defaults to ${DEFAULT_SPENDING_CATEGORY_ID} (Other) if omitted.`
 				}
 			},
-			required: ['groupId', 'title', 'amount', 'splitBetween'],
+			required: ['groupId', 'title'],
+			oneOf: [
+				{
+					properties: { splitMode: { enum: ['equal'] } },
+					required: ['amount', 'splitBetween'],
+					...forbidProperties('beneficiaries', 'items', 'charges')
+				},
+				{
+					properties: {
+						splitMode: { const: 'amount' },
+						beneficiaries: AMOUNT_BENEFICIARIES_PROPERTY
+					},
+					required: ['splitMode', 'amount', 'beneficiaries'],
+					...forbidProperties('splitBetween', 'items', 'charges')
+				},
+				{
+					properties: {
+						splitMode: { const: 'share' },
+						beneficiaries: SHARE_BENEFICIARIES_PROPERTY
+					},
+					required: ['splitMode', 'amount', 'beneficiaries'],
+					...forbidProperties('splitBetween', 'items', 'charges')
+				},
+				{
+					properties: { splitMode: { const: 'itemized' } },
+					required: ['splitMode', 'items'],
+					...forbidProperties('amount', 'splitBetween', 'beneficiaries')
+				}
+			],
 			additionalProperties: false
 		},
 		annotations: {
@@ -236,10 +435,20 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			openWorldHint: false
 		}
 	},
-	run: async (
-		{ principal },
-		{ groupId, title, amount, currency, paidBy, splitBetween, categoryId }
-	) => {
+	run: async ({ principal }, rawArgs) => {
+		const {
+			groupId,
+			title,
+			amount,
+			splitMode,
+			splitBetween,
+			beneficiaries,
+			items,
+			charges,
+			currency,
+			paidBy,
+			categoryId
+		} = rawArgs;
 		// Access-checked load of the group (and its settlement currency). `loadGroupView`
 		// centralizes the conflated `not_found` (absent / deleted / not-yours → ONE outcome,
 		// no existence oracle, §16.5) so this write path inherits it by construction rather
@@ -275,75 +484,37 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			);
 		}
 
-		// Give self-correctable errors in the MCP vocabulary before the shared service
-		// transforms these arguments to `payers` / `beneficiaries`. The roster includes
-		// deactivated members for historical reads, but they are invalid for a new write.
-		const activeMemberIds = new Set(
-			members.filter((member) => member.isActive).map((member) => member.id)
-		);
-		if (!activeMemberIds.has(payerId)) {
-			return toolError(
-				'validation_error',
-				'The selected payer is not an active member of this group.',
-				{ fieldErrors: { paidBy: ['Choose an active member id returned by `list_members`.'] } }
-			);
-		}
-		const invalidBeneficiaries = splitBetween.filter((memberId) => !activeMemberIds.has(memberId));
-		if (invalidBeneficiaries.length > 0) {
-			return toolError(
-				'validation_error',
-				'One or more selected beneficiaries are not active members of this group.',
-				{
-					fieldErrors: {
-						splitBetween: ['Choose only active member ids returned by `list_members`.']
-					}
-				}
-			);
-		}
+		const activeMemberIds = members.filter((member) => member.isActive).map((member) => member.id);
 
 		// Omission means Other, not the first display row (Food & Drink). Explicit ids were
 		// already checked against the same list advertised in the tool's JSON Schema.
 		const resolvedCategoryId = categoryId ?? DEFAULT_SPENDING_CATEGORY_ID;
 
-		// ADR-0004: parse the decimal string into minor units via the SETTLEMENT currency's
-		// own exponent. This is where "240.005"/THB, negatives, and junk become the HARD
-		// error the ADR requires — caught here so it surfaces as a self-correctable
-		// validation_error, never as an opaque internal_error.
-		let minor: number;
+		// The shared MCP adapter is the ONLY decimal-string/basis-point conversion path.
+		// It also validates every active member at the exact nested MCP argument path and
+		// derives itemized total + payer amount from items and ordered charges.
+		let input;
 		try {
-			minor = parseAmount(amount, settlementCurrency);
-		} catch (err) {
-			return toolError(
-				'validation_error',
-				err instanceof Error ? err.message : 'The amount could not be parsed.',
-				{ fieldErrors: { amount: [err instanceof Error ? err.message : 'Invalid amount.'] } }
+			input = toTransactionInput(
+				{ amount, splitMode, splitBetween, beneficiaries, items, charges },
+				{
+					type: 'spending',
+					title,
+					date: new Date().toISOString().slice(0, 10),
+					categoryId: resolvedCategoryId,
+					currency: settlementCurrency,
+					payerId,
+					memberIds: activeMemberIds
+				}
 			);
-		}
-		if (minor <= 0) {
-			return toolError('validation_error', 'The transaction amount must be greater than zero.', {
-				fieldErrors: { amount: ['Amount must be greater than zero.'] }
-			});
+		} catch (error) {
+			if (error instanceof McpTransactionArgumentError) return argumentErrorResult(error);
+			throw error;
 		}
 
-		// The canonical minimal equal-split spending shape — IDENTICAL to the
-		// `spendingInput` fixture the API suites build on. Because v1 records only in the
-		// settlement currency, exchangeRate is '1' and the settlement total equals the
-		// entry total (no FX). The service RE-VALIDATES this server-side (unknown member
-		// ids, category/type mismatch, etc. → TransactionValidationError → validation_error).
-		const input = {
-			type: 'spending' as const,
-			title,
-			categoryId: resolvedCategoryId,
-			amountTotal: minor,
-			currency: settlementCurrency,
-			exchangeRate: '1',
-			amountTotalSettlement: minor,
-			splitMode: 'equal' as const,
-			payers: [{ memberId: payerId, amountPaid: minor }],
-			beneficiaries: splitBetween.map((memberId) => ({ memberId })),
-			items: [],
-			charges: []
-		};
+		// Keep an explicit alias for the echo's minor-unit restatement. In itemized mode
+		// this value was computed by `applyCharges`; it never came from a client total.
+		const minor = input.amountTotal;
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
@@ -364,7 +535,10 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			keyId: principal.keyId,
 			groupId,
 			toolName: TOOL_NAME,
-			args: { groupId, title, amount, currency, paidBy, splitBetween, categoryId },
+			// The COMPLETE parsed raw argument object is fingerprinted. Every nested item,
+			// weight, exact amount, charge, and its ARRAY POSITION therefore distinguishes
+			// intents; no rich input can collide with a simpler transaction.
+			args: rawArgs,
 			store: createDbIdempotencyStore(),
 			fn: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
@@ -383,7 +557,7 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					// Keep the shared service authoritative, but never leak its internal form-field
 					// names (`payers`, `beneficiaries`, `amountTotal`) to an MCP caller.
 					if (error instanceof TransactionValidationError) {
-						throw remapTransactionValidationError(error);
+						throw remapTransactionValidationError(error, input.splitMode, charges);
 					}
 					throw error;
 				}

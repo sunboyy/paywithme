@@ -10,6 +10,7 @@
 // would actually see.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Ajv from 'ajv';
 import { z } from 'zod';
 import { GroupAccessError } from '$lib/server/groups';
 import { scopeToPermissions } from '$lib/server/api/scope';
@@ -159,10 +160,12 @@ describe('the shipped registry (#28 + #29)', () => {
 		const inputSchema = findTool('create_transaction')?.definition.inputSchema as {
 			properties: Record<string, Record<string, unknown>>;
 			required: string[];
+			oneOf: Record<string, unknown>[];
 			additionalProperties: boolean;
 		};
 
-		expect(inputSchema.required).toEqual(['groupId', 'title', 'amount', 'splitBetween']);
+		expect(inputSchema.required).toEqual(['groupId', 'title']);
+		expect(inputSchema.oneOf).toHaveLength(4);
 		expect(inputSchema.additionalProperties).toBe(false);
 		expect(inputSchema.properties.groupId).toMatchObject({ type: 'string', minLength: 1 });
 		expect(inputSchema.properties.title).toMatchObject({
@@ -180,6 +183,10 @@ describe('the shipped registry (#28 + #29)', () => {
 			minItems: 1,
 			items: { type: 'string', minLength: 1 }
 		});
+		expect(inputSchema.properties.splitMode.enum).toEqual(['equal', 'amount', 'share', 'itemized']);
+		expect(inputSchema.properties.beneficiaries).toMatchObject({ type: 'array', minItems: 1 });
+		expect(inputSchema.properties.items).toMatchObject({ type: 'array', minItems: 1 });
+		expect(inputSchema.properties.charges).toMatchObject({ type: 'array' });
 		expect(inputSchema.properties.categoryId.enum).toEqual([
 			'spending-food-drink',
 			'spending-groceries',
@@ -193,6 +200,149 @@ describe('the shipped registry (#28 + #29)', () => {
 			'spending-other'
 		]);
 		expect(inputSchema.properties.categoryId.description).toMatch(/spending-other \(Other\)/);
+	});
+
+	it('the advertised create JSON Schema executes with the same rich-mode contract as runtime', () => {
+		const schema = findTool('create_transaction')?.definition.inputSchema;
+		if (schema === undefined) throw new Error('create_transaction schema missing');
+		const validate = new Ajv({ allErrors: true, strict: false }).compile(schema);
+		const base = { groupId: 'grp_1', title: 'Receipt' };
+		const equalItem = {
+			label: 'Equal item',
+			amount: '10.00',
+			splitMode: 'equal',
+			beneficiaries: [{ memberId: 'mem_a' }]
+		};
+		const amountItem = {
+			label: 'Exact item',
+			amount: '10.00',
+			splitMode: 'amount',
+			beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }]
+		};
+		const shareItem = {
+			label: 'Weighted item',
+			amount: '10.00',
+			splitMode: 'share',
+			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }]
+		};
+		const itemized = (percent = '7.25') => ({
+			...base,
+			splitMode: 'itemized',
+			items: [equalItem, amountItem, shareItem],
+			charges: [
+				{ kind: 'vat', mode: 'percent', percent, base: 'items_subtotal' },
+				{ kind: 'tip', mode: 'absolute', amount: '1.00', base: 'running_total' }
+			]
+		});
+		const expectValid = (value: unknown) =>
+			expect(validate(value), JSON.stringify(validate.errors)).toBe(true);
+		const expectInvalid = (value: unknown) => expect(validate(value)).toBe(false);
+
+		// Every accepted top-level variant, including missing splitMode legacy equal.
+		expectValid({ ...base, amount: '10.00', splitBetween: ['mem_a'] });
+		expectValid({ ...base, splitMode: 'equal', amount: '10.00', splitBetween: ['mem_a'] });
+		expectValid({
+			...base,
+			splitMode: 'amount',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }]
+		});
+		expectValid({
+			...base,
+			splitMode: 'share',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }]
+		});
+		expectValid(itemized());
+
+		// Top-level fields that runtime assigns to exactly one mode are forbidden elsewhere.
+		expectInvalid({ ...itemized(), amount: '31.00' });
+		for (const field of ['items', 'charges'] as const) {
+			expectInvalid({
+				...base,
+				amount: '10.00',
+				splitBetween: ['mem_a'],
+				[field]: field === 'items' ? [equalItem] : []
+			});
+		}
+		for (const splitMode of ['amount', 'share'] as const) {
+			expectInvalid({
+				...base,
+				splitMode,
+				amount: '10.00',
+				splitBetween: ['mem_a'],
+				beneficiaries:
+					splitMode === 'amount'
+						? [{ memberId: 'mem_a', amount: '10.00' }]
+						: [{ memberId: 'mem_a', shareWeight: 1 }]
+			});
+		}
+
+		// Beneficiary variants are exact: required mode input, with conflicting input forbidden.
+		expectInvalid({
+			...base,
+			splitMode: 'amount',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a' }]
+		});
+		expectInvalid({
+			...base,
+			splitMode: 'amount',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a', amount: '10.00', shareWeight: 1 }]
+		});
+		expectInvalid({
+			...base,
+			splitMode: 'share',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a' }]
+		});
+		expectInvalid({
+			...base,
+			splitMode: 'share',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1, amount: '10.00' }]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [{ ...amountItem, beneficiaries: [{ memberId: 'mem_a' }] }]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [
+				{
+					...amountItem,
+					beneficiaries: [{ memberId: 'mem_a', amount: '10.00', shareWeight: 1 }]
+				}
+			]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [{ ...shareItem, beneficiaries: [{ memberId: 'mem_a' }] }]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [
+				{
+					...shareItem,
+					beneficiaries: [{ memberId: 'mem_a', shareWeight: 1, amount: '10.00' }]
+				}
+			]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [{ ...equalItem, beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }] }]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [{ ...equalItem, beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }] }]
+		});
+
+		// Percentage pattern carries the same 0–100, two-decimal boundary as runtime.
+		expectValid(itemized('100'));
+		expectValid(itemized('7.25'));
+		expectInvalid(itemized('100.01'));
+		expectInvalid(itemized('101'));
 	});
 
 	/** The two RECORDING tools — the ones a bounded ~60s window guards (#33). */

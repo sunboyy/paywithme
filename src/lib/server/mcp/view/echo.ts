@@ -134,10 +134,24 @@ function describeTransaction({
 	const beneficiaries = view.shares.map(proseName);
 	const splitCount = beneficiaries.length;
 	const ways = splitCount === 1 ? '1 way' : `${splitCount} ways`;
+	const splitDescription = (() => {
+		switch (view.splitMode) {
+			case 'equal':
+				return `split equally ${ways}`;
+			case 'amount':
+				return `split by exact amounts among ${ways}`;
+			case 'share':
+				return `split by share weights among ${ways}`;
+			case 'itemized': {
+				const itemCount = view.items.length;
+				return `split by ${itemCount} ${itemCount === 1 ? 'item' : 'items'} among ${ways}`;
+			}
+		}
+	})();
 
 	return (
 		`${view.type} "${view.title.value}" — ${amount}, paid by ${paidBy}, ` +
-		`split equally ${ways}: ${joinNames(beneficiaries)}`
+		`${splitDescription}: ${joinNames(beneficiaries)}`
 	);
 }
 

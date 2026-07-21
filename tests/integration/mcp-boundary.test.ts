@@ -1138,7 +1138,16 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		/** The write result payload (the fields these tests read). */
 		interface CreatedWire {
-			recorded: TransactionWire & { id: string; groupId: string };
+			recorded: TransactionWire & {
+				id: string;
+				groupId: string;
+				splitMode: 'equal' | 'amount' | 'share' | 'itemized';
+				items: { label: UntrustedWire; amount: MoneyWire; splitMode: string }[];
+				charges: (
+					| { kind: string; mode: 'percent'; percent: number; base: string }
+					| { kind: string; mode: 'absolute'; amount: MoneyWire; base: string }
+				)[];
+			};
 			echo: string;
 			_note: string;
 		}
@@ -1179,6 +1188,83 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(rows).toHaveLength(1);
 			// JPY exponent 0: "2400" is 2400 minor units, NOT 240000.
 			expect(rows[0].amountTotal).toBe(2400);
+		});
+
+		it('records an itemized spending with a server-derived total and ordered rich charges', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Team receipt',
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '100.00',
+							splitMode: 'amount',
+							beneficiaries: [
+								{ memberId: s.alice, amount: '40.00' },
+								{ memberId: s.bob, amount: '60.00' }
+							]
+						},
+						{
+							label: 'Drinks',
+							amount: '50.00',
+							splitMode: 'share',
+							beneficiaries: [
+								{ memberId: s.alice, shareWeight: 1 },
+								{ memberId: s.bob, shareWeight: 2 }
+							]
+						}
+					],
+					charges: [
+						{ kind: 'service', mode: 'percent', percent: '10', base: 'items_subtotal' },
+						{ kind: 'discount', mode: 'absolute', amount: '5.00', base: 'running_total' }
+					]
+				},
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const rows = await txnRows(s.group.id);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ splitMode: 'itemized', amountTotal: 16_000 });
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			expect(payload.recorded.amount.amount).toBe('160.00');
+			expect(payload.recorded.items.map((item) => item.label.value)).toEqual(['Food', 'Drinks']);
+			expect(payload.recorded.charges).toMatchObject([
+				{ kind: 'service', mode: 'percent', percent: 10 },
+				{ kind: 'discount', mode: 'absolute', amount: { amount: '5.00', currency: 'USD' } }
+			]);
+			expect(payload.echo).toContain('split by 2 items');
+			expect(payload.echo).not.toContain('split equally');
+		});
+
+		it('rejects an unknown nested item beneficiary at its MCP path before writing', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Bad receipt',
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '10.00',
+							splitMode: 'equal',
+							beneficiaries: [{ memberId: 'mem_not_in_this_group' }]
+						}
+					]
+				},
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({
+				fieldErrors: { 'items.0.beneficiaries.0.memberId': expect.any(Array) }
+			});
+			expect(await txnRows(s.group.id)).toHaveLength(0);
 		});
 
 		it('OVER-PRECISION is a hard error, never a silent round ("240.005" in THB)', async () => {
