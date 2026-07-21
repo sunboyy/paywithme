@@ -15,6 +15,7 @@
 // actually asked for.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Ajv from 'ajv';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import type { MemberListItem } from '$lib/server/members';
 import type { TransactionDetail } from '$lib/server/transactions';
@@ -214,20 +215,84 @@ describe('update_transaction — the tool declaration', () => {
 		expect(description).toMatch(/IDS ONLY, NEVER NAMES/);
 		expect(description).toMatch(/get_transaction` FIRST/i);
 		// The sharpest edge of replacement semantics, stated where the model decides.
-		expect(description).toMatch(/REMOVES the people you left out/i);
+		expect(description).toMatch(/omitting an item, beneficiary, or charge REMOVES it/i);
 		// The defaults that keep an omitted argument from moving money.
 		expect(description).toMatch(/KEEP what the transaction already has/i);
 	});
 
 	it('requires the full replacement fields, and takes nothing it could be forced to guess', () => {
 		expect(updateTransactionTool.definition.inputSchema).toMatchObject({
-			required: ['groupId', 'txnId', 'title', 'amount', 'splitBetween'],
+			required: ['groupId', 'txnId', 'title'],
 			additionalProperties: false
 		});
 	});
 });
 
 describe('update_transaction — the argument schema', () => {
+	it('advertises an executable schema matching all four complete replacement modes', () => {
+		const valid = new Ajv({ allErrors: true, strict: false }).compile(
+			updateTransactionTool.definition.inputSchema
+		);
+		const base = { groupId: GROUP_ID, txnId: TXN_ID, title: 'Lunch' };
+		expect(valid({ ...base, amount: '10', splitBetween: ['mem_me'] })).toBe(true);
+		expect(valid({ ...base, splitMode: 'equal', amount: '10', splitBetween: ['mem_me'] })).toBe(
+			true
+		);
+		expect(
+			valid({
+				...base,
+				splitMode: 'amount',
+				amount: '10',
+				beneficiaries: [{ memberId: 'mem_me', amount: '10' }]
+			})
+		).toBe(true);
+		expect(
+			valid({
+				...base,
+				splitMode: 'share',
+				amount: '10',
+				beneficiaries: [{ memberId: 'mem_me', shareWeight: 1 }]
+			})
+		).toBe(true);
+		expect(
+			valid({
+				...base,
+				splitMode: 'itemized',
+				items: [
+					{
+						label: 'Meal',
+						amount: '10',
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: 'mem_me' }]
+					}
+				],
+				charges: []
+			})
+		).toBe(true);
+		for (const invalid of [
+			{ ...base, amount: '10', splitBetween: [] },
+			{ ...base, amount: '10', splitBetween: [''] },
+			{ ...base, title: '   ', amount: '10', splitBetween: ['mem_me'] },
+			{ ...base, txnId: '', amount: '10', splitBetween: ['mem_me'] },
+			{ ...base, currency: '', amount: '10', splitBetween: ['mem_me'] },
+			{ ...base, paidBy: '', amount: '10', splitBetween: ['mem_me'] },
+			{ ...base, categoryId: '', amount: '10', splitBetween: ['mem_me'] },
+			{
+				...base,
+				splitMode: 'itemized',
+				amount: '10',
+				items: [
+					{
+						label: 'Meal',
+						amount: '10',
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: 'mem_me' }]
+					}
+				]
+			}
+		])
+			expect(valid(invalid), JSON.stringify(valid.errors)).toBe(false);
+	});
 	it('rejects a hallucinated argument rather than ignoring it (strictObject)', () => {
 		expect(() =>
 			updateTransactionTool.args.parse({ ...CORRECT_THE_AMOUNT, date: '2026-01-01' })
@@ -391,41 +456,9 @@ describe('update_transaction — the transaction it writes', () => {
 
 // ── The SHAPE GATE — the one write in #35 that is NOT reversible ───────────
 
-describe('update_transaction — the shapes it refuses to flatten', () => {
+describe('update_transaction — the shapes it can safely replace', () => {
 	/** Each unsupported shape, and the phrase the refusal must name it by. */
 	const UNSUPPORTED: [string, Partial<TransactionDetail>, RegExp][] = [
-		['an itemized bill', { splitMode: 'itemized' }, /split by items/],
-		['an unequal (amount) split', { splitMode: 'amount' }, /split by amount/],
-		['an unequal (share) split', { splitMode: 'share' }, /split by share/],
-		[
-			'items on the row',
-			{
-				items: [
-					{
-						label: 'Pad thai',
-						amount: 24000,
-						splitMode: 'equal' as const,
-						shares: [{ memberId: 'mem_me', amountOwed: 24000 }]
-					}
-				]
-			},
-			/itemized bill/
-		],
-		[
-			'a service charge',
-			{
-				charges: [
-					{
-						kind: 'service' as const,
-						mode: 'percent' as const,
-						value: 10,
-						base: 'items_subtotal' as const,
-						sortOrder: 0
-					}
-				]
-			},
-			/service charges, VAT, a discount or a tip/
-		],
 		[
 			'several payers',
 			{
@@ -459,20 +492,39 @@ describe('update_transaction — the shapes it refuses to flatten', () => {
 		}
 	);
 
-	it('the refusal says where the edit CAN be made, and that delete is still available', async () => {
-		scriptDetail(existingDetail({ splitMode: 'itemized' }));
-
-		const envelope = await runExpectingError(CORRECT_THE_AMOUNT);
-
-		expect(envelope.message).toMatch(/paywithme app/i);
-		expect(envelope.message).toMatch(/lose that detail irreversibly/i);
-		// Deleting it IS reversible, so the refusal must not leave the agent stuck.
-		expect(envelope.message).toMatch(/delete_transaction/);
-	});
-
 	it('the ordinary simple spending sails through the gate', async () => {
 		await expect(run(CORRECT_THE_AMOUNT)).resolves.toBeDefined();
 		expect(updateTransaction).toHaveBeenCalledOnce();
+	});
+
+	it('replaces an itemized transaction through the shared adapter and derives its total', async () => {
+		const before = existingDetail({
+			splitMode: 'itemized',
+			amountTotal: 10700,
+			amountTotalSettlement: 10700
+		});
+		scriptDetail(before);
+		await run({
+			groupId: GROUP_ID,
+			txnId: TXN_ID,
+			title: 'Receipt',
+			splitMode: 'itemized',
+			items: [
+				{
+					label: 'Meal',
+					amount: '100',
+					splitMode: 'equal',
+					beneficiaries: [{ memberId: 'mem_me' }]
+				}
+			],
+			charges: [{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' }]
+		});
+		expect(inputPassed()).toMatchObject({
+			splitMode: 'itemized',
+			amountTotal: 10800,
+			items: [{ label: 'Meal', amount: 10000, beneficiaries: [{ memberId: 'mem_me' }] }],
+			charges: [{ kind: 'vat', mode: 'percent', value: 800, base: 'items_subtotal', sortOrder: 0 }]
+		});
 	});
 });
 

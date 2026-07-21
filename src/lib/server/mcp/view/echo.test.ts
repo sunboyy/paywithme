@@ -125,6 +125,37 @@ describe('buildEchoBack', () => {
 		expect(echo).toContain('split equally 3 ways: you, Bob and Nan Suphaporn.');
 	});
 
+	it.each([
+		['amount', 'split by exact amounts among 2 ways'],
+		['share', 'split by share weights among 2 ways']
+	] as const)('describes a rich %s split without claiming it is equal', (splitMode, phrase) => {
+		const echo = echoFor({ splitMode });
+		expect(echo).toContain(phrase);
+		expect(echo).not.toContain('split equally');
+	});
+
+	it('describes an itemized spending by its persisted item count', () => {
+		const echo = echoFor({
+			splitMode: 'itemized',
+			items: [
+				{
+					label: 'Food',
+					amount: 20000,
+					splitMode: 'equal',
+					shares: [{ memberId: 'mem_me', amountOwed: 10000 }]
+				},
+				{
+					label: 'Drinks',
+					amount: 4000,
+					splitMode: 'equal',
+					shares: [{ memberId: 'mem_nan', amountOwed: 2000 }]
+				}
+			]
+		});
+		expect(echo).toContain('split by 2 items among 2 ways');
+		expect(echo).not.toContain('split equally');
+	});
+
 	it('renders a 0-exponent currency with no decimal point (JPY, ADR-0004)', () => {
 		const echo = echoFor(
 			{
@@ -386,6 +417,27 @@ function viewOf(overrides: Partial<TransactionDetail> = {}) {
 }
 
 describe('changedFields', () => {
+	const richInput = (overrides: Record<string, unknown> = {}) =>
+		({
+			type: 'spending',
+			title: 'Lunch',
+			date: '2026-07-15',
+			categoryId: 'spending-food-drink',
+			amountTotal: 24000,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 24000,
+			splitMode: 'share',
+			payers: [{ memberId: 'mem_me', amountPaid: 24000 }],
+			beneficiaries: [
+				{ memberId: 'mem_me', shareWeight: 1 },
+				{ memberId: 'mem_nan', shareWeight: 1 }
+			],
+			items: [],
+			charges: [],
+			...overrides
+		}) as TransactionDetail['input'];
+
 	it('names each field an update actually replaced', () => {
 		const before = viewOf();
 		const after = viewOf({
@@ -440,6 +492,99 @@ describe('changedFields', () => {
 		const after = viewOf({ amountTotal: 99999 });
 
 		expect(changedFields({ before, after })).toEqual([]);
+	});
+
+	it('detects split mode and raw beneficiary amount/weight changes even when resolved members match', () => {
+		const before = viewOf({ splitMode: 'share', input: richInput() });
+		const afterWeight = viewOf({
+			splitMode: 'share',
+			input: richInput({
+				beneficiaries: [
+					{ memberId: 'mem_me', shareWeight: 2 },
+					{ memberId: 'mem_nan', shareWeight: 1 }
+				]
+			})
+		});
+		const afterAmount = viewOf({
+			splitMode: 'amount',
+			input: richInput({
+				splitMode: 'amount',
+				beneficiaries: [
+					{ memberId: 'mem_me', rawAmount: 12000 },
+					{ memberId: 'mem_nan', rawAmount: 12000 }
+				]
+			})
+		});
+		expect(changedFields({ before, after: afterWeight })).toContain('beneficiaries');
+		expect(changedFields({ before, after: afterAmount })).toEqual(
+			expect.arrayContaining(['splitMode', 'beneficiaries'])
+		);
+	});
+
+	it('detects item content, order, and nested beneficiary changes', () => {
+		const items = [
+			{
+				label: 'A',
+				amount: 10000,
+				splitMode: 'equal' as const,
+				beneficiaries: [{ memberId: 'mem_me' }]
+			},
+			{
+				label: 'B',
+				amount: 14000,
+				splitMode: 'share' as const,
+				beneficiaries: [{ memberId: 'mem_nan', shareWeight: 1 }]
+			}
+		];
+		const before = viewOf({
+			splitMode: 'itemized',
+			input: richInput({ splitMode: 'itemized', beneficiaries: [], items })
+		});
+		for (const changedItems of [
+			[{ ...items[0], amount: 11000 }, items[1]],
+			[items[1], items[0]],
+			[{ ...items[0], beneficiaries: [{ memberId: 'mem_nan' }] }, items[1]]
+		])
+			expect(
+				changedFields({
+					before,
+					after: viewOf({
+						splitMode: 'itemized',
+						input: richInput({ splitMode: 'itemized', beneficiaries: [], items: changedItems })
+					})
+				})
+			).toContain('items');
+	});
+
+	it('detects charge value, base, and order changes', () => {
+		const charges = [
+			{
+				kind: 'vat' as const,
+				mode: 'percent' as const,
+				value: 700,
+				base: 'items_subtotal' as const,
+				sortOrder: 0
+			},
+			{
+				kind: 'tip' as const,
+				mode: 'absolute' as const,
+				value: 1000,
+				base: 'running_total' as const,
+				sortOrder: 1
+			}
+		];
+		const before = viewOf({ input: richInput({ charges }) });
+		for (const changedCharges of [
+			[{ ...charges[0], value: 800 }, charges[1]],
+			[{ ...charges[0], base: 'running_total' as const }, charges[1]],
+			[
+				{ ...charges[1], sortOrder: 0 },
+				{ ...charges[0], sortOrder: 1 }
+			]
+		])
+			expect(
+				changedFields({ before, after: viewOf({ input: richInput({ charges: changedCharges }) }) })
+			).toContain('charges');
 	});
 });
 

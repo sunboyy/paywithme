@@ -40,13 +40,17 @@
 // `cleanupSuiteRows()`. A second consecutive run is green.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
 import { addMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
-import { transactions as transactionsTable } from '$lib/server/db/transactions-schema';
+import {
+	transactionCharges,
+	transactionShares,
+	transactions as transactionsTable
+} from '$lib/server/db/transactions-schema';
 import { auditLog } from '$lib/server/db/audit-schema';
 import { MCP_PROTOCOL_VERSION } from '$lib/server/mcp/protocol';
 import { MCP_TOOLS, filterToolsByScope } from '$lib/server/mcp/tools';
@@ -131,6 +135,20 @@ interface TransactionWire {
 	isDeleted: boolean;
 	payers: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountPaid: MoneyWire }[];
 	shares: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountOwed: MoneyWire }[];
+	editable?: {
+		title: UntrustedWire;
+		categoryId: string;
+		currency: string;
+		paidBy: string | null;
+		splitMode: string;
+		items: {
+			label: UntrustedWire;
+			amount: string;
+			splitMode: string;
+			beneficiaries: { memberId: string; amount?: string; shareWeight?: number }[];
+		}[];
+		charges: { kind: string; mode: string; percent?: string; amount?: string; base: string }[];
+	};
 	_note: string;
 }
 
@@ -1138,7 +1156,16 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		/** The write result payload (the fields these tests read). */
 		interface CreatedWire {
-			recorded: TransactionWire & { id: string; groupId: string };
+			recorded: TransactionWire & {
+				id: string;
+				groupId: string;
+				splitMode: 'equal' | 'amount' | 'share' | 'itemized';
+				items: { label: UntrustedWire; amount: MoneyWire; splitMode: string }[];
+				charges: (
+					| { kind: string; mode: 'percent'; percent: number; base: string }
+					| { kind: string; mode: 'absolute'; amount: MoneyWire; base: string }
+				)[];
+			};
 			echo: string;
 			_note: string;
 		}
@@ -1179,6 +1206,121 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(rows).toHaveLength(1);
 			// JPY exponent 0: "2400" is 2400 minor units, NOT 240000.
 			expect(rows[0].amountTotal).toBe(2400);
+		});
+
+		it('derives the canonical itemized service-then-VAT total and persists charge order', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Team receipt',
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '100.00',
+							splitMode: 'amount',
+							beneficiaries: [
+								{ memberId: s.alice, amount: '40.00' },
+								{ memberId: s.bob, amount: '60.00' }
+							]
+						},
+						{
+							label: 'Drinks',
+							amount: '50.00',
+							splitMode: 'share',
+							beneficiaries: [
+								{ memberId: s.alice, shareWeight: 1 },
+								{ memberId: s.bob, shareWeight: 2 }
+							]
+						}
+					],
+					charges: [
+						{ kind: 'service', mode: 'percent', percent: '10', base: 'items_subtotal' },
+						{ kind: 'vat', mode: 'percent', percent: '7', base: 'running_total' }
+					]
+				},
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const rows = await txnRows(s.group.id);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({ splitMode: 'itemized', amountTotal: 17_655 });
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			expect(payload.recorded.amount.amount).toBe('176.55');
+			expect(payload.recorded.items.map((item) => item.label.value)).toEqual(['Food', 'Drinks']);
+			expect(payload.recorded.charges).toMatchObject([
+				{ kind: 'service', mode: 'percent', percent: 10 },
+				{ kind: 'vat', mode: 'percent', percent: 7 }
+			]);
+			const persistedCharges = await db
+				.select()
+				.from(transactionCharges)
+				.where(eq(transactionCharges.transactionId, payload.recorded.id))
+				.orderBy(asc(transactionCharges.sortOrder));
+			expect(persistedCharges).toMatchObject([
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 }
+			]);
+			const resolved = await db
+				.select()
+				.from(transactionShares)
+				.where(eq(transactionShares.transactionId, payload.recorded.id));
+			expect(resolved.map((row) => row.memberId).sort()).toEqual([s.alice, s.bob].sort());
+			expect(resolved.reduce((sum, row) => sum + row.amountOwed, 0)).toBe(17_655);
+			expect(payload.echo).toContain('split by 2 items');
+			expect(payload.echo).not.toContain('split equally');
+		});
+
+		it('records a top-level exact-amount split through the real MCP boundary', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Unequal taxi',
+					splitMode: 'amount',
+					amount: '30.00',
+					beneficiaries: [
+						{ memberId: s.alice, amount: '10.00' },
+						{ memberId: s.bob, amount: '20.00' }
+					]
+				},
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			const amountsByMember = Object.fromEntries(
+				payload.recorded.shares.map((row) => [row.memberId, row.amountOwed.amount])
+			);
+			expect(amountsByMember).toEqual({ [s.alice]: '10.00', [s.bob]: '20.00' });
+		});
+
+		it('rejects an unknown nested item beneficiary at its MCP path before writing', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Bad receipt',
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '10.00',
+							splitMode: 'equal',
+							beneficiaries: [{ memberId: 'mem_not_in_this_group' }]
+						}
+					]
+				},
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({
+				fieldErrors: { 'items.0.beneficiaries.0.memberId': expect.any(Array) }
+			});
+			expect(await txnRows(s.group.id)).toHaveLength(0);
 		});
 
 		it('OVER-PRECISION is a hard error, never a silent round ("240.005" in THB)', async () => {
@@ -1418,6 +1560,39 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(retry.recorded.id).toBe(first.recorded.id);
 			expect(retry.replayed).toBe(true);
 			expect(first.replayed).toBe(false);
+		});
+
+		it('fingerprints complete nested rich arguments: identical itemized retries replay, a nested change does not', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const args = {
+				groupId: s.group.id,
+				title: 'Receipt',
+				splitMode: 'itemized',
+				items: [
+					{
+						label: 'Meal',
+						amount: '100.00',
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: s.alice }]
+					}
+				],
+				charges: [{ kind: 'vat', mode: 'percent', percent: '7', base: 'items_subtotal' }]
+			};
+			const call = async (arguments_: Record<string, unknown>) => {
+				const res = await mcpToolCall('create_transaction', arguments_, { key: s.writeKey.key });
+				expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+				return res.body.result?.structuredContent as unknown as CreatedWire;
+			};
+			const first = await call(args);
+			advance(2);
+			const retry = await call(args);
+			expect(retry.replayed).toBe(true);
+			expect(retry.recorded.id).toBe(first.recorded.id);
+			expect(await rows()).toHaveLength(1);
+			advance(2);
+			const changed = await call({ ...args, charges: [{ ...args.charges[0], percent: '8' }] });
+			expect(changed.replayed).toBe(false);
+			expect(await rows()).toHaveLength(2);
 		});
 
 		it('the replay is SURFACED in the echo-back — "already recorded 3 seconds ago", not hidden', async () => {
@@ -2278,10 +2453,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				expect(envelope.error.message).toMatch(/restore_transaction/);
 			});
 
-			it('REFUSES to flatten an ITEMIZED bill rather than destroy it irreversibly', async () => {
-				// The one write in #35 that reversibility does NOT cover: nothing undoes an
-				// overwrite (§16.6 — last-write-wins, no version column), and these arguments
-				// cannot express items, per-item shares or charges. So it is refused.
+			it('round-trips get_transaction editable itemized data and mutates VAT without detail loss', async () => {
 				const txnId = await createTransaction({
 					userId: s.user.id,
 					groupId: s.group.id,
@@ -2290,49 +2462,107 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						type: 'spending' as const,
 						title: 'Itemized dinner',
 						categoryId: SPENDING_CATEGORY,
-						amountTotal: 9000,
+						amountTotal: 9530,
 						currency: SETTLEMENT_CURRENCY,
 						exchangeRate: '1',
-						amountTotalSettlement: 9000,
+						amountTotalSettlement: 9530,
 						splitMode: 'itemized' as const,
-						payers: [{ memberId: s.alice, amountPaid: 9000 }],
+						payers: [{ memberId: s.alice, amountPaid: 9530 }],
 						beneficiaries: [],
 						items: [
 							{
 								label: 'Pad thai',
 								amount: 5000,
-								splitMode: 'equal' as const,
-								shares: [{ memberId: s.alice }]
+								splitMode: 'share' as const,
+								beneficiaries: [
+									{ memberId: s.alice, shareWeight: 2 },
+									{ memberId: s.bob, shareWeight: 1 }
+								]
 							},
 							{
 								label: 'Tom yum',
 								amount: 4000,
 								splitMode: 'equal' as const,
-								shares: [{ memberId: s.bob }]
+								beneficiaries: [{ memberId: s.bob }]
 							}
 						],
-						charges: []
+						charges: [
+							{ kind: 'vat', mode: 'percent', value: 700, base: 'items_subtotal', sortOrder: 0 },
+							{
+								kind: 'discount',
+								mode: 'absolute',
+								value: 300,
+								base: 'running_total',
+								sortOrder: 1
+							},
+							{ kind: 'tip', mode: 'absolute', value: 200, base: 'running_total', sortOrder: 2 }
+						]
 					}
 				});
-
-				const res = await callWrite('update_transaction', {
-					txnId,
-					title: 'Itemized dinner',
-					amount: '95.00',
-					splitBetween: [s.alice, s.bob]
+				const readBack = await callOk<TransactionWire>('get_transaction', {
+					groupId: s.group.id,
+					transactionId: txnId
 				});
-
-				expect(res.body.result?.isError).toBe(true);
-				const envelope = toolErrorEnvelope(res.body.result);
-				expect(envelope.error.code).toBe('validation_error');
-				expect(envelope.error.message).toMatch(/paywithme app/i);
-				// The itemized breakdown survives, untouched.
+				const editable = readBack.editable!;
+				const unchangedArgs = {
+					txnId,
+					title: editable.title.value,
+					splitMode: editable.splitMode,
+					paidBy: editable.paidBy,
+					categoryId: editable.categoryId,
+					items: editable.items.map((item) => ({ ...item, label: item.label.value })),
+					charges: editable.charges
+				};
+				const unchanged = await callWriteOk<{ changed: string[] }>(
+					'update_transaction',
+					unchangedArgs
+				);
+				expect(unchanged.changed).toEqual([]);
+				const payload = await callWriteOk<{ changed: string[] }>('update_transaction', {
+					...unchangedArgs,
+					charges: editable.charges.map((charge) =>
+						charge.mode === 'percent' ? { ...charge, percent: '8' } : charge
+					)
+				});
+				expect(payload.changed).toContain('charges');
 				const [row] = await db
 					.select()
 					.from(transactionsTable)
 					.where(eq(transactionsTable.id, txnId));
 				expect(row.splitMode).toBe('itemized');
-				expect(row.amountTotal).toBe(9000);
+				expect(row.amountTotal).toBe(9620);
+				const persisted = await callOk<TransactionWire>('get_transaction', {
+					groupId: s.group.id,
+					transactionId: txnId
+				});
+				const persistedItems = persisted.editable!.items;
+				expect(
+					persistedItems.map(({ label, amount, splitMode }) => ({ label, amount, splitMode }))
+				).toEqual([
+					{
+						label: expect.objectContaining({ value: 'Pad thai' }),
+						amount: '50.00',
+						splitMode: 'share'
+					},
+					{
+						label: expect.objectContaining({ value: 'Tom yum' }),
+						amount: '40.00',
+						splitMode: 'equal'
+					}
+				]);
+				const firstItemWeights = Object.fromEntries(
+					persistedItems[0].beneficiaries.map((beneficiary) => [
+						beneficiary.memberId,
+						beneficiary.shareWeight
+					])
+				);
+				expect(firstItemWeights).toEqual({ [s.alice]: 2, [s.bob]: 1 });
+				expect(persistedItems[1].beneficiaries).toEqual([{ memberId: s.bob }]);
+				expect(persisted.editable?.charges).toEqual([
+					{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' },
+					{ kind: 'discount', mode: 'absolute', amount: '3.00', base: 'running_total' },
+					{ kind: 'tip', mode: 'absolute', amount: '2.00', base: 'running_total' }
+				]);
 			});
 
 			it('a READ key calling it is refused forbidden_scope, and changes NOTHING (ADR-0002)', async () => {

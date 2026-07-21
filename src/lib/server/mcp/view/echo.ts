@@ -134,10 +134,24 @@ function describeTransaction({
 	const beneficiaries = view.shares.map(proseName);
 	const splitCount = beneficiaries.length;
 	const ways = splitCount === 1 ? '1 way' : `${splitCount} ways`;
+	const splitDescription = (() => {
+		switch (view.splitMode) {
+			case 'equal':
+				return `split equally ${ways}`;
+			case 'amount':
+				return `split by exact amounts among ${ways}`;
+			case 'share':
+				return `split by share weights among ${ways}`;
+			case 'itemized': {
+				const itemCount = view.items.length;
+				return `split by ${itemCount} ${itemCount === 1 ? 'item' : 'items'} among ${ways}`;
+			}
+		}
+	})();
 
 	return (
 		`${view.type} "${view.title.value}" — ${amount}, paid by ${paidBy}, ` +
-		`split equally ${ways}: ${joinNames(beneficiaries)}`
+		`${splitDescription}: ${joinNames(beneficiaries)}`
 	);
 }
 
@@ -220,7 +234,16 @@ export function buildSettleUpEchoBack({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The fields `update_transaction` can replace — the vocabulary a change list speaks. */
-export type ChangedField = 'title' | 'amount' | 'category' | 'paidBy' | 'splitBetween';
+export type ChangedField =
+	| 'title'
+	| 'amount'
+	| 'category'
+	| 'paidBy'
+	| 'splitMode'
+	| 'splitBetween'
+	| 'beneficiaries'
+	| 'items'
+	| 'charges';
 
 /** How each changed field is spoken in the echo's prose. */
 const CHANGE_PROSE: Record<ChangedField, string> = {
@@ -228,7 +251,11 @@ const CHANGE_PROSE: Record<ChangedField, string> = {
 	amount: 'the amount',
 	category: 'the category',
 	paidBy: 'who paid',
-	splitBetween: 'who it is split between'
+	splitMode: 'the split mode',
+	splitBetween: 'who it is split between',
+	beneficiaries: 'the beneficiary amounts or share weights',
+	items: 'the itemized breakdown',
+	charges: 'the ordered charges'
 };
 
 /** Do two member-line lists name the SAME members? Order-insensitive — a re-ordered `splitBetween` is not a change. */
@@ -268,7 +295,30 @@ export function changedFields({
 	if (before.settlementAmount.amount !== after.settlementAmount.amount) changed.push('amount');
 	if (before.category.id !== after.category.id) changed.push('category');
 	if (!sameMembers(before.payers, after.payers)) changed.push('paidBy');
-	if (!sameMembers(before.shares, after.shares)) changed.push('splitBetween');
+	if (before.splitMode !== after.splitMode) changed.push('splitMode');
+	if (
+		before.splitMode === 'equal' &&
+		after.splitMode === 'equal' &&
+		!sameMembers(before.shares, after.shares)
+	)
+		changed.push('splitBetween');
+	const comparableBeneficiaries = (view: TransactionView) =>
+		view.editable.beneficiaries.map(({ memberId, amount, shareWeight }) => ({
+			memberId,
+			...(amount !== undefined ? { amount } : {}),
+			...(shareWeight !== undefined ? { shareWeight } : {})
+		}));
+	if (
+		JSON.stringify(comparableBeneficiaries(before)) !==
+		JSON.stringify(comparableBeneficiaries(after))
+	)
+		changed.push('beneficiaries');
+	const comparableItems = (view: TransactionView) =>
+		view.editable.items.map((item) => ({ ...item, label: item.label.value }));
+	if (JSON.stringify(comparableItems(before)) !== JSON.stringify(comparableItems(after)))
+		changed.push('items');
+	if (JSON.stringify(before.editable.charges) !== JSON.stringify(after.editable.charges))
+		changed.push('charges');
 	return changed;
 }
 
