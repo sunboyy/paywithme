@@ -38,6 +38,14 @@ export const MCP_SERVER_INSTRUCTIONS =
 	'and balances. MCP money amounts are DECIMAL STRINGS paired with a currency. When ' +
 	'calling a write tool, send the decimal string exactly as the user stated it (for ' +
 	'example, "12.50" USD); never multiply by 100 or convert currency exponents yourself. ' +
+	'Percentages are decimal strings too. Transaction writes accept the legacy equal shape ' +
+	'(`amount` plus `splitBetween`) and mode-specific amount, share, or itemized shapes. ' +
+	'Preserve array order: item and charge order is significant. The server derives itemized ' +
+	'totals, ordered-charge arithmetic, payer totals, and resolved shares; never calculate ' +
+	'those values yourself. Before `update_transaction`, call `get_transaction`, copy its ' +
+	'complete `editable` shape, unwrap authored `.value` fields, and change only the intended ' +
+	'values: update is full replacement, so omitted items, beneficiaries, or charges are removed. ' +
+	'Assistant writes currently support one payer and the group settlement currency only. ' +
 	'The ledger stores integer minor units internally, and write results may echo those ' +
 	'units explicitly so the interpretation is visible. The tools you ' +
 	'can see depend on the API key in use: a read-only key exposes no tools that ' +

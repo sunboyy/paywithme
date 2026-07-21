@@ -40,13 +40,17 @@
 // `cleanupSuiteRows()`. A second consecutive run is green.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
 import { addMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
-import { transactions as transactionsTable } from '$lib/server/db/transactions-schema';
+import {
+	transactionCharges,
+	transactionShares,
+	transactions as transactionsTable
+} from '$lib/server/db/transactions-schema';
 import { auditLog } from '$lib/server/db/audit-schema';
 import { MCP_PROTOCOL_VERSION } from '$lib/server/mcp/protocol';
 import { MCP_TOOLS, filterToolsByScope } from '$lib/server/mcp/tools';
@@ -137,7 +141,12 @@ interface TransactionWire {
 		currency: string;
 		paidBy: string | null;
 		splitMode: string;
-		items: { label: UntrustedWire; amount: string; splitMode: string; beneficiaries: unknown[] }[];
+		items: {
+			label: UntrustedWire;
+			amount: string;
+			splitMode: string;
+			beneficiaries: { memberId: string; amount?: string; shareWeight?: number }[];
+		}[];
 		charges: { kind: string; mode: string; percent?: string; amount?: string; base: string }[];
 	};
 	_note: string;
@@ -1199,7 +1208,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(rows[0].amountTotal).toBe(2400);
 		});
 
-		it('records an itemized spending with a server-derived total and ordered rich charges', async () => {
+		it('derives the canonical itemized service-then-VAT total and persists charge order', async () => {
 			const res = await mcpToolCall(
 				'create_transaction',
 				{
@@ -1228,7 +1237,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					],
 					charges: [
 						{ kind: 'service', mode: 'percent', percent: '10', base: 'items_subtotal' },
-						{ kind: 'discount', mode: 'absolute', amount: '5.00', base: 'running_total' }
+						{ kind: 'vat', mode: 'percent', percent: '7', base: 'running_total' }
 					]
 				},
 				writeKeyOf()
@@ -1237,16 +1246,54 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
 			const rows = await txnRows(s.group.id);
 			expect(rows).toHaveLength(1);
-			expect(rows[0]).toMatchObject({ splitMode: 'itemized', amountTotal: 16_000 });
+			expect(rows[0]).toMatchObject({ splitMode: 'itemized', amountTotal: 17_655 });
 			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
-			expect(payload.recorded.amount.amount).toBe('160.00');
+			expect(payload.recorded.amount.amount).toBe('176.55');
 			expect(payload.recorded.items.map((item) => item.label.value)).toEqual(['Food', 'Drinks']);
 			expect(payload.recorded.charges).toMatchObject([
 				{ kind: 'service', mode: 'percent', percent: 10 },
-				{ kind: 'discount', mode: 'absolute', amount: { amount: '5.00', currency: 'USD' } }
+				{ kind: 'vat', mode: 'percent', percent: 7 }
 			]);
+			const persistedCharges = await db
+				.select()
+				.from(transactionCharges)
+				.where(eq(transactionCharges.transactionId, payload.recorded.id))
+				.orderBy(asc(transactionCharges.sortOrder));
+			expect(persistedCharges).toMatchObject([
+				{ kind: 'service', mode: 'percent', value: 1000, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'vat', mode: 'percent', value: 700, base: 'running_total', sortOrder: 1 }
+			]);
+			const resolved = await db
+				.select()
+				.from(transactionShares)
+				.where(eq(transactionShares.transactionId, payload.recorded.id));
+			expect(resolved.map((row) => row.memberId).sort()).toEqual([s.alice, s.bob].sort());
+			expect(resolved.reduce((sum, row) => sum + row.amountOwed, 0)).toBe(17_655);
 			expect(payload.echo).toContain('split by 2 items');
 			expect(payload.echo).not.toContain('split equally');
+		});
+
+		it('records a top-level exact-amount split through the real MCP boundary', async () => {
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Unequal taxi',
+					splitMode: 'amount',
+					amount: '30.00',
+					beneficiaries: [
+						{ memberId: s.alice, amount: '10.00' },
+						{ memberId: s.bob, amount: '20.00' }
+					]
+				},
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
+			const amountsByMember = Object.fromEntries(
+				payload.recorded.shares.map((row) => [row.memberId, row.amountOwed.amount])
+			);
+			expect(amountsByMember).toEqual({ [s.alice]: '10.00', [s.bob]: '20.00' });
 		});
 
 		it('rejects an unknown nested item beneficiary at its MCP path before writing', async () => {
@@ -1513,6 +1560,39 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(retry.recorded.id).toBe(first.recorded.id);
 			expect(retry.replayed).toBe(true);
 			expect(first.replayed).toBe(false);
+		});
+
+		it('fingerprints complete nested rich arguments: identical itemized retries replay, a nested change does not', async () => {
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const args = {
+				groupId: s.group.id,
+				title: 'Receipt',
+				splitMode: 'itemized',
+				items: [
+					{
+						label: 'Meal',
+						amount: '100.00',
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: s.alice }]
+					}
+				],
+				charges: [{ kind: 'vat', mode: 'percent', percent: '7', base: 'items_subtotal' }]
+			};
+			const call = async (arguments_: Record<string, unknown>) => {
+				const res = await mcpToolCall('create_transaction', arguments_, { key: s.writeKey.key });
+				expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
+				return res.body.result?.structuredContent as unknown as CreatedWire;
+			};
+			const first = await call(args);
+			advance(2);
+			const retry = await call(args);
+			expect(retry.replayed).toBe(true);
+			expect(retry.recorded.id).toBe(first.recorded.id);
+			expect(await rows()).toHaveLength(1);
+			advance(2);
+			const changed = await call({ ...args, charges: [{ ...args.charges[0], percent: '8' }] });
+			expect(changed.replayed).toBe(false);
+			expect(await rows()).toHaveLength(2);
 		});
 
 		it('the replay is SURFACED in the echo-back — "already recorded 3 seconds ago", not hidden', async () => {
@@ -2419,18 +2499,27 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						]
 					}
 				});
-				const readBack = await callOk<{ transaction: TransactionWire }>('get_transaction', {
+				const readBack = await callOk<TransactionWire>('get_transaction', {
 					groupId: s.group.id,
-					txnId
+					transactionId: txnId
 				});
-				const editable = readBack.transaction.editable!;
-				const payload = await callWriteOk<{ changed: string[] }>('update_transaction', {
+				const editable = readBack.editable!;
+				const unchangedArgs = {
 					txnId,
 					title: editable.title.value,
 					splitMode: editable.splitMode,
 					paidBy: editable.paidBy,
 					categoryId: editable.categoryId,
 					items: editable.items.map((item) => ({ ...item, label: item.label.value })),
+					charges: editable.charges
+				};
+				const unchanged = await callWriteOk<{ changed: string[] }>(
+					'update_transaction',
+					unchangedArgs
+				);
+				expect(unchanged.changed).toEqual([]);
+				const payload = await callWriteOk<{ changed: string[] }>('update_transaction', {
+					...unchangedArgs,
 					charges: editable.charges.map((charge) =>
 						charge.mode === 'percent' ? { ...charge, percent: '8' } : charge
 					)
@@ -2442,28 +2531,34 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					.where(eq(transactionsTable.id, txnId));
 				expect(row.splitMode).toBe('itemized');
 				expect(row.amountTotal).toBe(9620);
-				const persisted = await callOk<{ transaction: TransactionWire }>('get_transaction', {
+				const persisted = await callOk<TransactionWire>('get_transaction', {
 					groupId: s.group.id,
-					txnId
+					transactionId: txnId
 				});
-				expect(persisted.transaction.editable?.items).toEqual([
+				const persistedItems = persisted.editable!.items;
+				expect(
+					persistedItems.map(({ label, amount, splitMode }) => ({ label, amount, splitMode }))
+				).toEqual([
 					{
 						label: expect.objectContaining({ value: 'Pad thai' }),
 						amount: '50.00',
-						splitMode: 'share',
-						beneficiaries: [
-							{ memberId: s.alice, shareWeight: 2 },
-							{ memberId: s.bob, shareWeight: 1 }
-						]
+						splitMode: 'share'
 					},
 					{
 						label: expect.objectContaining({ value: 'Tom yum' }),
 						amount: '40.00',
-						splitMode: 'equal',
-						beneficiaries: [{ memberId: s.bob }]
+						splitMode: 'equal'
 					}
 				]);
-				expect(persisted.transaction.editable?.charges).toEqual([
+				const firstItemWeights = Object.fromEntries(
+					persistedItems[0].beneficiaries.map((beneficiary) => [
+						beneficiary.memberId,
+						beneficiary.shareWeight
+					])
+				);
+				expect(firstItemWeights).toEqual({ [s.alice]: 2, [s.bob]: 1 });
+				expect(persistedItems[1].beneficiaries).toEqual([{ memberId: s.bob }]);
+				expect(persisted.editable?.charges).toEqual([
 					{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' },
 					{ kind: 'discount', mode: 'absolute', amount: '3.00', base: 'running_total' },
 					{ kind: 'tip', mode: 'absolute', amount: '2.00', base: 'running_total' }
