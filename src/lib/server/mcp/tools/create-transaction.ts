@@ -51,7 +51,11 @@
 import { z } from 'zod';
 import { parseAmount } from '$lib/money';
 import { categoriesFor } from '$lib/categories';
-import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
+import {
+	createTransaction,
+	getTransactionDetail,
+	TransactionValidationError
+} from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { createDbIdempotencyStore } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
@@ -71,6 +75,32 @@ import { loadGroupView, loadMemberViews } from './load';
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
 const TOOL_NAME = 'create_transaction';
 
+/** The category contract advertised to the model and enforced at the tool boundary. */
+const SPENDING_CATEGORY_IDS = categoriesFor('spending').map((category) => category.id);
+
+/** A genuinely generic fallback; the previous first-row fallback was Food & Drink. */
+const DEFAULT_SPENDING_CATEGORY_ID = 'spending-other';
+
+/** Translate internal transaction-schema paths back to the MCP argument vocabulary. */
+const MCP_FIELD_FOR_INTERNAL_FIELD: Readonly<Record<string, string>> = {
+	amountTotal: 'amount',
+	amountTotalSettlement: 'amount',
+	exchangeRate: 'amount',
+	payers: 'paidBy',
+	beneficiaries: 'splitBetween'
+};
+
+function remapTransactionValidationError(error: TransactionValidationError) {
+	return new TransactionValidationError(
+		error.issues.map((issue) => {
+			const [first, ...rest] = issue.path;
+			const mapped = typeof first === 'string' ? MCP_FIELD_FOR_INTERNAL_FIELD[first] : undefined;
+			return mapped === undefined ? issue : { ...issue, path: [mapped, ...rest] };
+		}),
+		error.message
+	);
+}
+
 /**
  * The payload a successful create produces, and the one a REPLAY reads back out of
  * the idempotency store. Every field is JSON-scalar (the view layer emits dates as
@@ -85,7 +115,11 @@ interface CreatedPayload {
 
 const createTransactionArgs = z.strictObject({
 	groupId: groupIdArg,
-	title: z.string().min(1, 'A title is required.'),
+	title: z
+		.string()
+		.min(1, 'A title is required.')
+		.max(200, 'Title must be 200 characters or fewer.')
+		.regex(/\S/, 'A title is required.'),
 	// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
 	amount: amountArg,
 	// OPTIONAL: FX is deferred, so this defaults to (and must equal) the group's
@@ -95,8 +129,12 @@ const createTransactionArgs = z.strictObject({
 	paidBy: z.string().min(1).optional(),
 	// REQUIRED: the equal-split beneficiaries, by member id (never names, ADR-0006).
 	splitBetween: z.array(z.string().min(1)).min(1, 'List at least one member id to split between.'),
-	// OPTIONAL: defaults to the first spending category.
-	categoryId: z.string().min(1).optional()
+	// OPTIONAL: defaults to the genuinely generic Other category. The enum is also
+	// advertised in JSON Schema, so the model can choose without guessing an id.
+	categoryId: z
+		.string()
+		.refine((id) => SPENDING_CATEGORY_IDS.includes(id), 'Choose a valid spending category id.')
+		.optional()
 });
 
 export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs>> = {
@@ -115,8 +153,9 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			'server does the currency math, so never multiply by 100 or convert exponents. The ' +
 			"amount must be in the group's settlement currency (logging a foreign currency via the " +
 			'assistant is not supported yet). Defaults: `paidBy` is you, `splitBetween` has no ' +
-			'default (you must list it), `currency` is the group settlement currency, `categoryId` ' +
-			'is a general spending category. The result echoes back what was recorded, naming the ' +
+			'default (you must list it), `currency` is the group settlement currency, and ' +
+			'`categoryId` defaults to Other. Choose another category from the enum advertised in ' +
+			'the input schema. The result echoes back what was recorded, naming the ' +
 			'people involved, so you and the user can confirm the interpretation. If a call seems ' +
 			'to have failed, an identical retry within about a minute is de-duplicated rather than ' +
 			'recorded twice, and the result will say so — but after that, an identical call records ' +
@@ -128,10 +167,14 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				groupId: GROUP_ID_PROPERTY,
 				title: {
 					type: 'string',
+					minLength: 1,
+					maxLength: 200,
+					pattern: '\\S',
 					description: 'A short human title for the spending, e.g. "Lunch". Required.'
 				},
 				amount: {
 					type: 'string',
+					pattern: '^\\d+(\\.\\d{1,4})?$',
 					description:
 						'The amount as a DECIMAL STRING, stated exactly as the user said it: "240", ' +
 						'"240.00", "1234.5". No currency symbol, no thousands separators, no negative ' +
@@ -140,6 +183,7 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				},
 				currency: {
 					type: 'string',
+					minLength: 1,
 					description:
 						"OPTIONAL ISO-4217 code. Must equal the group's settlement currency (call " +
 						'`get_group` to see it); omit to default to it. Foreign-currency logging via the ' +
@@ -147,21 +191,23 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				},
 				paidBy: {
 					type: 'string',
+					minLength: 1,
 					description:
 						'OPTIONAL member id of who paid, from `list_members`. Defaults to YOU (your own ' +
 						'member in this group). Never a name.'
 				},
 				splitBetween: {
 					type: 'array',
-					items: { type: 'string' },
+					minItems: 1,
+					items: { type: 'string', minLength: 1 },
 					description:
 						'REQUIRED array of member ids (from `list_members`) to split the cost equally ' +
 						'between. Match each person the user named to an id yourself. Never names.'
 				},
 				categoryId: {
 					type: 'string',
-					description:
-						'OPTIONAL spending category id. Defaults to a general spending category if omitted.'
+					enum: SPENDING_CATEGORY_IDS,
+					description: `OPTIONAL spending category id. Defaults to ${DEFAULT_SPENDING_CATEGORY_ID} (Other) if omitted.`
 				}
 			},
 			required: ['groupId', 'title', 'amount', 'splitBetween'],
@@ -207,7 +253,8 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				'validation_error',
 				`This group settles in ${settlementCurrency}. Logging in a different currency ` +
 					`(${currency}) via the assistant is not supported yet — state the amount in ` +
-					`${settlementCurrency}.`
+					`${settlementCurrency}.`,
+				{ fieldErrors: { currency: [`Currency must be ${settlementCurrency} for this group.`] } }
 			);
 		}
 
@@ -223,13 +270,40 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			return toolError(
 				'validation_error',
 				'You are not an active member of this group, so `paidBy` cannot default to you. ' +
-					'Pass an explicit `paidBy` member id from `list_members`.'
+					'Pass an explicit `paidBy` member id from `list_members`.',
+				{ fieldErrors: { paidBy: ['Pass an active member id from `list_members`.'] } }
 			);
 		}
 
-		// Default the category to a general spending category (§7.3). Unknown / mismatched
-		// ids are re-validated server-side by `createTransaction` → validation_error.
-		const resolvedCategoryId = categoryId ?? categoriesFor('spending')[0].id;
+		// Give self-correctable errors in the MCP vocabulary before the shared service
+		// transforms these arguments to `payers` / `beneficiaries`. The roster includes
+		// deactivated members for historical reads, but they are invalid for a new write.
+		const activeMemberIds = new Set(
+			members.filter((member) => member.isActive).map((member) => member.id)
+		);
+		if (!activeMemberIds.has(payerId)) {
+			return toolError(
+				'validation_error',
+				'The selected payer is not an active member of this group.',
+				{ fieldErrors: { paidBy: ['Choose an active member id returned by `list_members`.'] } }
+			);
+		}
+		const invalidBeneficiaries = splitBetween.filter((memberId) => !activeMemberIds.has(memberId));
+		if (invalidBeneficiaries.length > 0) {
+			return toolError(
+				'validation_error',
+				'One or more selected beneficiaries are not active members of this group.',
+				{
+					fieldErrors: {
+						splitBetween: ['Choose only active member ids returned by `list_members`.']
+					}
+				}
+			);
+		}
+
+		// Omission means Other, not the first display row (Food & Drink). Explicit ids were
+		// already checked against the same list advertised in the tool's JSON Schema.
+		const resolvedCategoryId = categoryId ?? DEFAULT_SPENDING_CATEGORY_ID;
 
 		// ADR-0004: parse the decimal string into minor units via the SETTLEMENT currency's
 		// own exponent. This is where "240.005"/THB, negatives, and junk become the HARD
@@ -241,8 +315,14 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 		} catch (err) {
 			return toolError(
 				'validation_error',
-				err instanceof Error ? err.message : 'The amount could not be parsed.'
+				err instanceof Error ? err.message : 'The amount could not be parsed.',
+				{ fieldErrors: { amount: [err instanceof Error ? err.message : 'Invalid amount.'] } }
 			);
+		}
+		if (minor <= 0) {
+			return toolError('validation_error', 'The transaction amount must be greater than zero.', {
+				fieldErrors: { amount: ['Amount must be greater than zero.'] }
+			});
 		}
 
 		// The canonical minimal equal-split spending shape — IDENTICAL to the
@@ -290,13 +370,23 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's provenance (`viaKey`) into the audit row — audit comes for free, we never
 				// write it ourselves.
-				const txnId = await createTransaction({
-					userId: principal.userId,
-					groupId,
-					input,
-					settlementCurrency,
-					via: auditVia(principal)
-				});
+				let txnId: string;
+				try {
+					txnId = await createTransaction({
+						userId: principal.userId,
+						groupId,
+						input,
+						settlementCurrency,
+						via: auditVia(principal)
+					});
+				} catch (error) {
+					// Keep the shared service authoritative, but never leak its internal form-field
+					// names (`payers`, `beneficiaries`, `amountTotal`) to an MCP caller.
+					if (error instanceof TransactionValidationError) {
+						throw remapTransactionValidationError(error);
+					}
+					throw error;
+				}
 
 				// Re-read the persisted detail and project BOTH echo forms (see `../view/echo`):
 				//   - `recorded`: the structured view, every name wrapped + attributed (ADR-0003);

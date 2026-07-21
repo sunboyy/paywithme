@@ -28,7 +28,10 @@ describe('initializeResult', () => {
 			capabilities: { tools: { listChanged: false } },
 			serverInfo: MCP_SERVER_INFO
 		});
-		expect(result.instructions).toContain('MINOR units');
+		expect(result.instructions).toContain('DECIMAL STRINGS');
+		expect(result.instructions).toContain('never multiply by 100');
+		expect(result.instructions).toContain('integer minor units internally');
+		expect(result.instructions).not.toContain('never send or infer a decimal amount');
 	});
 
 	it('carries NO session id — the server is stateless (ADR-0001)', () => {

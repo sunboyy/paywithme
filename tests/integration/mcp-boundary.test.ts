@@ -427,6 +427,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				tools: {
 					name: string;
 					description: string;
+					inputSchema: { properties?: Record<string, Record<string, unknown>> };
 					annotations: { readOnlyHint: boolean; destructiveHint: boolean };
 				}[];
 			}>('tools/list', undefined, options);
@@ -456,6 +457,17 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// not destructive — it APPENDS a transaction (#31).
 			const write = tools.find((t) => t.name === 'create_transaction');
 			expect(write?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+			expect(write?.inputSchema.properties).toMatchObject({
+				groupId: { type: 'string', minLength: 1 },
+				title: { type: 'string', minLength: 1, maxLength: 200, pattern: '\\S' },
+				amount: { type: 'string', pattern: '^\\d+(\\.\\d{1,4})?$' },
+				splitBetween: {
+					type: 'array',
+					minItems: 1,
+					items: { type: 'string', minLength: 1 }
+				},
+				categoryId: { enum: expect.arrayContaining(['spending-other']) }
+			});
 		});
 
 		it('`delete_transaction` is the ONLY tool advertised as destructive, to any key (#35)', async () => {
@@ -1145,6 +1157,9 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			const rows = await txnRows(groupId);
 			expect(rows).toHaveLength(1);
 			expect(rows[0].amountTotal).toBe(24000);
+			// Omission means the genuinely generic fallback, not the first display category
+			// (Food & Drink). The tool schema advertises every explicit alternative.
+			expect(rows[0].categoryId).toBe('spending-other');
 			// And the wire money is the decimal string in THB, never minor units.
 			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
 			expect(payload.recorded.amount).toMatchObject({ amount: '240.00', currency: 'THB' });
@@ -1217,8 +1232,36 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError).toBe(true);
-			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({
+				fieldErrors: { splitBetween: expect.any(Array) }
+			});
+			expect(
+				(error.details as { fieldErrors?: Record<string, unknown> }).fieldErrors
+			).not.toHaveProperty('payers');
 			// The reject happened server-side before any row was written.
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('reports an invalid explicit payer under the MCP `paidBy` argument', async () => {
+			const { groupId, me } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId,
+					title: 'Lunch',
+					amount: '240.00',
+					paidBy: 'mem_not_in_this_group',
+					splitBetween: [me]
+				},
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({ fieldErrors: { paidBy: expect.any(Array) } });
 			expect(await txnRows(groupId)).toHaveLength(0);
 		});
 

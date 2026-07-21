@@ -15,9 +15,11 @@ import { GroupAccessError } from '$lib/server/groups';
 import { scopeToPermissions } from '$lib/server/api/scope';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
-const { listGroupsForUser, consumeRateLimit } = vi.hoisted(() => ({
+const { listGroupsForUser, consumeRateLimit, loadGroupView, loadMemberViews } = vi.hoisted(() => ({
 	listGroupsForUser: vi.fn(),
-	consumeRateLimit: vi.fn()
+	consumeRateLimit: vi.fn(),
+	loadGroupView: vi.fn(),
+	loadMemberViews: vi.fn()
 }));
 
 vi.mock('$lib/server/groups', async (importOriginal) => ({
@@ -28,6 +30,7 @@ vi.mock('$lib/server/api/rate-limit', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/api/rate-limit')>()),
 	consumeRateLimit
 }));
+vi.mock('./tools/load', () => ({ loadGroupView, loadMemberViews }));
 
 // Imported AFTER the mocks are registered.
 import { MCP_TOOLS, dispatchToolCall, filterToolsByScope, findTool, registerTool } from './tools';
@@ -150,6 +153,46 @@ describe('the shipped registry (#28 + #29)', () => {
 		expect(tool?.scope).toBe('write');
 		expect(tool?.rateLimitClass).toBe('write');
 		expect(tool?.definition.annotations.readOnlyHint).toBe(false);
+	});
+
+	it('advertises the runtime constraints and discoverable categories for `create_transaction`', () => {
+		const inputSchema = findTool('create_transaction')?.definition.inputSchema as {
+			properties: Record<string, Record<string, unknown>>;
+			required: string[];
+			additionalProperties: boolean;
+		};
+
+		expect(inputSchema.required).toEqual(['groupId', 'title', 'amount', 'splitBetween']);
+		expect(inputSchema.additionalProperties).toBe(false);
+		expect(inputSchema.properties.groupId).toMatchObject({ type: 'string', minLength: 1 });
+		expect(inputSchema.properties.title).toMatchObject({
+			type: 'string',
+			minLength: 1,
+			maxLength: 200,
+			pattern: '\\S'
+		});
+		expect(inputSchema.properties.amount).toMatchObject({
+			type: 'string',
+			pattern: '^\\d+(\\.\\d{1,4})?$'
+		});
+		expect(inputSchema.properties.splitBetween).toMatchObject({
+			type: 'array',
+			minItems: 1,
+			items: { type: 'string', minLength: 1 }
+		});
+		expect(inputSchema.properties.categoryId.enum).toEqual([
+			'spending-food-drink',
+			'spending-groceries',
+			'spending-transportation',
+			'spending-rent-housing',
+			'spending-utilities',
+			'spending-entertainment',
+			'spending-shopping',
+			'spending-travel',
+			'spending-health',
+			'spending-other'
+		]);
+		expect(inputSchema.properties.categoryId.description).toMatch(/spending-other \(Other\)/);
 	});
 
 	/** The two RECORDING tools — the ones a bounded ~60s window guards (#33). */
@@ -379,6 +422,92 @@ describe('dispatchToolCall', () => {
 		if (outcome.kind !== 'result') throw new Error('expected a result');
 		expect(envelopeOf(outcome.result).code).toBe('validation_error');
 		expect(listGroupsForUser).not.toHaveBeenCalled();
+	});
+
+	it('rejects an undiscoverable category under the MCP `categoryId` field before loading data', async () => {
+		const outcome = await dispatchToolCall(
+			{
+				name: 'create_transaction',
+				arguments: {
+					groupId: 'grp_1',
+					title: 'Lunch',
+					amount: '12.00',
+					splitBetween: ['mem_me'],
+					categoryId: 'spending-made-up'
+				}
+			},
+			principalWith('write')
+		);
+
+		if (outcome.kind !== 'result') throw new Error('expected a result');
+		const envelope = envelopeOf(outcome.result);
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details).toMatchObject({ fieldErrors: { categoryId: expect.any(Array) } });
+		expect(loadGroupView).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['title', { title: ' ' }],
+		['title', { title: 'x'.repeat(201) }],
+		['amount', { amount: ' 12.00 ' }],
+		['categoryId', { categoryId: ' spending-other ' }]
+	] as const)(
+		'rejects the JSON-Schema boundary case under `%s` before loading data',
+		async (field, override) => {
+			const outcome = await dispatchToolCall(
+				{
+					name: 'create_transaction',
+					arguments: {
+						groupId: 'grp_1',
+						title: 'Lunch',
+						amount: '12.00',
+						splitBetween: ['mem_me'],
+						...override
+					}
+				},
+				principalWith('write')
+			);
+
+			if (outcome.kind !== 'result') throw new Error('expected a result');
+			const envelope = envelopeOf(outcome.result);
+			expect(envelope.code).toBe('validation_error');
+			expect(envelope.details).toMatchObject({ fieldErrors: { [field]: expect.any(Array) } });
+			expect(loadGroupView).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each([
+		['paidBy', { paidBy: 'mem_unknown', splitBetween: ['mem_me'] }],
+		['splitBetween', { splitBetween: ['mem_me', 'mem_unknown'] }]
+	] as const)('reports an inactive member under the MCP `%s` argument', async (field, members) => {
+		loadGroupView.mockResolvedValue({ settlementCurrency: 'USD' });
+		loadMemberViews.mockResolvedValue([
+			{
+				id: 'mem_me',
+				displayName: { _untrusted: true, value: 'Me', author: { kind: 'unknown' } },
+				isYou: true,
+				isLinked: true,
+				isActive: true
+			}
+		]);
+
+		const outcome = await dispatchToolCall(
+			{
+				name: 'create_transaction',
+				arguments: {
+					groupId: 'grp_1',
+					title: 'Lunch',
+					amount: '12.00',
+					...members
+				}
+			},
+			principalWith('write')
+		);
+
+		if (outcome.kind !== 'result') throw new Error('expected a result');
+		const envelope = envelopeOf(outcome.result);
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details).toMatchObject({ fieldErrors: { [field]: expect.any(Array) } });
 	});
 
 	it('a service THROW becomes an isError result, never an escaped exception', async () => {

@@ -24,6 +24,7 @@ export const groupIdArg = z.string().min(1, 'A group id is required. Call `list_
 /** The JSON-Schema fragment describing that same argument to the model. */
 export const GROUP_ID_PROPERTY = {
 	type: 'string',
+	minLength: 1,
 	description: 'The group id, exactly as returned by `list_groups`. Never a group name.'
 } as const;
 

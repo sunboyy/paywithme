@@ -29,13 +29,17 @@ export const MCP_SERVER_INFO = {
 
 /**
  * Server-level guidance shown to the model. Deliberately short and money-safe:
- * amounts are integer MINOR units (PLAN §7 — no floats anywhere), and a read key
- * simply has no write tools to reach for (ADR-0002).
+ * the MCP VIEW and WRITE contracts both use decimal strings (ADR-0004); integer minor
+ * units remain an internal ledger detail and appear only as an explicit echo-back aid.
+ * A read key simply has no write tools to reach for (ADR-0002).
  */
 export const MCP_SERVER_INSTRUCTIONS =
 	'Pay with me is a shared-expense tracker. Groups contain members, transactions ' +
-	"and balances. All money amounts are integers in the currency's MINOR units " +
-	'(e.g. 1250 = 12.50 USD) — never send or infer a decimal amount. The tools you ' +
+	'and balances. MCP money amounts are DECIMAL STRINGS paired with a currency. When ' +
+	'calling a write tool, send the decimal string exactly as the user stated it (for ' +
+	'example, "12.50" USD); never multiply by 100 or convert currency exponents yourself. ' +
+	'The ledger stores integer minor units internally, and write results may echo those ' +
+	'units explicitly so the interpretation is visible. The tools you ' +
 	'can see depend on the API key in use: a read-only key exposes no tools that ' +
 	'move money.';
 
