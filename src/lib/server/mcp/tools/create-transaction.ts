@@ -76,6 +76,16 @@ import {
 	toTransactionInput,
 	validateMcpTransactionArguments
 } from './transaction-input';
+import {
+	AMOUNT_BENEFICIARIES_PROPERTY,
+	AMOUNT_BENEFICIARY_PROPERTY,
+	CHARGE_PROPERTY,
+	forbidProperties,
+	ITEM_PROPERTY,
+	MONEY_PROPERTY,
+	SHARE_BENEFICIARIES_PROPERTY,
+	SHARE_BENEFICIARY_PROPERTY
+} from './transaction-json-schema';
 
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
 const TOOL_NAME = 'create_transaction';
@@ -172,117 +182,6 @@ const createTransactionArgs = z
 			.optional()
 	})
 	.superRefine(validateMcpTransactionArguments);
-
-const MONEY_PROPERTY = {
-	type: 'string',
-	pattern: '^\\d+(\\.\\d{1,4})?$',
-	description:
-		'A non-negative amount as a DECIMAL STRING in the group settlement currency. ' +
-		'The server converts it to minor units; never multiply by 100.'
-} as const;
-const MEMBER_ID_PROPERTY = {
-	type: 'string',
-	minLength: 1,
-	description: 'Member id from `list_members`.'
-} as const;
-const EQUAL_BENEFICIARY_PROPERTY = {
-	type: 'object',
-	properties: { memberId: MEMBER_ID_PROPERTY },
-	required: ['memberId'],
-	additionalProperties: false
-} as const;
-const AMOUNT_BENEFICIARY_PROPERTY = {
-	type: 'object',
-	properties: {
-		memberId: MEMBER_ID_PROPERTY,
-		amount: { ...MONEY_PROPERTY, description: 'Exact amount owed by this beneficiary.' }
-	},
-	required: ['memberId', 'amount'],
-	additionalProperties: false
-} as const;
-const SHARE_BENEFICIARY_PROPERTY = {
-	type: 'object',
-	properties: {
-		memberId: MEMBER_ID_PROPERTY,
-		shareWeight: {
-			type: 'integer',
-			minimum: 0,
-			description: 'Integer weight; all beneficiaries’ weights must sum above zero.'
-		}
-	},
-	required: ['memberId', 'shareWeight'],
-	additionalProperties: false
-} as const;
-const beneficiaryArray = (
-	items:
-		| typeof EQUAL_BENEFICIARY_PROPERTY
-		| typeof AMOUNT_BENEFICIARY_PROPERTY
-		| typeof SHARE_BENEFICIARY_PROPERTY
-) => ({ type: 'array', minItems: 1, items }) as const;
-const itemProperty = (
-	splitMode: 'equal' | 'amount' | 'share',
-	beneficiaryItems:
-		| typeof EQUAL_BENEFICIARY_PROPERTY
-		| typeof AMOUNT_BENEFICIARY_PROPERTY
-		| typeof SHARE_BENEFICIARY_PROPERTY
-) =>
-	({
-		type: 'object',
-		properties: {
-			label: { type: 'string', minLength: 1, maxLength: 200 },
-			amount: MONEY_PROPERTY,
-			splitMode: { const: splitMode },
-			beneficiaries: beneficiaryArray(beneficiaryItems)
-		},
-		required: ['label', 'amount', 'splitMode', 'beneficiaries'],
-		additionalProperties: false
-	}) as const;
-const ITEM_PROPERTY = {
-	oneOf: [
-		itemProperty('equal', EQUAL_BENEFICIARY_PROPERTY),
-		itemProperty('amount', AMOUNT_BENEFICIARY_PROPERTY),
-		itemProperty('share', SHARE_BENEFICIARY_PROPERTY)
-	]
-} as const;
-const CHARGE_PROPERTY = {
-	oneOf: [
-		{
-			type: 'object',
-			properties: {
-				kind: { type: 'string', enum: ['service', 'vat', 'discount', 'tip'] },
-				mode: { const: 'percent' },
-				percent: {
-					type: 'string',
-					// Match the runtime's 1–3 digit representation while structurally
-					// capping the numeric value at 100 (including 100.0 / 100.00 only).
-					pattern: '^(?:(?:\\d{1,2}|0\\d{2})(?:\\.\\d{1,2})?|100(?:\\.0{1,2})?)$',
-					description: 'Human percentage string from "0" through "100", e.g. "7.25".'
-				},
-				base: { type: 'string', enum: ['items_subtotal', 'running_total'] }
-			},
-			required: ['kind', 'mode', 'percent', 'base'],
-			additionalProperties: false
-		},
-		{
-			type: 'object',
-			properties: {
-				kind: { type: 'string', enum: ['service', 'vat', 'discount', 'tip'] },
-				mode: { const: 'absolute' },
-				amount: MONEY_PROPERTY,
-				base: { type: 'string', enum: ['items_subtotal', 'running_total'] }
-			},
-			required: ['kind', 'mode', 'amount', 'base'],
-			additionalProperties: false
-		}
-	]
-} as const;
-
-const forbidProperties = (...fields: string[]) => ({
-	not: { anyOf: fields.map((field) => ({ required: [field] })) }
-});
-
-const AMOUNT_BENEFICIARIES_PROPERTY = beneficiaryArray(AMOUNT_BENEFICIARY_PROPERTY);
-const SHARE_BENEFICIARIES_PROPERTY = beneficiaryArray(SHARE_BENEFICIARY_PROPERTY);
 
 export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs>> = {
 	scope: 'write',

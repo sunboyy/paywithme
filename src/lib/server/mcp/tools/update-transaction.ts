@@ -58,7 +58,6 @@
 //   - Idempotency: NO derived window, unlike the create path — see `idempotentHint`.
 
 import { z } from 'zod';
-import { parseAmount } from '$lib/money';
 import { getTransactionDetail, updateTransaction } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { toolError, toolSuccess } from '../errors';
@@ -70,30 +69,60 @@ import {
 	type TransactionView
 } from '../view';
 import type { McpTool } from '../types';
-import { amountArg, GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
+import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
 import { loadGroupView, loadMemberViews } from './load';
+import {
+	AMOUNT_BENEFICIARIES_PROPERTY,
+	CHARGE_PROPERTY,
+	forbidProperties,
+	ITEM_PROPERTY,
+	MEMBER_ID_PROPERTY,
+	MONEY_PROPERTY,
+	SHARE_BENEFICIARIES_PROPERTY
+} from './transaction-json-schema';
+import {
+	MCP_TRANSACTION_ARGUMENT_FIELDS,
+	McpTransactionArgumentError,
+	toTransactionInput,
+	validateMcpTransactionArguments
+} from './transaction-input';
 
 /** The wire name. */
 const TOOL_NAME = 'update_transaction';
 
-const updateTransactionArgs = z.strictObject({
-	groupId: groupIdArg,
-	txnId: txnIdArg,
-	// REQUIRED: this is a REPLACEMENT (§16.4's PUT), not a merge — an unstated title
-	// would be a patch, and a patch is the verb §16.4 rejected.
-	title: z.string().min(1, 'A title is required.'),
-	// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
-	amount: amountArg,
-	// OPTIONAL: FX is deferred (as on `create_transaction`), so this defaults to (and
-	// must equal) the group's settlement currency.
-	currency: z.string().min(1).optional(),
-	// OPTIONAL: defaults to THE EXISTING PAYER — never the caller. See the header.
-	paidBy: z.string().min(1).optional(),
-	// REQUIRED: the equal-split beneficiaries, by member id (never names, ADR-0006).
-	splitBetween: z.array(z.string().min(1)).min(1, 'List at least one member id to split between.'),
-	// OPTIONAL: defaults to the transaction's EXISTING category.
-	categoryId: z.string().min(1).optional()
-});
+const updateTransactionArgs = z
+	.strictObject({
+		groupId: groupIdArg,
+		txnId: txnIdArg,
+		// REQUIRED: this is a REPLACEMENT (§16.4's PUT), not a merge — an unstated title
+		// would be a patch, and a patch is the verb §16.4 rejected.
+		title: z
+			.string()
+			.min(1, 'A title is required.')
+			.max(200, 'Title must be 200 characters or fewer.')
+			.regex(/\S/, 'A title is required.'),
+		// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
+		...MCP_TRANSACTION_ARGUMENT_FIELDS,
+		// OPTIONAL: FX is deferred (as on `create_transaction`), so this defaults to (and
+		// must equal) the group's settlement currency.
+		currency: z.string().min(1).optional(),
+		// OPTIONAL: defaults to THE EXISTING PAYER — never the caller. See the header.
+		paidBy: z.string().min(1).optional(),
+		// OPTIONAL: defaults to the transaction's EXISTING category.
+		categoryId: z.string().min(1).optional()
+	})
+	.superRefine(validateMcpTransactionArguments);
+
+function argumentErrorResult(error: McpTransactionArgumentError) {
+	const fieldErrors: Record<string, string[]> = {};
+	for (const issue of error.issues) {
+		const field = issue.path.join('.') || 'arguments';
+		(fieldErrors[field] ??= []).push(issue.message);
+		const root = typeof issue.path[0] === 'string' ? issue.path[0] : undefined;
+		if (root !== undefined && root !== field) (fieldErrors[root] ??= []).push(issue.message);
+	}
+	return toolError('validation_error', error.message, { fieldErrors });
+}
 
 export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs>> = {
 	scope: 'write',
@@ -105,19 +134,18 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		description:
 			'Correct a transaction that is already recorded — the amount was wrong, the title ' +
 			'was wrong, the split was wrong. CALL `get_transaction` FIRST and read what is ' +
-			'currently recorded: this REPLACES the transaction rather than patching it, so ' +
-			'`title`, `amount` and `splitBetween` are all required and whatever you send is what ' +
-			'the transaction becomes — sending a shorter `splitBetween` REMOVES the people you ' +
-			'left out. IDS ONLY, NEVER NAMES: `txnId`, `paidBy` and every id in `splitBetween` ' +
+			'currently recorded: copy its `editable` object, unwrap authored `title.value` and ' +
+			'item `label.value` fields, then send the COMPLETE equal, amount, share, or itemized ' +
+			'split shape. This REPLACES rather than patches the transaction — omitting an item, ' +
+			'beneficiary, or charge REMOVES it. Itemized total is derived by the server. ' +
+			'IDS ONLY, NEVER NAMES: `txnId`, `paidBy` and every beneficiary id ' +
 			'come from `list_transactions` / `list_members`; match the people the user named to ' +
 			'ids YOURSELF and show your reasoning. STATE THE AMOUNT EXACTLY AS THE USER SAID IT ' +
 			'("950", "950.00") as a decimal string — the server does the currency math, so never ' +
 			'multiply by 100 or convert exponents. Defaults: `paidBy` and `categoryId` KEEP what ' +
 			'the transaction already has (omit them unless the user is changing who paid or what ' +
-			'kind of expense it is), and the transaction keeps its original date. Only simple ' +
-			'transactions can be corrected here: an itemized bill, an unequal split, one with ' +
-			'several payers, or one entered in a foreign currency must be edited in the ' +
-			'paywithme app, and this tool will refuse it rather than flatten it. The result ' +
+			'kind of expense it is), and the transaction keeps its original date and type. A ' +
+			'transaction with several payers or one entered in a foreign currency is refused. The result ' +
 			'echoes back BOTH what the transaction was and what it now is, naming the people ' +
 			'involved — read it out, because an edit overwrites the old values and nothing ' +
 			'restores them. To remove a transaction entirely use `delete_transaction` instead.',
@@ -125,15 +153,18 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			type: 'object',
 			properties: {
 				groupId: GROUP_ID_PROPERTY,
-				txnId: TXN_ID_PROPERTY,
+				txnId: { ...TXN_ID_PROPERTY, minLength: 1 },
 				title: {
 					type: 'string',
+					minLength: 1,
+					maxLength: 200,
+					pattern: '\\S',
 					description:
 						'The title the transaction should now have, e.g. "Dinner". REQUIRED — pass the ' +
 						'existing title unchanged if the user is not changing it.'
 				},
 				amount: {
-					type: 'string',
+					...MONEY_PROPERTY,
 					description:
 						'The amount the transaction should now be, as a DECIMAL STRING, stated exactly ' +
 						'as the user said it: "950", "950.00". No currency symbol, no thousands ' +
@@ -143,6 +174,7 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 				},
 				currency: {
 					type: 'string',
+					minLength: 1,
 					description:
 						"OPTIONAL ISO-4217 code. Must equal the group's settlement currency; omit to " +
 						'default to it. Changing a transaction into another currency via the assistant ' +
@@ -150,6 +182,7 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 				},
 				paidBy: {
 					type: 'string',
+					minLength: 1,
 					description:
 						'OPTIONAL member id of who paid, from `list_members`. Defaults to WHOEVER IS ' +
 						'ALREADY RECORDED as having paid — omit it unless the user is explicitly ' +
@@ -157,20 +190,64 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 				},
 				splitBetween: {
 					type: 'array',
-					items: { type: 'string' },
+					minItems: 1,
+					items: MEMBER_ID_PROPERTY,
 					description:
 						'REQUIRED array of member ids (from `list_members`) the cost should now be split ' +
 						'equally between. This REPLACES the existing split — pass the full list, ' +
 						'including everyone who should stay on it. Never names.'
 				},
+				splitMode: {
+					type: 'string',
+					enum: ['equal', 'amount', 'share', 'itemized'],
+					description: 'Complete replacement split shape; omit only for legacy equal mode.'
+				},
+				beneficiaries: {
+					type: 'array',
+					minItems: 1,
+					items: {
+						oneOf: [AMOUNT_BENEFICIARIES_PROPERTY.items, SHARE_BENEFICIARIES_PROPERTY.items]
+					}
+				},
+				items: { type: 'array', minItems: 1, items: ITEM_PROPERTY },
+				charges: { type: 'array', items: CHARGE_PROPERTY },
 				categoryId: {
 					type: 'string',
+					minLength: 1,
 					description:
 						"OPTIONAL category id. Defaults to the transaction's existing category — omit it " +
 						'unless the user is changing the kind of expense.'
 				}
 			},
-			required: ['groupId', 'txnId', 'title', 'amount', 'splitBetween'],
+			required: ['groupId', 'txnId', 'title'],
+			oneOf: [
+				{
+					properties: { splitMode: { enum: ['equal'] } },
+					required: ['amount', 'splitBetween'],
+					...forbidProperties('beneficiaries', 'items', 'charges')
+				},
+				{
+					properties: {
+						splitMode: { const: 'amount' },
+						beneficiaries: AMOUNT_BENEFICIARIES_PROPERTY
+					},
+					required: ['splitMode', 'amount', 'beneficiaries'],
+					...forbidProperties('splitBetween', 'items', 'charges')
+				},
+				{
+					properties: {
+						splitMode: { const: 'share' },
+						beneficiaries: SHARE_BENEFICIARIES_PROPERTY
+					},
+					required: ['splitMode', 'amount', 'beneficiaries'],
+					...forbidProperties('splitBetween', 'items', 'charges')
+				},
+				{
+					properties: { splitMode: { const: 'itemized' } },
+					required: ['splitMode', 'items'],
+					...forbidProperties('amount', 'splitBetween', 'beneficiaries')
+				}
+			],
 			additionalProperties: false
 		},
 		annotations: {
@@ -211,10 +288,21 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			openWorldHint: false
 		}
 	},
-	run: async (
-		{ principal },
-		{ groupId, txnId, title, amount, currency, paidBy, splitBetween, categoryId }
-	) => {
+	run: async ({ principal }, rawArgs) => {
+		const {
+			groupId,
+			txnId,
+			title,
+			amount,
+			splitMode,
+			splitBetween,
+			beneficiaries,
+			items,
+			charges,
+			currency,
+			paidBy,
+			categoryId
+		} = rawArgs;
 		// Access-checked load of the group (and its settlement currency — GROUP CONTEXT,
 		// never the payload). `loadGroupView` centralizes the conflated `not_found`
 		// (absent / deleted / not-yours → ONE outcome, no existence oracle, §16.5).
@@ -257,17 +345,11 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// settlement-currency transaction. Anything else would be FLATTENED — silently, and
 		// with no restore to undo it. Refuse, and say where the edit can actually be made.
 		const unsupported =
-			before.splitMode !== 'equal'
-				? `it is split ${before.splitMode === 'itemized' ? 'by items' : `by ${before.splitMode}`}, not equally`
-				: before.items.length > 0
-					? 'it is an itemized bill'
-					: before.charges.length > 0
-						? 'it carries service charges, VAT, a discount or a tip'
-						: before.payers.length !== 1
-							? 'it has more than one payer'
-							: before.isForeign
-								? `it was entered in ${before.currency}, not the group's settlement currency`
-								: null;
+			before.payers.length !== 1
+				? 'it has more than one payer'
+				: before.isForeign
+					? `it was entered in ${before.currency}, not the group's settlement currency`
+					: null;
 		if (unsupported !== null) {
 			return toolError(
 				'validation_error',
@@ -284,45 +366,25 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		const payerId = paidBy ?? before.payers[0].memberId;
 		const resolvedCategoryId = categoryId ?? before.categoryId;
 
-		// ADR-0004: parse the decimal string into minor units via the SETTLEMENT currency's
-		// own exponent. "950.005"/THB, negatives and junk become the HARD error the ADR
-		// requires — surfaced as a self-correctable validation_error, never a silent round.
-		let minor: number;
+		const activeMemberIds = members.filter((member) => member.isActive).map((member) => member.id);
+		let input;
 		try {
-			minor = parseAmount(amount, settlementCurrency);
-		} catch (err) {
-			return toolError(
-				'validation_error',
-				err instanceof Error ? err.message : 'The amount could not be parsed.'
+			input = toTransactionInput(
+				{ amount, splitMode, splitBetween, beneficiaries, items, charges },
+				{
+					type: before.type,
+					title,
+					date: before.input.date,
+					categoryId: resolvedCategoryId,
+					currency: settlementCurrency,
+					payerId,
+					memberIds: activeMemberIds
+				}
 			);
+		} catch (error) {
+			if (error instanceof McpTransactionArgumentError) return argumentErrorResult(error);
+			throw error;
 		}
-
-		// The complete replacement input (§16.4's full-object PUT), in the v1 shape. The
-		// service RE-VALIDATES all of it through the shared schema (unknown / other-group /
-		// deactivated member ids, a category that does not match the type, … →
-		// `TransactionValidationError` → `validation_error`).
-		const input = {
-			// Carried over, never accepted as an argument: a settle-up must not silently
-			// become a spending.
-			type: before.type,
-			title,
-			// The §7.1 editable real-world date, re-sent VERBATIM from the existing row. The
-			// shared schema would otherwise default it to TODAY and drag last Tuesday's
-			// dinner forward — an edit must not move a date the user did not mention.
-			date: before.input.date,
-			categoryId: resolvedCategoryId,
-			amountTotal: minor,
-			currency: settlementCurrency,
-			// No FX (the shape gate refuses a foreign entry currency), so rate 1 and the
-			// settlement total IS the entry total.
-			exchangeRate: '1',
-			amountTotalSettlement: minor,
-			splitMode: 'equal' as const,
-			payers: [{ memberId: payerId, amountPaid: minor }],
-			beneficiaries: splitBetween.map((memberId) => ({ memberId })),
-			items: [],
-			charges: []
-		};
 
 		// Update + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 		// key's `viaKey` provenance into the `edit` audit row — audit comes for free.

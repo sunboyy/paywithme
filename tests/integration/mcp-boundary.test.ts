@@ -131,6 +131,15 @@ interface TransactionWire {
 	isDeleted: boolean;
 	payers: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountPaid: MoneyWire }[];
 	shares: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountOwed: MoneyWire }[];
+	editable?: {
+		title: UntrustedWire;
+		categoryId: string;
+		currency: string;
+		paidBy: string | null;
+		splitMode: string;
+		items: { label: UntrustedWire; amount: string; splitMode: string; beneficiaries: unknown[] }[];
+		charges: { kind: string; mode: string; percent?: string; amount?: string; base: string }[];
+	};
 	_note: string;
 }
 
@@ -2364,10 +2373,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				expect(envelope.error.message).toMatch(/restore_transaction/);
 			});
 
-			it('REFUSES to flatten an ITEMIZED bill rather than destroy it irreversibly', async () => {
-				// The one write in #35 that reversibility does NOT cover: nothing undoes an
-				// overwrite (§16.6 — last-write-wins, no version column), and these arguments
-				// cannot express items, per-item shares or charges. So it is refused.
+			it('round-trips get_transaction editable itemized data and mutates VAT without detail loss', async () => {
 				const txnId = await createTransaction({
 					userId: s.user.id,
 					groupId: s.group.id,
@@ -2376,49 +2382,92 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						type: 'spending' as const,
 						title: 'Itemized dinner',
 						categoryId: SPENDING_CATEGORY,
-						amountTotal: 9000,
+						amountTotal: 9530,
 						currency: SETTLEMENT_CURRENCY,
 						exchangeRate: '1',
-						amountTotalSettlement: 9000,
+						amountTotalSettlement: 9530,
 						splitMode: 'itemized' as const,
-						payers: [{ memberId: s.alice, amountPaid: 9000 }],
+						payers: [{ memberId: s.alice, amountPaid: 9530 }],
 						beneficiaries: [],
 						items: [
 							{
 								label: 'Pad thai',
 								amount: 5000,
-								splitMode: 'equal' as const,
-								shares: [{ memberId: s.alice }]
+								splitMode: 'share' as const,
+								beneficiaries: [
+									{ memberId: s.alice, shareWeight: 2 },
+									{ memberId: s.bob, shareWeight: 1 }
+								]
 							},
 							{
 								label: 'Tom yum',
 								amount: 4000,
 								splitMode: 'equal' as const,
-								shares: [{ memberId: s.bob }]
+								beneficiaries: [{ memberId: s.bob }]
 							}
 						],
-						charges: []
+						charges: [
+							{ kind: 'vat', mode: 'percent', value: 700, base: 'items_subtotal', sortOrder: 0 },
+							{
+								kind: 'discount',
+								mode: 'absolute',
+								value: 300,
+								base: 'running_total',
+								sortOrder: 1
+							},
+							{ kind: 'tip', mode: 'absolute', value: 200, base: 'running_total', sortOrder: 2 }
+						]
 					}
 				});
-
-				const res = await callWrite('update_transaction', {
-					txnId,
-					title: 'Itemized dinner',
-					amount: '95.00',
-					splitBetween: [s.alice, s.bob]
+				const readBack = await callOk<{ transaction: TransactionWire }>('get_transaction', {
+					groupId: s.group.id,
+					txnId
 				});
-
-				expect(res.body.result?.isError).toBe(true);
-				const envelope = toolErrorEnvelope(res.body.result);
-				expect(envelope.error.code).toBe('validation_error');
-				expect(envelope.error.message).toMatch(/paywithme app/i);
-				// The itemized breakdown survives, untouched.
+				const editable = readBack.transaction.editable!;
+				const payload = await callWriteOk<{ changed: string[] }>('update_transaction', {
+					txnId,
+					title: editable.title.value,
+					splitMode: editable.splitMode,
+					paidBy: editable.paidBy,
+					categoryId: editable.categoryId,
+					items: editable.items.map((item) => ({ ...item, label: item.label.value })),
+					charges: editable.charges.map((charge) =>
+						charge.mode === 'percent' ? { ...charge, percent: '8' } : charge
+					)
+				});
+				expect(payload.changed).toContain('charges');
 				const [row] = await db
 					.select()
 					.from(transactionsTable)
 					.where(eq(transactionsTable.id, txnId));
 				expect(row.splitMode).toBe('itemized');
-				expect(row.amountTotal).toBe(9000);
+				expect(row.amountTotal).toBe(9620);
+				const persisted = await callOk<{ transaction: TransactionWire }>('get_transaction', {
+					groupId: s.group.id,
+					txnId
+				});
+				expect(persisted.transaction.editable?.items).toEqual([
+					{
+						label: expect.objectContaining({ value: 'Pad thai' }),
+						amount: '50.00',
+						splitMode: 'share',
+						beneficiaries: [
+							{ memberId: s.alice, shareWeight: 2 },
+							{ memberId: s.bob, shareWeight: 1 }
+						]
+					},
+					{
+						label: expect.objectContaining({ value: 'Tom yum' }),
+						amount: '40.00',
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: s.bob }]
+					}
+				]);
+				expect(persisted.transaction.editable?.charges).toEqual([
+					{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' },
+					{ kind: 'discount', mode: 'absolute', amount: '3.00', base: 'running_total' },
+					{ kind: 'tip', mode: 'absolute', amount: '2.00', base: 'running_total' }
+				]);
 			});
 
 			it('a READ key calling it is refused forbidden_scope, and changes NOTHING (ADR-0002)', async () => {
