@@ -24,6 +24,7 @@
 import type { CurrencyCode } from '$lib/money';
 import type { TransactionDetail, TransactionListItem } from '$lib/server/transactions';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
+import { basisPointsToPercentString } from '../percentage';
 import { toMcpMoney, type McpMoney } from './money';
 import type { MemberView } from './member';
 import {
@@ -83,6 +84,63 @@ export type ChargeView =
 			readonly base: 'items_subtotal' | 'running_total';
 	  };
 
+/** Raw beneficiary input, projected in MCP vocabulary for a faithful edit. */
+export interface EditableBeneficiaryView {
+	readonly memberId: string;
+	/** Exact amount for an `amount` split, in entry-currency major units. */
+	readonly amount?: string;
+	/** Integer weight for a `share` split. */
+	readonly shareWeight?: number;
+}
+
+export interface EditableItemView {
+	/** UNTRUSTED (ADR-0003) — authored with the transaction. */
+	readonly label: UntrustedText;
+	readonly amount: string;
+	readonly splitMode: 'equal' | 'amount' | 'share';
+	readonly beneficiaries: EditableBeneficiaryView[];
+}
+
+export type EditableChargeView =
+	| {
+			readonly kind: 'service' | 'vat' | 'discount' | 'tip';
+			readonly mode: 'percent';
+			/** Human percent as a decimal string: stored 700 bps becomes `"7"`. */
+			readonly percent: string;
+			readonly base: 'items_subtotal' | 'running_total';
+	  }
+	| {
+			readonly kind: 'service' | 'vat' | 'discount' | 'tip';
+			readonly mode: 'absolute';
+			readonly amount: string;
+			readonly base: 'items_subtotal' | 'running_total';
+	  };
+
+/**
+ * Sanitized reconstruction of the editable inputs. Unlike the internal
+ * TransactionInput, it contains no minor-unit money and no bare authored text.
+ */
+export interface EditableTransactionView {
+	readonly type: 'spending' | 'transfer';
+	/** UNTRUSTED (ADR-0003). */
+	readonly title: UntrustedText;
+	/** PLAN §7.1 editable real-world `created_at` day, never `occurred_at`. */
+	readonly date: string;
+	readonly categoryId: string;
+	readonly currency: CurrencyCode;
+	/** Omitted for itemized: its final total is derived server-side. */
+	readonly amount?: string;
+	/** The current single payer used by the MCP write contract; null for a multi-payer row. */
+	readonly paidBy: string | null;
+	readonly splitMode: 'equal' | 'amount' | 'share' | 'itemized';
+	/** Legacy equal-split beneficiary shape, retained for backward compatibility. */
+	readonly splitBetween: string[];
+	readonly beneficiaries: EditableBeneficiaryView[];
+	readonly items: EditableItemView[];
+	/** Order is application order and maps back to internal `sortOrder`. */
+	readonly charges: EditableChargeView[];
+}
+
 /** A transaction in full, as an agent sees it. */
 export interface TransactionView {
 	readonly id: string;
@@ -115,6 +173,8 @@ export interface TransactionView {
 	readonly shares: ShareView[];
 	readonly items: ItemView[];
 	readonly charges: ChargeView[];
+	/** Safe, agent-friendly raw inputs that can be supplied back to an edit tool. */
+	readonly editable: EditableTransactionView;
 	/** ADR-0008 + ADR-0003, restated where the model is reading. */
 	readonly _note: string;
 }
@@ -161,6 +221,35 @@ export function toTransactionView({
 		isYou: isYou(s.memberId),
 		amountOwed: toMcpMoney(s.amountOwed, settlement)
 	});
+	// Production `getTransactionDetail` always supplies the complete reconstructed
+	// input. Tolerate partial adapter/test doubles by falling back to the equivalent
+	// public detail fields; the projection should never make an otherwise readable
+	// transaction fail because an older caller omitted an empty input collection.
+	const input = detail.input as Partial<TransactionDetail['input']>;
+	const inputSplitMode = input.splitMode ?? detail.splitMode;
+	const inputPayers = input.payers ?? detail.payers;
+	const inputBeneficiaries =
+		input.beneficiaries ??
+		(inputSplitMode === 'equal' ? detail.shares.map((row) => ({ memberId: row.memberId })) : []);
+	const inputItems =
+		input.items ??
+		detail.items.map((item) => ({
+			label: item.label,
+			amount: item.amount,
+			splitMode: item.splitMode,
+			beneficiaries: item.shares.map((row) => ({ memberId: row.memberId }))
+		}));
+	const inputCharges = input.charges ?? detail.charges;
+	const editableBeneficiary = (
+		beneficiary: TransactionDetail['input']['beneficiaries'][number]
+	): EditableBeneficiaryView => ({
+		memberId: beneficiary.memberId,
+		...(beneficiary.rawAmount !== undefined
+			? { amount: toMcpMoney(beneficiary.rawAmount, entry).amount }
+			: {}),
+		...(beneficiary.shareWeight !== undefined ? { shareWeight: beneficiary.shareWeight } : {})
+	});
+	const orderedInputCharges = [...inputCharges].sort((a, b) => a.sortOrder - b.sortOrder);
 
 	return {
 		id: detail.id,
@@ -196,7 +285,12 @@ export function toTransactionView({
 		})),
 		charges: detail.charges.map((c) =>
 			c.mode === 'percent'
-				? { kind: c.kind, mode: 'percent' as const, percent: c.value, base: c.base }
+				? {
+						kind: c.kind,
+						mode: 'percent' as const,
+						percent: Number(basisPointsToPercentString(c.value)),
+						base: c.base
+					}
 				: {
 						kind: c.kind,
 						mode: 'absolute' as const,
@@ -204,6 +298,44 @@ export function toTransactionView({
 						base: c.base
 					}
 		),
+		editable: {
+			type: input.type ?? detail.type,
+			title: untrusted(input.title ?? detail.title, author),
+			date: input.date ?? detail.createdAt.slice(0, 10),
+			categoryId: input.categoryId ?? detail.categoryId,
+			currency: (input.currency ?? detail.currency) as CurrencyCode,
+			...(inputSplitMode === 'itemized'
+				? {}
+				: { amount: toMcpMoney(input.amountTotal ?? detail.amountTotal, entry).amount }),
+			paidBy: inputPayers.length === 1 ? inputPayers[0].memberId : null,
+			splitMode: inputSplitMode,
+			splitBetween: inputSplitMode === 'equal' ? inputBeneficiaries.map((row) => row.memberId) : [],
+			beneficiaries:
+				inputSplitMode === 'amount' || inputSplitMode === 'share'
+					? inputBeneficiaries.map(editableBeneficiary)
+					: [],
+			items: inputItems.map((item) => ({
+				label: untrusted(item.label, author),
+				amount: toMcpMoney(item.amount, entry).amount,
+				splitMode: item.splitMode,
+				beneficiaries: item.beneficiaries.map(editableBeneficiary)
+			})),
+			charges: orderedInputCharges.map((charge) =>
+				charge.mode === 'percent'
+					? {
+							kind: charge.kind,
+							mode: 'percent' as const,
+							percent: basisPointsToPercentString(charge.value),
+							base: charge.base
+						}
+					: {
+							kind: charge.kind,
+							mode: 'absolute' as const,
+							amount: toMcpMoney(charge.value, entry).amount,
+							base: charge.base
+						}
+			)
+		},
 		_note: TRANSACTION_NOTE
 	};
 }
