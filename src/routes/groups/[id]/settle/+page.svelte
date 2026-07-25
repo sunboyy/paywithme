@@ -21,6 +21,7 @@
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 	import HandshakeIcon from '@lucide/svelte/icons/handshake';
 	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
 	import type { PageData } from './$types';
@@ -54,8 +55,16 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-4">
+	<!-- Same header shape as Overview and Transactions — this page was the only
+	     group screen missing the "+ Add" action, for no reason a user could infer. -->
 	<header class="space-y-3">
-		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+		<div class="flex items-center justify-between gap-3">
+			<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
+			<Button href={newPath} class="shrink-0 gap-1">
+				<PlusIcon class="size-4" aria-hidden="true" />
+				Add
+			</Button>
+		</div>
 		<GroupNav groupId={data.group.id} current="settle" />
 	</header>
 
@@ -125,9 +134,13 @@
 			<Card.Content>
 				<ul class="space-y-2" aria-label="Suggested settlements">
 					{#each data.suggestions as s (s.fromMemberId + '→' + s.toMemberId)}
-						<li
-							class="bg-card flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between"
-						>
+						<!-- The action sits INLINE on the right at every width. It used to stack
+						     below the row on phones as a full-width primary button, so three
+						     suggestions filled the viewport with three equally-loud black CTAs
+						     and each row cost three lines instead of one. `outline` because
+						     these are peers, not the page's single primary action; the 44px
+						     touch target is unchanged. -->
+						<li class="bg-card flex items-center justify-between gap-3 rounded-lg border p-3">
 							<span class="flex min-w-0 flex-1 items-center gap-2">
 								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" aria-hidden="true" />
 								<span class="min-w-0">
@@ -154,6 +167,7 @@
 							{#if network.offline}
 								<Button
 									type="button"
+									variant="outline"
 									size="sm"
 									class="min-h-11 shrink-0"
 									disabled
@@ -163,10 +177,18 @@
 								</Button>
 							{:else}
 								{@const settleHref = settleUrl(s)}
-								<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-								<a href={settleHref} class={buttonVariants({ size: 'sm' }) + ' min-h-11 shrink-0'}>
+								<!-- `settleHref` is a `resolve()`d path with an appended query string, so
+								     it is already a resolved URL. Disable/enable PAIR, not `-next-line`:
+								     the <a> now spans several lines and the single-line form only covers
+								     the tag's first line, leaving the href itself flagged. -->
+								<!-- eslint-disable svelte/no-navigation-without-resolve -->
+								<a
+									href={settleHref}
+									class={buttonVariants({ variant: 'outline', size: 'sm' }) + ' min-h-11 shrink-0'}
+								>
 									Settle up
 								</a>
+								<!-- eslint-enable svelte/no-navigation-without-resolve -->
 							{/if}
 						</li>
 					{/each}

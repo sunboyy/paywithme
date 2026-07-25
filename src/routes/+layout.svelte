@@ -5,6 +5,9 @@
 	import { enhance } from '$app/forms';
 	import { Button } from '$lib/components/ui/button';
 	import { Toaster } from '$lib/components/ui/sonner';
+	import { ModeWatcher, toggleMode, mode } from 'mode-watcher';
+	import SunIcon from '@lucide/svelte/icons/sun';
+	import MoonIcon from '@lucide/svelte/icons/moon';
 	import { registerPwa } from '$lib/pwa/register.svelte';
 	import { startOnlineWatch } from '$lib/pwa/online.svelte';
 	import { startInstallWatch } from '$lib/pwa/install.svelte';
@@ -56,6 +59,13 @@
 	  button. Logout is a real form POST to `/logout` (works without JS), upgraded
 	  by `use:enhance` when JS is present.
 -->
+<!-- Applies the `.dark` class from the stored/system preference. The app has always
+     shipped a complete `.dark` palette in app.css and `mode-watcher` as a
+     dependency, but <ModeWatcher/> was never mounted and no control ever called
+     `toggleMode` — so the class was never set and dark mode responded to nothing
+     at all, not even the OS setting. Mounting it here activates both. -->
+<ModeWatcher />
+
 <div class="bg-background text-foreground flex min-h-dvh flex-col">
 	<!-- Skip-to-content link (a11y, task 8.3): the first focusable element, visually
 	     hidden until focused, so keyboard / screen-reader users can jump past the
@@ -66,7 +76,16 @@
 	>
 		Skip to content
 	</a>
-	<div class="mx-auto flex w-full max-w-screen-sm flex-1 flex-col">
+	<!-- Shell width: `max-w-4xl`, not the old `max-w-screen-sm` (640px).
+
+	     Mobile-first stays the priority (PLAN §10) — nothing below `sm:` changes —
+	     but "responsive" has to mean the layout USES a large viewport, and at 1440px
+	     the app was a 640px phone column with ~800px of empty white beside it. The
+	     old value also silently beat every page's own `max-w-2xl` (672px), so those
+	     wrappers could never take effect: one owner of width, not two. Pages that
+	     want a narrower measure (the transaction detail's `max-w-lg`) still get it,
+	     because a smaller inner max-width does apply. -->
+	<div class="mx-auto flex w-full max-w-4xl flex-1 flex-col">
 		<header
 			class="bg-background/95 supports-backdrop-filter:bg-background/80 sticky top-0 z-10 border-b backdrop-blur"
 			style="padding-top: env(safe-area-inset-top);"
@@ -74,7 +93,23 @@
 			<div class="flex h-14 items-center justify-between px-4">
 				<a href={resolve('/')} class="text-lg font-semibold tracking-tight">Pay with me</a>
 				<!-- Auth-aware header actions. -->
-				<div class="flex min-w-0 items-center gap-2">
+				<div class="flex min-w-0 items-center gap-1">
+					<!-- The only entry point to the (already-built) dark theme. Icon-only, so
+					     it costs no width next to a long display name; the accessible name
+					     states what it does rather than the current state. -->
+					<Button
+						onclick={toggleMode}
+						variant="ghost"
+						size="icon"
+						class="shrink-0"
+						aria-label="Switch to {mode.current === 'dark' ? 'light' : 'dark'} theme"
+					>
+						{#if mode.current === 'dark'}
+							<SunIcon class="size-4" aria-hidden="true" />
+						{:else}
+							<MoonIcon class="size-4" aria-hidden="true" />
+						{/if}
+					</Button>
 					{#if data.user}
 						<a
 							href={resolve('/settings')}

@@ -32,7 +32,9 @@
 	</div>
 
 	{#if hasGroups}
-		<ul class="space-y-3">
+		<!-- Two-up from `md:`: these cards are two short lines each, so a single
+		     column past ~700px is mostly empty space. -->
+		<ul class="grid gap-3 md:grid-cols-2">
 			{#each data.groups as group (group.id)}
 				<li>
 					<!-- The card leads with the caller's OWN position, which is what the
