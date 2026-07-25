@@ -59,13 +59,17 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	// Each row carries the raw signed balance (minor units) + a formatted display
 	// string in the settlement currency. `formatAmount` handles the sign, so a
 	// debtor reads e.g. "-฿120.00" and a creditor "฿120.00".
+	//
+	// `code: false` throughout: this whole page is scoped to ONE group, whose
+	// settlement currency the header already names, so prefixing every row with
+	// the ISO code ("THB ฿120.00") is noise that also steals row width.
 	const ordered = orderByWhoShouldPay(balances);
 	const balanceRows = ordered.map((b: MemberBalance) => ({
 		memberId: b.memberId,
 		displayName: displayName(b.memberId),
 		// Raw signed minor units (no floats) — the UI can branch on sign.
 		balance: b.balance,
-		balanceFormatted: formatAmount(b.balance, settlementCurrency),
+		balanceFormatted: formatAmount(b.balance, settlementCurrency, { code: false }),
 		// Convenience flags for the prominent "who owes / who is owed" summary (§8.2).
 		isDebtor: b.balance < 0,
 		isCreditor: b.balance > 0,
@@ -85,7 +89,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		toDisplayName: displayName(s.toMemberId),
 		// Raw settlement minor units — fed straight into the prefill query string.
 		amount: s.amount,
-		amountFormatted: formatAmount(s.amount, settlementCurrency)
+		amountFormatted: formatAmount(s.amount, settlementCurrency, { code: false })
 	}));
 
 	return {

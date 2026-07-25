@@ -72,7 +72,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		memberId: b.memberId,
 		displayName: displayName(b.memberId),
 		balance: b.balance,
-		balanceFormatted: formatAmount(b.balance, settlementCurrency),
+		// `code: false`: every balance here is in THIS group's settlement currency,
+		// which the page states once — so the rows read "-¥21,560", not the
+		// redundant "JPY ¥-21,560".
+		balanceFormatted: formatAmount(b.balance, settlementCurrency, { code: false }),
 		isDebtor: b.balance < 0,
 		isCreditor: b.balance > 0,
 		isActive: isActiveById.get(b.memberId) ?? true

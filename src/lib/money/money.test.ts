@@ -162,6 +162,40 @@ describe('formatAmount', () => {
 	it('throws on a non-integer minor amount', () => {
 		expect(() => formatAmount(12.5, 'USD')).toThrow();
 	});
+
+	// `{ code: false }` is for surfaces where context already fixes the currency
+	// (inside one group), so repeating the ISO code on every row is noise.
+	describe('{ code: false } — context-established currency', () => {
+		it('drops the ISO code and keeps the bare symbol', () => {
+			expect(formatAmount(1000, 'JPY', { code: false })).toBe('¥1,000');
+			expect(formatAmount(1250, 'USD', { code: false })).toBe('$12.50');
+			expect(formatAmount(123456789, 'USD', { code: false })).toBe('$1,234,567.89');
+		});
+
+		it('hoists the sign in front of the symbol', () => {
+			expect(formatAmount(-1250, 'USD', { code: false })).toBe('-$12.50');
+			expect(formatAmount(-2156000, 'JPY', { code: false })).toBe('-¥2,156,000');
+		});
+
+		it('leaves already-unique letter symbols untouched', () => {
+			// 'CN¥' starts with a letter and is unique, so the default never
+			// code-prefixed it; `code: false` is a no-op for these.
+			expect(formatAmount(1000, 'CNY', { code: false })).toBe(formatAmount(1000, 'CNY'));
+		});
+
+		it('collapses SEK/NOK to the same string — the caller must supply context', () => {
+			// The disambiguation this opt-out gives up: only pass `code: false` where
+			// the surrounding UI already states which currency is in play.
+			expect(formatAmount(50000, 'SEK', { code: false })).toBe(
+				formatAmount(50000, 'NOK', { code: false })
+			);
+		});
+
+		it('still honours `symbol: false` and `grouped: false`', () => {
+			expect(formatAmount(1250, 'USD', { code: false, symbol: false })).toBe('12.50');
+			expect(formatAmount(123456789, 'USD', { code: false, grouped: false })).toBe('$1234567.89');
+		});
+	});
 });
 
 describe('symbol disambiguation (PLAN §7.5.1)', () => {

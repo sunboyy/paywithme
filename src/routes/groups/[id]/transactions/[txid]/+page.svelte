@@ -39,6 +39,20 @@
 	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
 	const isDeleted = $derived(detail.deletedAt !== null);
 
+	/**
+	 * Amount in the TRANSACTION's own entry currency. The ISO code is kept only
+	 * when that currency is foreign to the group — a settlement-currency amount is
+	 * already identified by the page's context, so "JPY ¥6,800" on every line is
+	 * noise. A code-prefixed amount on this page therefore always means "foreign".
+	 */
+	const entry = $derived((minor: number) =>
+		formatAmount(minor, detail.currency, { code: detail.isForeign })
+	);
+	/** Amount in the group's settlement currency — always context-established. */
+	const settlement = $derived((minor: number) =>
+		formatAmount(minor, settlementCurrency, { code: false })
+	);
+
 	// Whether the edit form is open (JS-enhanced affordance). A deleted txn can't edit.
 	let editing = $state(false);
 
@@ -170,11 +184,11 @@
 				<!-- Amount: ORIGINAL entry amount + currency; settlement equivalent for foreign (§7.6). -->
 				<div>
 					<p class="text-2xl font-semibold tabular-nums">
-						{formatAmount(detail.amountTotal, detail.currency)}
+						{entry(detail.amountTotal)}
 					</p>
 					{#if detail.isForeign}
 						<p class="text-muted-foreground text-sm tabular-nums">
-							{formatAmount(detail.amountTotalSettlement, settlementCurrency)} · rate via {detail.currency}
+							{settlement(detail.amountTotalSettlement)} · rate via {detail.currency}
 							→ {settlementCurrency}
 						</p>
 					{/if}
@@ -189,7 +203,7 @@
 						{#each detail.payers as payer (payer.memberId)}
 							<li class="flex items-center justify-between text-sm">
 								<span>{memberName(payer.memberId)}</span>
-								<span class="tabular-nums">{formatAmount(payer.amountPaid, detail.currency)}</span>
+								<span class="tabular-nums">{entry(payer.amountPaid)}</span>
 							</li>
 						{/each}
 					</ul>
@@ -205,15 +219,13 @@
 								<li class="rounded-md border p-2">
 									<div class="flex items-center justify-between text-sm font-medium">
 										<span>{item.label}</span>
-										<span class="tabular-nums">{formatAmount(item.amount, detail.currency)}</span>
+										<span class="tabular-nums">{entry(item.amount)}</span>
 									</div>
 									<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
 										{#each item.shares as share (share.memberId)}
 											<li class="flex items-center justify-between">
 												<span>{memberName(share.memberId)}</span>
-												<span class="tabular-nums"
-													>{formatAmount(share.amountOwed, detail.currency)}</span
-												>
+												<span class="tabular-nums">{entry(share.amountOwed)}</span>
 											</li>
 										{/each}
 									</ul>
@@ -238,10 +250,7 @@
 											{/if}
 										</span>
 										<span class="tabular-nums">
-											{effect.signedEffect < 0 ? '−' : '+'}{formatAmount(
-												Math.abs(effect.signedEffect),
-												detail.currency
-											)}
+											{effect.signedEffect < 0 ? '−' : '+'}{entry(Math.abs(effect.signedEffect))}
 										</span>
 									</li>
 								{/each}
@@ -261,9 +270,7 @@
 						{#each detail.shares as share (share.memberId)}
 							<li class="flex items-center justify-between text-sm">
 								<span>{memberName(share.memberId)}</span>
-								<span class="tabular-nums"
-									>{formatAmount(share.amountOwed, settlementCurrency)}</span
-								>
+								<span class="tabular-nums">{settlement(share.amountOwed)}</span>
 							</li>
 						{/each}
 					</ul>

@@ -19,6 +19,7 @@ incremental improvements, not part of the original build loop.
 | 002  | Reject zero-amount transactions                      | P2       | S      | —          | DONE   |
 | 003  | Settlement-lifecycle integration test                | P1       | M      | —          | DONE   |
 | 004  | Mark inactive members in the settle-up balances list | P3       | S      | —          | DONE   |
+| 005  | UX/UI improvement pass (4 stages)                    | P1       | L      | —          | TODO   |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 

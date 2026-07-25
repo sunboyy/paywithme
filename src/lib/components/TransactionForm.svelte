@@ -125,6 +125,18 @@
 	// `entryCode` is what every amount field on the form is denominated in.
 	const currencyCode = $derived(entryCode);
 
+	// Display formatters for the read-only previews below (the breakdown, the
+	// derived itemized total). The ISO code is kept ONLY for a foreign entry
+	// currency: within a group the settlement currency is already established by
+	// context, so "JPY ¥6,800" on every preview line is redundant width. A
+	// code-prefixed amount here therefore always signals "foreign".
+	const entryDisplay = $derived((minor: number) =>
+		formatAmount(minor, currencyCode, { code: isForeign })
+	);
+	const settlementDisplay = $derived((minor: number) =>
+		formatAmount(minor, settlementCode, { code: false })
+	);
+
 	// The FX rate string (settlement units per 1 entry unit, ≤6dp). For a foreign
 	// currency the user types EITHER this OR the settlement-equivalent total below;
 	// the other is derived. Held as a display string (separate from the parsed schema
@@ -275,7 +287,10 @@
 		if (rate === null || total <= 0) return null;
 		try {
 			const stl = convertToSettlement(total, entryCode, settlementCode, rate);
-			return { txn: formatAmount(total, entryCode), settlement: formatAmount(stl, settlementCode) };
+			return {
+				txn: formatAmount(total, entryCode),
+				settlement: formatAmount(stl, settlementCode, { code: false })
+			};
 		} catch {
 			return null;
 		}
@@ -864,7 +879,7 @@
 		{#if $formData.splitMode === 'itemized'}
 			<div class="flex items-center justify-between gap-2">
 				<span class="text-muted-foreground text-sm">Total (items + charges)</span>
-				<span class="font-medium">{formatAmount(itemizedTotal, currencyCode)}</span>
+				<span class="font-medium">{entryDisplay(itemizedTotal)}</span>
 			</div>
 		{:else}
 			<div class="flex items-center gap-2">
@@ -1215,7 +1230,7 @@
 					<p class="font-medium">Breakdown</p>
 					<div class="flex items-center justify-between">
 						<span class="text-muted-foreground">Items subtotal</span>
-						<span>{formatAmount(itemsSubtotal, currencyCode)}</span>
+						<span>{entryDisplay(itemsSubtotal)}</span>
 					</div>
 					{#each itemizedBreakdown.charges as resolved (resolved.charge.sortOrder)}
 						<div class="flex items-center justify-between">
@@ -1223,20 +1238,17 @@
 								{chargeKindLabel(resolved.charge.kind)}
 							</span>
 							<span>
-								{resolved.total < 0 ? '−' : '+'}{formatAmount(
-									Math.abs(resolved.total),
-									currencyCode
-								)}
+								{resolved.total < 0 ? '−' : '+'}{entryDisplay(Math.abs(resolved.total))}
 							</span>
 						</div>
 					{/each}
 					<div class="flex items-center justify-between border-t pt-1 font-medium">
 						<span>Total</span>
 						<span class="text-right">
-							<span class="block">{formatAmount(itemizedBreakdown.amountTotal, currencyCode)}</span>
+							<span class="block">{entryDisplay(itemizedBreakdown.amountTotal)}</span>
 							{#if isForeign && settlementPreview}
 								<span class="text-muted-foreground block text-xs font-normal">
-									{formatAmount($formData.amountTotalSettlement, settlementCode)}
+									{settlementDisplay($formData.amountTotalSettlement)}
 								</span>
 							{/if}
 						</span>
@@ -1250,10 +1262,10 @@
 							<div class="flex items-center justify-between">
 								<span>{memberName(share.memberId)}</span>
 								<span class="text-right">
-									<span class="block">{formatAmount(share.amountOwed, currencyCode)}</span>
+									<span class="block">{entryDisplay(share.amountOwed)}</span>
 									{#if isForeign && settlementShares}
 										<span class="text-muted-foreground block text-xs">
-											{formatAmount(settlementShares.get(share.memberId) ?? 0, settlementCode)}
+											{settlementDisplay(settlementShares.get(share.memberId) ?? 0)}
 										</span>
 									{/if}
 								</span>

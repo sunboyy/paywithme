@@ -16,6 +16,7 @@
 	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { formatAmount, type CurrencyCode } from '$lib/money';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
+	import { dayLabel } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import ReceiptIcon from '@lucide/svelte/icons/receipt';
 	import HandshakeIcon from '@lucide/svelte/icons/handshake';
@@ -24,14 +25,6 @@
 	let { data }: { data: PageData } = $props();
 
 	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
-
-	function formatDate(iso: string): string {
-		return new Date(iso).toLocaleDateString(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric'
-		});
-	}
 </script>
 
 <svelte:head>
@@ -53,16 +46,25 @@
 		<GroupNav groupId={data.group.id} current="overview" />
 	</header>
 
-	<!-- Balance summary: who owes / who is owed. Links to the full settle page. -->
+	<!-- Balance summary: who owes / who is owed. Links to the full settle page.
+
+	     The trailing link goes in <Card.Action>, NOT a `flex-row justify-between`
+	     class on <Card.Header>: the header is `display: grid`, and since `cn()`
+	     (tailwind-merge) treats `display` and `flex-direction` as different groups
+	     it keeps both — `grid` wins and the `flex-row` override is silently inert,
+	     which dropped the link onto its own line. `data-slot="card-action"` is what
+	     switches the header to `grid-cols-[1fr_auto]`. -->
 	<Card.Root>
-		<Card.Header class="flex-row items-center justify-between gap-4 space-y-0 pb-2">
+		<Card.Header class="pb-2">
 			<Card.Title>Balances</Card.Title>
-			<a
-				href={resolve('/groups/[id]/settle', { id: data.group.id })}
-				class="text-muted-foreground hover:text-foreground text-sm hover:underline"
-			>
-				Settle up →
-			</a>
+			<Card.Action>
+				<a
+					href={resolve('/groups/[id]/settle', { id: data.group.id })}
+					class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+				>
+					Settle up →
+				</a>
+			</Card.Action>
 		</Card.Header>
 		<Card.Content>
 			{#if data.balances.length === 0}
@@ -102,14 +104,16 @@
 
 	<!-- Recent transactions: last 5, with a "See all" link. -->
 	<Card.Root>
-		<Card.Header class="flex-row items-center justify-between gap-4 space-y-0 pb-2">
+		<Card.Header class="pb-2">
 			<Card.Title>Recent transactions</Card.Title>
-			<a
-				href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-				class="text-muted-foreground hover:text-foreground text-sm hover:underline"
-			>
-				See all →
-			</a>
+			<Card.Action>
+				<a
+					href={resolve('/groups/[id]/transactions', { id: data.group.id })}
+					class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+				>
+					See all →
+				</a>
+			</Card.Action>
 		</Card.Header>
 		<Card.Content>
 			{#if data.recentTransactions.length === 0}
@@ -147,24 +151,31 @@
 								<span class="min-w-0 flex-1">
 									<span class="flex items-center gap-2">
 										<span class="truncate text-sm font-medium">{txn.title}</span>
-										<Badge
-											variant={txn.type === 'transfer' ? 'secondary' : 'outline'}
-											class="shrink-0 text-xs"
-										>
-											{txn.type}
-										</Badge>
+										<!-- Only TRANSFERS are badged. A "spending" badge on every row said
+										     nothing (the category icon already encodes it) while eating the
+										     width that truncated titles to "Museum t…" on a phone. -->
+										{#if txn.type === 'transfer'}
+											<Badge variant="secondary" class="shrink-0 text-xs">transfer</Badge>
+										{/if}
 									</span>
+									<!-- `created_at` is the user-editable REAL-WORLD DATE (day precision, from
+									     a `type="date"` input), NOT an insert timestamp — so it gets a day
+									     label. A fine-grained relative time reads as nonsense here ("in 17
+									     minutes") for anything dated today. The audit rows below use
+									     `occurred_at`, which IS a true timestamp, and keep relativeTime. -->
 									<span class="text-muted-foreground block text-xs">
-										{formatDate(txn.createdAt)}
+										{dayLabel(txn.createdAt)}
 									</span>
 								</span>
 								<span class="shrink-0 text-right">
+									<!-- Settlement-currency amounts render bare ("¥3,200"); a FOREIGN amount
+									     keeps its ISO code so the two are never confusable. -->
 									<span class="block text-sm font-medium tabular-nums">
-										{formatAmount(txn.amountTotal, txn.currency)}
+										{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
 									</span>
 									{#if txn.isForeign}
 										<span class="text-muted-foreground block text-xs tabular-nums">
-											{formatAmount(txn.amountTotalSettlement, settlementCurrency)}
+											{formatAmount(txn.amountTotalSettlement, settlementCurrency, { code: false })}
 										</span>
 									{/if}
 								</span>
@@ -178,14 +189,16 @@
 
 	<!-- Recent activity: last 5 audit entries, with a "See all" link. -->
 	<Card.Root>
-		<Card.Header class="flex-row items-center justify-between gap-4 space-y-0 pb-2">
+		<Card.Header class="pb-2">
 			<Card.Title>Recent activity</Card.Title>
-			<a
-				href={resolve('/groups/[id]/activity', { id: data.group.id })}
-				class="text-muted-foreground hover:text-foreground text-sm hover:underline"
-			>
-				See all →
-			</a>
+			<Card.Action>
+				<a
+					href={resolve('/groups/[id]/activity', { id: data.group.id })}
+					class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+				>
+					See all →
+				</a>
+			</Card.Action>
 		</Card.Header>
 		<Card.Content>
 			{#if data.recentActivity.length === 0}

@@ -163,6 +163,23 @@ export interface FormatAmountOptions {
 	 * Insert ASCII thousands separators in the integer part (default `true`).
 	 */
 	readonly grouped?: boolean;
+	/**
+	 * Prefix the ISO code when the symbol is ambiguous on its own (default
+	 * `true` — the globally-safe disambiguation documented on
+	 * {@link formatAmount}).
+	 *
+	 * Set `false` on surfaces where the currency is already established by
+	 * context and repeating it is noise — inside a single group, every amount is
+	 * in that group's settlement currency, which the page header already states,
+	 * so `JPY ¥3,200` on every row is redundant and steals width from the
+	 * content beside it. With `code: false` the bare symbol is used and the sign
+	 * moves OUTSIDE it (`-¥21,560`, not `¥-21,560`).
+	 *
+	 * Leave it at the default wherever two currencies can appear together (the
+	 * groups list, the foreign-currency secondary line) or on machine-readable
+	 * surfaces (MCP / API views), where self-identifying amounts are the point.
+	 */
+	readonly code?: boolean;
 }
 
 /**
@@ -192,6 +209,12 @@ export interface FormatAmountOptions {
  * @example formatAmount(1000, 'JPY') // → 'JPY ¥1,000'  (0 dp, bare glyph)
  * @example formatAmount(50000, 'SEK') // → 'SEK kr500.00'
  * @example formatAmount(50000, 'NOK') // → 'NOK kr500.00' (distinct from SEK)
+ *
+ * Pass `{ code: false }` where the currency is already established by context
+ * (inside one group) — see {@link FormatAmountOptions.code}:
+ *
+ * @example formatAmount(1000, 'JPY', { code: false })   // → '¥1,000'
+ * @example formatAmount(-2156000, 'JPY', { code: false }) // → '-¥2,156,000'
  */
 export function formatAmount(
 	minor: number,
@@ -208,11 +231,18 @@ export function formatAmount(
 	const { exponent, symbol } = currency;
 	const withSymbol = opts?.symbol ?? true;
 	const grouped = opts?.grouped ?? true;
+	const withCode = opts?.code ?? true;
 
 	const numeric = formatMinor(minor, exponent, grouped);
 
 	if (!withSymbol) {
 		return numeric;
+	}
+	if (!withCode) {
+		// Context-established currency: bare symbol, sign hoisted in front of it so
+		// a negative reads `-¥21,560` rather than `¥-21,560`.
+		const negative = numeric.startsWith('-');
+		return `${negative ? '-' : ''}${symbol}${negative ? numeric.slice(1) : numeric}`;
 	}
 	return `${symbolPrefix(code, symbol)}${numeric}`;
 }

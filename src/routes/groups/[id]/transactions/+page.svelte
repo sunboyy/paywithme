@@ -14,6 +14,7 @@
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
+	import { groupByDay } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import ReceiptIcon from '@lucide/svelte/icons/receipt';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
@@ -52,13 +53,10 @@
 		return parts.length > 0 ? `${listPath}?${parts.join('&')}` : listPath;
 	}
 
-	function formatDate(iso: string): string {
-		return new Date(iso).toLocaleDateString(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric'
-		});
-	}
+	// Day sections instead of a per-row date (which repeated the same string on
+	// every line of a day's spending). The server already returns newest-first, and
+	// `groupByDay` groups consecutive runs, so that order is preserved exactly.
+	const dayGroups = $derived(groupByDay(data.transactions, (t) => t.createdAt));
 </script>
 
 <svelte:head>
@@ -152,49 +150,67 @@
 			{/snippet}
 		</EmptyState>
 	{:else}
-		<ul class="space-y-2">
-			{#each data.transactions as txn (txn.id)}
-				<li>
-					<!-- Links to the per-transaction view/edit page (task 4.11). -->
-					<a
-						href={resolve('/groups/[id]/transactions/[txid]', {
-							id: data.group.id,
-							txid: txn.id
-						})}
-						class="bg-card hover:bg-accent flex items-center gap-3 rounded-lg border p-3 transition-colors"
-					>
-						<span
-							class="bg-muted text-muted-foreground flex size-10 shrink-0 items-center justify-center rounded-full"
-							aria-hidden="true"
-						>
-							<CategoryIcon name={txn.categoryIcon} class="size-5" />
-						</span>
-						<span class="min-w-0 flex-1">
-							<span class="flex items-center gap-2">
-								<span class="truncate font-medium">{txn.title}</span>
-								<Badge variant={txn.type === 'transfer' ? 'secondary' : 'outline'} class="shrink-0">
-									{txn.type}
-								</Badge>
-							</span>
-							<span class="text-muted-foreground block text-xs">
-								{txn.categoryName} · {formatDate(txn.createdAt)}
-							</span>
-						</span>
-						<!-- §7.6 display: show the ORIGINAL amount + currency; for a foreign
-						     transaction the settlement equivalent is secondary text below. -->
-						<span class="shrink-0 text-right">
-							<span class="block font-medium tabular-nums">
-								{formatAmount(txn.amountTotal, txn.currency)}
-							</span>
-							{#if txn.isForeign}
-								<span class="text-muted-foreground block text-xs tabular-nums">
-									{formatAmount(txn.amountTotalSettlement, settlementCurrency)}
+		<!-- One heading per day, rows beneath it. The heading is sticky so the day in
+		     view is always identifiable while scrolling a long list. -->
+		{#each dayGroups as group (group.key)}
+			<section class="space-y-2">
+				<h2
+					class="bg-background/95 supports-backdrop-filter:bg-background/80 text-muted-foreground sticky top-14 z-5 py-1.5 text-xs font-medium tracking-wide uppercase backdrop-blur"
+				>
+					{group.label}
+				</h2>
+				<ul class="space-y-2">
+					{#each group.items as txn (txn.id)}
+						<li>
+							<!-- Links to the per-transaction view/edit page (task 4.11). -->
+							<a
+								href={resolve('/groups/[id]/transactions/[txid]', {
+									id: data.group.id,
+									txid: txn.id
+								})}
+								class="bg-card hover:bg-accent flex items-center gap-3 rounded-lg border p-3 transition-colors"
+							>
+								<span
+									class="bg-muted text-muted-foreground flex size-10 shrink-0 items-center justify-center rounded-full"
+									aria-hidden="true"
+								>
+									<CategoryIcon name={txn.categoryIcon} class="size-5" />
 								</span>
-							{/if}
-						</span>
-					</a>
-				</li>
-			{/each}
-		</ul>
+								<span class="min-w-0 flex-1">
+									<span class="flex items-center gap-2">
+										<span class="truncate font-medium">{txn.title}</span>
+										<!-- Transfers only: a "spending" badge on every row was redundant
+										     with the icon AND the filter chips above, and its width is what
+										     truncated titles to "Museum tic…" at 390px. -->
+										{#if txn.type === 'transfer'}
+											<Badge variant="secondary" class="shrink-0">transfer</Badge>
+										{/if}
+									</span>
+									<span class="text-muted-foreground block text-xs">
+										{txn.categoryName}
+									</span>
+								</span>
+								<!-- §7.6 display: show the ORIGINAL amount + currency; for a foreign
+								     transaction the settlement equivalent is secondary text below.
+								     Settlement-currency amounts drop the ISO code (the group states it
+								     once); a foreign amount keeps it so the two can't be confused. -->
+								<span class="shrink-0 text-right">
+									<span class="block font-medium tabular-nums">
+										{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
+									</span>
+									{#if txn.isForeign}
+										<span class="text-muted-foreground block text-xs tabular-nums">
+											{formatAmount(txn.amountTotalSettlement, settlementCurrency, {
+												code: false
+											})}
+										</span>
+									{/if}
+								</span>
+							</a>
+						</li>
+					{/each}
+				</ul>
+			</section>
+		{/each}
 	{/if}
 </div>
