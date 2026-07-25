@@ -35,16 +35,38 @@
 		<ul class="space-y-3">
 			{#each data.groups as group (group.id)}
 				<li>
-					<!-- Cards show name + settlement currency only. Net balances are
-					     Phase 5 (task 5.1) and are intentionally NOT shown here. -->
+					<!-- The card leads with the caller's OWN position, which is what the
+					     dashboard is opened to check. The settlement currency alone (the
+					     card's previous content) answered a question nobody has — and the
+					     formatted amount already carries the symbol, so the currency badge
+					     only earns its place when there is no figure to show. -->
 					<a
 						href={resolve('/groups/[id]', { id: group.id })}
 						class="focus-visible:ring-ring block rounded-xl focus-visible:ring-2 focus-visible:outline-none"
 					>
-						<Card.Root class="hover:bg-accent/50 transition-colors">
-							<Card.Header class="flex-row items-center justify-between gap-4 space-y-0">
-								<Card.Title class="text-lg wrap-break-word">{group.name}</Card.Title>
-								<Badge variant="secondary">{currencyLabel(group.settlementCurrency)}</Badge>
+						<Card.Root class="hover:bg-accent/50 gap-0 py-4 transition-colors">
+							<Card.Header class="px-4">
+								<Card.Title class="text-base wrap-break-word">{group.name}</Card.Title>
+								<Card.Action>
+									{#if group.net === null}
+										<Badge variant="secondary">{currencyLabel(group.settlementCurrency)}</Badge>
+									{:else if group.net === 0}
+										<span class="text-muted-foreground text-sm">settled up</span>
+									{:else}
+										<span class="text-right">
+											<span class="text-muted-foreground block text-xs">
+												{group.net > 0 ? 'you are owed' : 'you owe'}
+											</span>
+											<span
+												class="block font-semibold tabular-nums {group.net > 0
+													? 'text-money-positive'
+													: 'text-money-negative'}"
+											>
+												{group.netFormatted}
+											</span>
+										</span>
+									{/if}
+								</Card.Action>
 							</Card.Header>
 						</Card.Root>
 					</a>

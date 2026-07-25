@@ -76,7 +76,7 @@
 						<span class="flex items-center gap-2">
 							<span class="font-medium">{row.displayName}</span>
 							{#if row.isDebtor}
-								<Badge variant="destructive">owes</Badge>
+								<Badge variant="secondary">owes</Badge>
 							{:else if row.isCreditor}
 								<Badge variant="secondary">is owed</Badge>
 							{:else}
@@ -86,11 +86,13 @@
 								<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
 							{/if}
 						</span>
+						<!-- Semantic money colours (see the group overview): --destructive is
+						     reserved for destructive ACTIONS, not for owing money. -->
 						<span
 							class="shrink-0 font-medium tabular-nums {row.isDebtor
-								? 'text-destructive'
+								? 'text-money-negative'
 								: row.isCreditor
-									? ''
+									? 'text-money-positive'
 									: 'text-muted-foreground'}"
 						>
 							{row.balanceFormatted}

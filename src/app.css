@@ -12,8 +12,12 @@
 	--card-foreground: oklch(0.145 0 0);
 	--popover: oklch(1 0 0);
 	--popover-foreground: oklch(0.145 0 0);
-	--primary: oklch(0.205 0 0);
-	--primary-foreground: oklch(0.985 0 0);
+	/* Brand teal. Every token here used to be oklch(L 0 0) — literally zero
+	   chroma — so the only colour in a social money app was destructive red.
+	   Contrast-verified: white label on this button = 5.08:1; the colour on the
+	   page background = 5.23:1. All values are inside the sRGB gamut. */
+	--primary: oklch(0.52 0.098 175);
+	--primary-foreground: oklch(0.99 0 0);
 	--secondary: oklch(0.97 0 0);
 	--secondary-foreground: oklch(0.205 0 0);
 	--muted: oklch(0.97 0 0);
@@ -21,9 +25,17 @@
 	--accent: oklch(0.97 0 0);
 	--accent-foreground: oklch(0.205 0 0);
 	--destructive: oklch(0.577 0.245 27.325);
+	/* Semantic MONEY tokens — deliberately distinct from --destructive, which
+	   means "destructive action" (Delete) and nothing else. Owing money is not an
+	   error state, and being owed money had no positive encoding at all when the
+	   only signal was red-vs-default-black. Always pair these with the adjacent
+	   "owes"/"is owed" text badge so colour is never the sole channel (WCAG 1.4.1).
+	   Verified ≥4.5:1 on background, card AND muted in both themes. */
+	--money-positive: oklch(0.52 0.114 162);
+	--money-negative: oklch(0.55 0.2 25);
 	--border: oklch(0.922 0 0);
 	--input: oklch(0.922 0 0);
-	--ring: oklch(0.708 0 0);
+	--ring: oklch(0.52 0.098 175);
 	--chart-1: oklch(0.87 0 0);
 	--chart-2: oklch(0.556 0 0);
 	--chart-3: oklch(0.439 0 0);
@@ -47,8 +59,9 @@
 	--card-foreground: oklch(0.985 0 0);
 	--popover: oklch(0.205 0 0);
 	--popover-foreground: oklch(0.985 0 0);
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
+	/* Dark-theme brand: lifted L, dark label. 7.45:1 label-on-button. */
+	--primary: oklch(0.7 0.13 175);
+	--primary-foreground: oklch(0.18 0.02 175);
 	--secondary: oklch(0.269 0 0);
 	--secondary-foreground: oklch(0.985 0 0);
 	--muted: oklch(0.269 0 0);
@@ -56,9 +69,11 @@
 	--accent: oklch(0.269 0 0);
 	--accent-foreground: oklch(0.985 0 0);
 	--destructive: oklch(0.704 0.191 22.216);
+	--money-positive: oklch(0.7 0.152 162);
+	--money-negative: oklch(0.7 0.19 25);
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.556 0 0);
+	--ring: oklch(0.7 0.13 175);
 	--chart-1: oklch(0.87 0 0);
 	--chart-2: oklch(0.556 0 0);
 	--chart-3: oklch(0.439 0 0);
@@ -93,6 +108,8 @@
 	--color-input: var(--input);
 	--color-border: var(--border);
 	--color-destructive: var(--destructive);
+	--color-money-positive: var(--money-positive);
+	--color-money-negative: var(--money-negative);
 	--color-accent-foreground: var(--accent-foreground);
 	--color-accent: var(--accent);
 	--color-muted-foreground: var(--muted-foreground);

@@ -46,6 +46,54 @@
 		<GroupNav groupId={data.group.id} current="overview" />
 	</header>
 
+	<!-- The viewer's OWN position, first thing on the page.
+
+	     Previously the page opened with a neutral table of every member, in which
+	     your own row was visually identical to the other three — so the one number
+	     the page is opened to check ("do I owe anyone?") had to be hunted for.
+	     The per-member list still follows below; this just answers the question
+	     first. Colour is paired with the wording, never carrying it alone. -->
+	{#if data.summary}
+		{@const owed = data.summary.balance > 0}
+		{@const settled = data.summary.balance === 0}
+		<Card.Root class="gap-0 py-5">
+			<Card.Content class="flex items-center justify-between gap-4 px-5">
+				<div class="min-w-0">
+					<p class="text-muted-foreground text-sm">
+						{settled ? "You're all square" : owed ? 'You are owed' : 'You owe'}
+					</p>
+					{#if !settled}
+						<p
+							class="text-3xl font-semibold tabular-nums {owed
+								? 'text-money-positive'
+								: 'text-money-negative'}"
+						>
+							{data.summary.amountFormatted}
+						</p>
+						{#if data.summary.counterparties > 0}
+							<p class="text-muted-foreground text-xs">
+								{owed ? 'from' : 'to'}
+								{data.summary.counterparties}
+								{data.summary.counterparties === 1 ? 'person' : 'people'}
+							</p>
+						{/if}
+					{:else}
+						<p class="text-muted-foreground text-sm">Nothing to settle right now.</p>
+					{/if}
+				</div>
+				{#if !settled}
+					<Button
+						variant="outline"
+						class="shrink-0"
+						href={resolve('/groups/[id]/settle', { id: data.group.id })}
+					>
+						Settle up
+					</Button>
+				{/if}
+			</Card.Content>
+		</Card.Root>
+	{/if}
+
 	<!-- Balance summary: who owes / who is owed. Links to the full settle page.
 
 	     The trailing link goes in <Card.Action>, NOT a `flex-row justify-between`
@@ -75,8 +123,11 @@
 						<li class="flex items-center justify-between gap-2 py-2">
 							<span class="flex items-center gap-2">
 								<span class="font-medium">{row.displayName}</span>
+								{#if row.isYou}
+									<Badge variant="outline">You</Badge>
+								{/if}
 								{#if row.isDebtor}
-									<Badge variant="destructive">owes</Badge>
+									<Badge variant="secondary">owes</Badge>
 								{:else if row.isCreditor}
 									<Badge variant="secondary">is owed</Badge>
 								{:else}
@@ -86,11 +137,15 @@
 									<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
 								{/if}
 							</span>
+							<!-- Semantic money colours, NOT --destructive: owing money is not an
+							     error, and being owed had no positive encoding when the only signal
+							     was red-vs-black. The adjacent badge carries the same meaning in
+							     text, so colour is never the sole channel. -->
 							<span
 								class="shrink-0 font-medium tabular-nums {row.isDebtor
-									? 'text-destructive'
+									? 'text-money-negative'
 									: row.isCreditor
-										? ''
+										? 'text-money-positive'
 										: 'text-muted-foreground'}"
 							>
 								{row.balanceFormatted}

@@ -65,6 +65,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const isActiveById = new Map(members.map((m) => [m.id, m.deactivatedAt == null]));
 	const displayName = (memberId: string): string => nameById.get(memberId) ?? memberId;
 
+	// The caller's own member row in this group, if they have one. Read off the
+	// roster we already fetched rather than issuing another query.
+	const viewerMemberId = members.find((m) => m.userId === user.id)?.id;
+
 	// Balance rows ordered most-negative-first (largest debtor at top), same as
 	// the settle page but used here as a compact summary.
 	const ordered = orderByWhoShouldPay(balances);
@@ -78,11 +82,39 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		balanceFormatted: formatAmount(b.balance, settlementCurrency, { code: false }),
 		isDebtor: b.balance < 0,
 		isCreditor: b.balance > 0,
-		isActive: isActiveById.get(b.memberId) ?? true
+		isActive: isActiveById.get(b.memberId) ?? true,
+		// Marks the viewer's own row so the list can call it out — without this the
+		// only way to find yourself is to recognise your own name among the others.
+		isYou: viewerMemberId !== undefined && b.memberId === viewerMemberId
 	}));
+
+	// ── The viewer's OWN position (the reason the page gets opened) ───────────────
+	// Derived from the roster already loaded above (the member row whose `userId`
+	// is the caller) plus the balances already computed — no extra query. A user
+	// with no member row in this group (possible for a soft-deactivated member)
+	// simply gets no summary rather than a wrong one.
+	const you = balances.find((b: MemberBalance) => b.memberId === viewerMemberId);
+	const yourBalance = you?.balance ?? null;
+	const summary =
+		yourBalance === null
+			? null
+			: {
+					balance: yourBalance,
+					// Absolute value: the label supplies the direction ("you are owed"),
+					// so a signed figure beside it would read as a double negative.
+					amountFormatted: formatAmount(Math.abs(yourBalance), settlementCurrency, {
+						code: false
+					}),
+					// How many people are on the other side of that number — the natural
+					// follow-up question ("owed by whom?").
+					counterparties: balanceRows.filter(
+						(r) => !r.isYou && (yourBalance > 0 ? r.isDebtor : r.isCreditor)
+					).length
+				};
 
 	return {
 		group: { id: group.id, name: group.name, settlementCurrency },
+		summary,
 		currency: currency
 			? { code: currency.code, symbol: currency.symbol, exponent: currency.exponent }
 			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },

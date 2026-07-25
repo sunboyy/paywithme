@@ -72,10 +72,18 @@ type BalanceRow = {
 	isDebtor: boolean;
 	isCreditor: boolean;
 	isActive: boolean;
+	isYou: boolean;
 };
+
+type Summary = {
+	balance: number;
+	amountFormatted: string;
+	counterparties: number;
+} | null;
 
 type LoadResult = {
 	group: { id: string; name: string; settlementCurrency: string };
+	summary: Summary;
 	balances: BalanceRow[];
 	recentTransactions: typeof TRANSACTIONS;
 	recentActivity: typeof ACTIVITY;
@@ -166,5 +174,82 @@ describe('/groups/[id] overview load', () => {
 		const result = (await load(makeLoadEvent())) as LoadResult;
 		const unknown = result.balances.find((b) => b.memberId === 'mX');
 		expect(unknown?.displayName).toBe('mX');
+	});
+});
+
+// ── The viewer's own position (the hero summary on the overview) ───────────────
+// `u1` is linked to member `m1`; `m2` (Bob) is an unlinked participant.
+describe('/groups/[id] viewer summary', () => {
+	it("summarises the CALLER's balance, not the first row's", async () => {
+		// Bob is most-negative so he sorts first; the summary must still be Alice's.
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.summary).not.toBeNull();
+		expect(result.summary!.balance).toBe(5000);
+		// Absolute value — the UI supplies "You are owed" / "You owe" wording.
+		expect(result.summary!.amountFormatted).toContain('50.00');
+		expect(result.summary!.amountFormatted).not.toContain('-');
+	});
+
+	it('formats a DEBT without a sign so "You owe -฿50.00" cannot render', async () => {
+		getGroupBalances.mockResolvedValue([
+			{ memberId: 'm1', balance: -5000 },
+			{ memberId: 'm2', balance: 5000 }
+		]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.summary!.balance).toBe(-5000);
+		expect(result.summary!.amountFormatted).not.toContain('-');
+	});
+
+	it('counts only the members on the OTHER side of the balance', async () => {
+		// Alice is owed; m2 and m3 owe, m4 is square → 2 counterparties.
+		listMembers.mockResolvedValue([
+			...MEMBERS,
+			{ id: 'm3', displayName: 'Cara', userId: null, deactivatedAt: null, isLinked: false },
+			{ id: 'm4', displayName: 'Dan', userId: null, deactivatedAt: null, isLinked: false }
+		]);
+		getGroupBalances.mockResolvedValue([
+			{ memberId: 'm1', balance: 8000 },
+			{ memberId: 'm2', balance: -5000 },
+			{ memberId: 'm3', balance: -3000 },
+			{ memberId: 'm4', balance: 0 }
+		]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.summary!.counterparties).toBe(2);
+	});
+
+	it('reports a settled viewer as balance 0 (not as "no summary")', async () => {
+		getGroupBalances.mockResolvedValue([
+			{ memberId: 'm1', balance: 0 },
+			{ memberId: 'm2', balance: 0 }
+		]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.summary).not.toBeNull();
+		expect(result.summary!.balance).toBe(0);
+	});
+
+	it('omits the summary when the caller has no member row in the group', async () => {
+		// No member carries userId 'u1' — better no summary than a wrong one.
+		listMembers.mockResolvedValue([
+			{ id: 'm2', displayName: 'Bob', userId: null, deactivatedAt: null, isLinked: false }
+		]);
+		getGroupBalances.mockResolvedValue([{ memberId: 'm2', balance: 0 }]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.summary).toBeNull();
+	});
+
+	it("flags the caller's own row in the balances list", async () => {
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.balances.find((b) => b.memberId === 'm1')!.isYou).toBe(true);
+		expect(result.balances.find((b) => b.memberId === 'm2')!.isYou).toBe(false);
 	});
 });

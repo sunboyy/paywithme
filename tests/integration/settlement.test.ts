@@ -27,7 +27,7 @@ import { and, eq } from 'drizzle-orm';
 import { createGroup } from '$lib/server/groups';
 import { addMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
-import { getGroupBalances } from '$lib/server/balances';
+import { getGroupBalances, getUserNetBalanceByGroup } from '$lib/server/balances';
 import { suggestSettlements } from '$lib/transactions/balances';
 import { categoriesFor } from '$lib/categories';
 import { createTestUser, cleanupSuiteRows, db, describeIntegration } from './helpers';
@@ -184,5 +184,108 @@ describeIntegration('integration: settlement lifecycle (plan 003; PLAN §9)', ()
 			expect(b.balance).toBe(0);
 		}
 		expect(suggestSettlements(after)).toEqual([]);
+	});
+
+	// ── 3. The dashboard's batched per-group net balance (plan 005) ──────────────
+	//
+	// The /groups cards need ONE number per group for the acting user. This must
+	// agree exactly with the per-member §8.1 figure — a second, divergent balance
+	// path is precisely the bug worth guarding against — and must stay batched.
+
+	it('agrees with the per-member §8.1 balance, across several groups at once', async () => {
+		const g1 = await freshGroup('Trip');
+		const g2 = await freshGroup('Flat');
+		const bob1 = await addMember({ userId: userA.id, groupId: g1.id, displayName: 'Bob' });
+		const bob2 = await addMember({ userId: userA.id, groupId: g2.id, displayName: 'Bob' });
+		const alice1 = await creatorMemberId(g1.id);
+		const alice2 = await creatorMemberId(g2.id);
+
+		// g1: Alice pays 9000 split two ways → Alice +4500.
+		await createTransaction({
+			userId: userA.id,
+			groupId: g1.id,
+			settlementCurrency: 'USD',
+			input: equalSpendingInput([alice1, bob1.id], alice1)
+		});
+		// g2: BOB pays 9000 split two ways → Alice −4500 (the opposite sign).
+		await createTransaction({
+			userId: userA.id,
+			groupId: g2.id,
+			settlementCurrency: 'USD',
+			input: equalSpendingInput([alice2, bob2.id], bob2.id)
+		});
+
+		const net = await getUserNetBalanceByGroup({
+			userId: userA.id,
+			groupIds: [g1.id, g2.id]
+		});
+
+		expect(net.get(g1.id)).toBe(4500);
+		expect(net.get(g2.id)).toBe(-4500);
+
+		// And it matches the per-member service exactly, group by group.
+		for (const [groupId, memberId] of [
+			[g1.id, alice1],
+			[g2.id, alice2]
+		] as const) {
+			const perMember = await getGroupBalances({ userId: userA.id, groupId });
+			expect(net.get(groupId)).toBe(perMember.find((b) => b.memberId === memberId)!.balance);
+		}
+	});
+
+	it('reports a group with no transactions as 0, not as missing', async () => {
+		const group = await freshGroup('Empty');
+
+		const net = await getUserNetBalanceByGroup({ userId: userA.id, groupIds: [group.id] });
+
+		// 0 ("settled up") must be distinguishable from absent ("unknown").
+		expect(net.has(group.id)).toBe(true);
+		expect(net.get(group.id)).toBe(0);
+	});
+
+	it('excludes soft-deleted transactions, like the per-member path does', async () => {
+		const group = await freshGroup('Deleted');
+		const bob = await addMember({ userId: userA.id, groupId: group.id, displayName: 'Bob' });
+		const aliceId = await creatorMemberId(group.id);
+
+		const txnId = await createTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			settlementCurrency: 'USD',
+			input: equalSpendingInput([aliceId, bob.id], aliceId)
+		});
+		expect(
+			(await getUserNetBalanceByGroup({ userId: userA.id, groupIds: [group.id] })).get(group.id)
+		).toBe(4500);
+
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		const net = await getUserNetBalanceByGroup({ userId: userA.id, groupIds: [group.id] });
+		expect(net.get(group.id)).toBe(0);
+	});
+
+	it('omits a group the caller has no member row in', async () => {
+		// A second user's group: userA has no member row there, so it must not
+		// appear — the aggregates are scoped to the caller's own member rows.
+		const userB = await createTestUser('b');
+		const theirs = await createGroup({
+			userId: userB.id,
+			userName: userB.name,
+			name: 'Theirs',
+			settlementCurrency: 'USD'
+		});
+		const mine = await freshGroup('Mine');
+
+		const net = await getUserNetBalanceByGroup({
+			userId: userA.id,
+			groupIds: [mine.id, theirs.id]
+		});
+
+		expect(net.has(mine.id)).toBe(true);
+		expect(net.has(theirs.id)).toBe(false);
+	});
+
+	it('returns an empty map for no group ids (and issues no query)', async () => {
+		expect(await getUserNetBalanceByGroup({ userId: userA.id, groupIds: [] })).toEqual(new Map());
 	});
 });

@@ -20,7 +20,7 @@
 // ONLY net balance per member. §8.2 ordering (task 5.2), §8.3 simplification
 // (task 5.3) and §8.4 settle UI (task 5.4) are SEPARATE later tasks.
 
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { transactions, transactionPayers, transactionShares } from './db/transactions-schema';
 import { members } from './db/groups-schema';
@@ -94,6 +94,83 @@ export async function getGroupBalances({
 	const owedByMember = sumByMember(owedRows);
 
 	return computeBalances({ paidByMember, owedByMember, memberIds });
+}
+
+/**
+ * The acting user's OWN net balance in each of `groupIds`, in settlement-currency
+ * minor units — for the dashboard, which needs one number per group ("you are
+ * owed …" / "you owe …") rather than a full per-member breakdown.
+ *
+ * BATCHED ON PURPOSE: this runs on a list screen, so it must not issue a query
+ * per group. It resolves the caller's member row in every group in one query,
+ * then sums paid and owed for exactly those member rows in one query each —
+ * three round trips total, independent of how many groups the user is in.
+ *
+ * Access: callers pass group ids they already got from `listGroupsForUser`
+ * (itself access-scoped), and every aggregate is additionally constrained to
+ * member rows whose `user_id` IS the caller — so a group the user cannot see
+ * contributes no member row and therefore no total. Groups with no member row
+ * for the caller are simply absent from the returned map.
+ *
+ * Sign convention matches {@link computeBalances}: positive = the user is OWED,
+ * negative = the user OWES.
+ */
+export async function getUserNetBalanceByGroup({
+	userId,
+	groupIds,
+	executor = db
+}: {
+	userId: string;
+	groupIds: string[];
+	executor?: DbExecutor;
+}): Promise<Map<string, number>> {
+	const net = new Map<string, number>();
+	if (groupIds.length === 0) return net;
+
+	// The caller's member row in each requested group (at most one per group —
+	// enforced by the partial unique index on (group_id, user_id)).
+	const memberRows = await executor
+		.select({ id: members.id, groupId: members.groupId })
+		.from(members)
+		.where(and(inArray(members.groupId, groupIds), eq(members.userId, userId)));
+	if (memberRows.length === 0) return net;
+
+	const groupByMemberId = new Map(memberRows.map((m) => [m.id, m.groupId]));
+	const memberIds = memberRows.map((m) => m.id);
+
+	// Σ settlement PAID and Σ OWED for those member rows, over NON-DELETED
+	// transactions only (§9 — a deleted txn must not affect balances).
+	const [paidRows, owedRows] = await Promise.all([
+		executor
+			.select({
+				memberId: transactionPayers.memberId,
+				amount: transactionPayers.amountPaidSettlement
+			})
+			.from(transactionPayers)
+			.innerJoin(transactions, eq(transactionPayers.transactionId, transactions.id))
+			.where(and(inArray(transactionPayers.memberId, memberIds), isNull(transactions.deletedAt))),
+		executor
+			.select({ memberId: transactionShares.memberId, amount: transactionShares.amountOwed })
+			.from(transactionShares)
+			.innerJoin(transactions, eq(transactionShares.transactionId, transactions.id))
+			.where(and(inArray(transactionShares.memberId, memberIds), isNull(transactions.deletedAt)))
+	]);
+
+	// Seed every group the user is a member of at 0 so a group with no activity
+	// reports "settled up" rather than going missing.
+	for (const { groupId } of memberRows) net.set(groupId, 0);
+
+	// Integer adds only (minor units, no floats), same as `sumByMember`.
+	for (const { memberId, amount } of paidRows) {
+		const groupId = groupByMemberId.get(memberId);
+		if (groupId !== undefined) net.set(groupId, (net.get(groupId) ?? 0) + amount);
+	}
+	for (const { memberId, amount } of owedRows) {
+		const groupId = groupByMemberId.get(memberId);
+		if (groupId !== undefined) net.set(groupId, (net.get(groupId) ?? 0) - amount);
+	}
+
+	return net;
 }
 
 /** Sum settlement minor-unit `amount` rows into a per-member-id map (integer adds). */
