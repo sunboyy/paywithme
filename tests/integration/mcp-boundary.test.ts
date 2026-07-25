@@ -2598,9 +2598,13 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// ledger and moves a real balance, and the recovery path is the one this issue
 			// ships. This is the test that makes "an injected write is recoverable" a fact
 			// about the code rather than a hope in a document.
-			await linkBobToAStranger();
+			const mate = await linkBobToAStranger();
 			const txnId = await createTransaction({
-				userId: s.user.id,
+				// The GROUP-MATE plants it, not the caller. Authorship is `created_by`
+				// (see `authorOf`), so creating this as `s.user.id` made the caller the
+				// real author and 'you' the CORRECT answer — the assertion below was
+				// asserting against the scenario the test describes, not against a bug.
+				userId: mate.id,
 				groupId: s.group.id,
 				settlementCurrency: SETTLEMENT_CURRENCY,
 				input: spendingInput({
