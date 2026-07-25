@@ -68,6 +68,7 @@
 <script lang="ts">
 	import { formatAmount, parseAmount, type CurrencyCode } from '$lib/money';
 	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
+	import { defaultCategoryFor } from '$lib/categories';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Select from '$lib/components/ui/select';
 	import { Button } from '$lib/components/ui/button';
@@ -75,8 +76,14 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
-	import { resolveItemizedWithCharges, distributeToSettlement } from '$lib/transactions/resolve';
+	import {
+		resolveShares,
+		resolveItemizedWithCharges,
+		distributeToSettlement
+	} from '$lib/transactions/resolve';
 	import { network } from '$lib/pwa/online.svelte';
 	import { writeDisabled } from '$lib/pwa/offline-writes';
 
@@ -331,6 +338,15 @@
 		} else {
 			$formData.beneficiaries = $formData.beneficiaries.filter((b) => b.memberId !== memberId);
 		}
+	}
+
+	/**
+	 * Select every member as a beneficiary, or none. Backs the Everyone / None
+	 * controls; each line is built by {@link beneficiaryFor} so it carries whatever
+	 * per-member input the current split mode needs.
+	 */
+	function setAllBeneficiaries(all: boolean) {
+		$formData.beneficiaries = all ? members.map((m) => beneficiaryFor(m.id)) : [];
 	}
 
 	/** A fresh beneficiary line carrying the per-member input the current mode needs. */
@@ -680,18 +696,58 @@
 		return members.find((m) => m.id === memberId)?.displayName ?? memberId;
 	}
 
+	// ── Live "who owes what", for EVERY split mode ───────────────────────────────
+	// The itemized breakdown above has always previewed this, but equal / amount /
+	// share — the modes almost everyone actually uses — showed nothing, so you could
+	// not see that ¥6,800 split four ways is ¥1,700 each until AFTER saving. Same
+	// client-importable resolver the service persists with: a rendering change, not
+	// a second implementation of the maths.
+	//
+	// Best-effort by design: null whenever the form isn't in a resolvable state yet
+	// (nothing typed, no beneficiaries, an `amount` split that doesn't add up), so a
+	// half-filled form shows no preview rather than a wrong one.
+	const previewShares = $derived.by(() => {
+		if ($formData.splitMode === 'itemized') return itemizedBreakdown?.shares ?? null;
+
+		const total = toMinor(totalInput) ?? 0;
+		if (total <= 0 || $formData.beneficiaries.length === 0) return null;
+		try {
+			return resolveShares({
+				splitMode: $formData.splitMode,
+				amountTotal: total,
+				beneficiaries: $formData.beneficiaries
+			});
+		} catch {
+			return null;
+		}
+	});
+
+	/**
+	 * The one-line summary for an EQUAL split ("¥1,700 each") — but only when every
+	 * member genuinely owes the same. An equal split that doesn't divide cleanly
+	 * leaves the remainder on some members, and a single figure would then be a lie,
+	 * so those fall through to the per-member list instead.
+	 */
+	const equalEach = $derived.by(() => {
+		if ($formData.splitMode !== 'equal' || !previewShares || previewShares.length === 0) {
+			return null;
+		}
+		const first = previewShares[0].amountOwed;
+		return previewShares.every((s) => s.amountOwed === first) ? first : null;
+	});
+
 	// Per-member SETTLEMENT-converted owed for the itemized breakdown (§7.6): convert
 	// the txn total once, then distribute across members by their txn-currency owed —
 	// the SAME convert-then-distribute the service persists. Null when not foreign or
 	// the breakdown/rate isn't ready.
 	const settlementShares = $derived.by(() => {
-		if (!isForeign || !itemizedBreakdown) return null;
+		if (!isForeign || !previewShares || previewShares.length === 0) return null;
 		const stl = $formData.amountTotalSettlement;
 		if (stl <= 0) return null;
 		try {
 			return new Map(
 				distributeToSettlement(
-					itemizedBreakdown.shares.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
+					previewShares.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
 					stl
 				).map((s) => [s.memberId, s.amountOwed])
 			);
@@ -723,9 +779,10 @@
 			value={$formData.type}
 			onValueChange={(v) => {
 				$formData.type = v as 'spending' | 'transfer';
-				// Reset the category to the first one in the new type's set (§7.3).
-				$formData.categoryId =
-					(v === 'transfer' ? categories.transfer : categories.spending)[0]?.id ?? '';
+				// Reset to the new type's DEFAULT category (§7.3) — the neutral "Other"
+				// for spending, not the first of the list (Food & Drink), which silently
+				// filed every rent payment and taxi as food. See `defaultCategoryFor`.
+				$formData.categoryId = defaultCategoryFor(v as 'spending' | 'transfer');
 				// Transfers are never itemized (§7.2.3): fall back to an equal split.
 				if (v === 'transfer' && $formData.splitMode === 'itemized') {
 					onSplitModeChange('equal');
@@ -754,67 +811,133 @@
 		{#if $errors.title}<p id="title-error" class="text-destructive text-sm">{$errors.title}</p>{/if}
 	</div>
 
-	<!-- Date (PLAN §7.1) — the editable real-world date; may be backdated (e.g. an
-	     entry recorded the day after it happened). Native date input, no-JS friendly. -->
+	<!-- AMOUNT — the most consequential input on the form, so it now looks it. It sat
+	     below four metadata fields at exactly the same visual weight as Title, with
+	     the currency symbol floating OUTSIDE the box as loose grey text (which read
+	     as a rendering glitch). The symbol is now an affix inside the field.
+
+	     For non-itemized the user types it (major units → minor units). For itemized
+	     the total is DERIVED from the items subtotal (§7.2.1) and shown read-only —
+	     the item rows below drive it. -->
 	<div class="space-y-2">
-		<Label for="date">Date</Label>
-		<Input
-			id="date"
-			name="date"
-			type="date"
-			aria-invalid={$errors.date ? 'true' : undefined}
-			aria-describedby={$errors.date ? 'date-error' : undefined}
-			bind:value={$formData.date}
-		/>
-		{#if $errors.date}<p id="date-error" class="text-destructive text-sm">{$errors.date}</p>{/if}
+		<Label for="amountTotal" class="text-muted-foreground">Amount</Label>
+		{#if $formData.splitMode === 'itemized'}
+			<div class="flex items-baseline justify-between gap-2">
+				<span class="text-3xl font-semibold tabular-nums">{entryDisplay(itemizedTotal)}</span>
+				<span class="text-muted-foreground text-sm">from items + charges</span>
+			</div>
+		{:else}
+			<div
+				class="border-input focus-within:border-ring focus-within:ring-ring/50 flex items-center rounded-md border px-3 focus-within:ring-[3px]"
+			>
+				<span class="text-muted-foreground shrink-0 text-2xl" aria-hidden="true">
+					{entryCurrency.symbol}
+				</span>
+				<Input
+					id="amountTotal"
+					inputmode="decimal"
+					placeholder="0.00"
+					aria-invalid={$errors.amountTotal ? 'true' : undefined}
+					aria-describedby={$errors.amountTotal ? 'amountTotal-error' : undefined}
+					bind:value={totalInput}
+					class="h-14 flex-1 border-0 bg-transparent px-1 text-2xl font-semibold tabular-nums shadow-none focus-visible:ring-0"
+				/>
+			</div>
+		{/if}
+		{#if $errors.amountTotal}<p id="amountTotal-error" class="text-destructive text-sm">
+				{$errors.amountTotal}
+			</p>{/if}
 	</div>
 
-	<!-- Category picker (PLAN §7.3) — shadcn Select filtered by type. The hidden
+	<!-- Secondary detail. Date and category are all but always left at their
+	     defaults, so they share a row and are quieted rather than each taking a
+	     full-width row at the same weight as Title and Amount. -->
+	<div class="grid gap-3 sm:grid-cols-2">
+		<!-- Date (PLAN §7.1) — the editable real-world date; may be backdated (e.g. an
+	     entry recorded the day after it happened). Native date input, no-JS friendly. -->
+		<div class="space-y-2">
+			<Label for="date">Date</Label>
+			<Input
+				id="date"
+				name="date"
+				type="date"
+				aria-invalid={$errors.date ? 'true' : undefined}
+				aria-describedby={$errors.date ? 'date-error' : undefined}
+				bind:value={$formData.date}
+			/>
+			{#if $errors.date}<p id="date-error" class="text-destructive text-sm">{$errors.date}</p>{/if}
+		</div>
+
+		<!-- Category picker (PLAN §7.3) — shadcn Select filtered by type. The hidden
 	     input above carries the value for no-JS; the Select drives it with JS. -->
-	<div class="space-y-2">
-		<Label>Category</Label>
-		<Select.Root type="single" bind:value={$formData.categoryId}>
-			<Select.Trigger class="w-full" aria-label="Category">
-				<span class="flex items-center gap-2">
-					{#if $formData.categoryId}
-						<CategoryIcon
-							name={typeCategories.find((c) => c.id === $formData.categoryId)?.icon ?? 'shapes'}
-							class="size-4"
-						/>
-					{/if}
-					{selectedCategoryName ?? 'Select a category'}
-				</span>
-			</Select.Trigger>
-			<Select.Content>
-				{#each typeCategories as category (category.id)}
-					<Select.Item value={category.id} label={category.name}>
-						<CategoryIcon name={category.icon} class="size-4" />
-						{category.name}
-					</Select.Item>
-				{/each}
-			</Select.Content>
-		</Select.Root>
-		{#if $errors.categoryId}<p class="text-destructive text-sm">{$errors.categoryId}</p>{/if}
+		<div class="space-y-2">
+			<Label>Category</Label>
+			<Select.Root type="single" bind:value={$formData.categoryId}>
+				<Select.Trigger class="w-full" aria-label="Category">
+					<span class="flex items-center gap-2">
+						{#if $formData.categoryId}
+							<CategoryIcon
+								name={typeCategories.find((c) => c.id === $formData.categoryId)?.icon ?? 'shapes'}
+								class="size-4"
+							/>
+						{/if}
+						{selectedCategoryName ?? 'Select a category'}
+					</span>
+				</Select.Trigger>
+				<Select.Content>
+					{#each typeCategories as category (category.id)}
+						<Select.Item value={category.id} label={category.name}>
+							<CategoryIcon name={category.icon} class="size-4" />
+							{category.name}
+						</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
+			{#if $errors.categoryId}<p class="text-destructive text-sm">{$errors.categoryId}</p>{/if}
+		</div>
 	</div>
 
 	<!-- Currency picker (PLAN §7.6): defaults to the group settlement currency.
-	     Choosing a DIFFERENT currency reveals the FX (rate / settlement-total) entry. -->
-	<div class="space-y-2">
-		<Label>Currency</Label>
-		<Select.Root type="single" value={entryCode} onValueChange={onCurrencyChange}>
-			<Select.Trigger class="w-full" aria-label="Currency">{selectedCurrencyLabel}</Select.Trigger>
-			<Select.Content>
-				{#each currencyOptions as option (option.code)}
-					<Select.Item value={option.code} label={option.code}>
-						{option.code}{option.name ? ` · ${option.name}` : ''}
-						{#if option.code === settlementCode}
-							<span class="text-muted-foreground text-xs">(group)</span>
-						{/if}
-					</Select.Item>
-				{/each}
-			</Select.Content>
-		</Select.Root>
-	</div>
+	     Choosing a DIFFERENT currency reveals the FX (rate / settlement-total) entry.
+
+	     Behind a disclosure: a group is single-currency in the overwhelming majority
+	     of cases, so this occupied a full-width row on every visit to serve the rare
+	     one. It opens ALREADY EXPANDED whenever a foreign currency is in play
+	     (editing such a transaction, or arriving via a §8.4 prefill), so the FX entry
+	     below is never hidden behind a click. With only one supported currency there
+	     is nothing to choose and the control is omitted entirely.
+	     `<details>` keeps it usable with JS disabled. -->
+	{#if currencyOptions.length > 1}
+		<details class="group/currency" open={isForeign}>
+			<summary
+				class="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-sm focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+			>
+				<ChevronDownIcon
+					class="size-4 transition-transform group-open/currency:rotate-180"
+					aria-hidden="true"
+				/>
+				Paid in {entryCode}{isForeign ? '' : ' — the group currency'}
+			</summary>
+			<div class="space-y-2 pt-2">
+				<Label>Currency</Label>
+				<Select.Root type="single" value={entryCode} onValueChange={onCurrencyChange}>
+					<Select.Trigger class="w-full" aria-label="Currency">
+						{selectedCurrencyLabel}
+					</Select.Trigger>
+					<Select.Content>
+						{#each currencyOptions as option (option.code)}
+							<Select.Item value={option.code} label={option.code}>
+								{option.code}{option.name ? ` · ${option.name}` : ''}
+								{#if option.code === settlementCode}
+									<span class="text-muted-foreground text-xs">(group)</span>
+								{/if}
+							</Select.Item>
+						{/each}
+					</Select.Content>
+				</Select.Root>
+			</div>
+		</details>
+	{/if}
 
 	<!-- FX entry (PLAN §7.6 / §10) — only when the entry currency is FOREIGN. Enter
 	     EITHER the exchange rate OR the settlement-equivalent total; the other is
@@ -871,52 +994,40 @@
 		</div>
 	{/if}
 
-	<!-- Total amount. For non-itemized the user types it (major units → minor units).
-	     For itemized the total is DERIVED from the items subtotal (§7.2.1), shown
-	     read-only — the item rows below drive it. -->
-	<div class="space-y-2">
-		<Label for="amountTotal">Amount</Label>
-		{#if $formData.splitMode === 'itemized'}
-			<div class="flex items-center justify-between gap-2">
-				<span class="text-muted-foreground text-sm">Total (items + charges)</span>
-				<span class="font-medium">{entryDisplay(itemizedTotal)}</span>
-			</div>
-		{:else}
-			<div class="flex items-center gap-2">
-				<span class="text-muted-foreground text-sm" aria-hidden="true">{entryCurrency.symbol}</span>
-				<Input
-					id="amountTotal"
-					inputmode="decimal"
-					placeholder="0.00"
-					aria-invalid={$errors.amountTotal ? 'true' : undefined}
-					aria-describedby={$errors.amountTotal ? 'amountTotal-error' : undefined}
-					bind:value={totalInput}
-					class="flex-1"
-				/>
-			</div>
-		{/if}
-		{#if $errors.amountTotal}<p id="amountTotal-error" class="text-destructive text-sm">
-				{$errors.amountTotal}
-			</p>{/if}
-	</div>
+	<!-- Paid by. Default = the acting user's member, paying the whole total. With
+	     >1 payer, per-payer amounts appear below (Σ == total).
 
-	<!-- Paid by (member multi-select). Default = the acting user's member, paying
-	     the whole total. With >1 payer, per-payer amounts show (Σ == total). -->
+	     Wrapping CHIPS, not a full-width column. "Paid by" and "Split between" are
+	     the same roster rendered twice, and as two identical stacked columns a
+	     four-person group cost eight rows of names for what is almost always "I
+	     paid, split evenly". These are still real checkboxes with the member name as
+	     their accessible name — only the layout changed. -->
 	<fieldset class="space-y-2">
 		<legend class="text-sm font-medium">Paid by</legend>
-		<div>
+		<div class="flex flex-wrap gap-2">
 			{#each members as member (member.id)}
 				{@const isPayer = selectedPayerIds.has(member.id)}
-				<div class="flex min-h-11 items-center justify-between gap-2">
-					<label class="flex flex-1 items-center gap-3 text-sm">
-						<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
-						{member.displayName}
-					</label>
-					{#if isPayer && multiplePayers}
+				<label
+					class="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors {isPayer
+						? 'border-primary bg-primary/10'
+						: 'hover:bg-accent'}"
+				>
+					<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
+					{member.displayName}
+				</label>
+			{/each}
+		</div>
+		{#if multiplePayers}
+			<!-- Per-payer amounts, for the selected payers only and only once there is
+			     more than one — a single payer covers the whole total by definition. -->
+			<div class="space-y-1 pt-1">
+				{#each members.filter((m) => selectedPayerIds.has(m.id)) as member (member.id)}
+					<div class="flex items-center justify-between gap-2">
+						<span class="text-sm">{member.displayName}</span>
 						<div class="flex items-center gap-1">
-							<span class="text-muted-foreground text-xs" aria-hidden="true"
-								>{entryCurrency.symbol}</span
-							>
+							<span class="text-muted-foreground text-xs" aria-hidden="true">
+								{entryCurrency.symbol}
+							</span>
 							<Input
 								inputmode="decimal"
 								placeholder="0.00"
@@ -926,10 +1037,10 @@
 								class="h-10 w-24"
 							/>
 						</div>
-					{/if}
-				</div>
-			{/each}
-		</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
 		{#if $errors.payers?._errors}
 			<p class="text-destructive text-sm">{$errors.payers._errors}</p>
 		{/if}
@@ -959,45 +1070,93 @@
 		     split mode: none (equal), an amount (amount), a weight (share). -->
 		<fieldset class="space-y-2">
 			<legend class="text-sm font-medium">Split between</legend>
-			<div>
-				{#each members as member (member.id)}
-					{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
-					<div class="flex min-h-11 items-center justify-between gap-2">
-						<label class="flex flex-1 items-center gap-3 text-sm">
+			<!-- "Everyone" is the overwhelmingly common case, and un-picking then
+			     re-picking a long roster one checkbox at a time was the only way back
+			     to it. -->
+			<div class="flex items-center gap-1">
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					class="h-8 px-2 text-xs"
+					onclick={() => setAllBeneficiaries(true)}
+					disabled={selectedBeneficiaryIds.size === members.length}
+				>
+					Everyone
+				</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					class="h-8 px-2 text-xs"
+					onclick={() => setAllBeneficiaries(false)}
+					disabled={selectedBeneficiaryIds.size === 0}
+				>
+					None
+				</Button>
+			</div>
+			{#if $formData.splitMode === 'equal'}
+				<!-- `equal` takes no per-member input, so it gets the same compact chips
+				     as "Paid by" instead of a second full-width column of the roster.
+				     The modes that DO take an input per person keep the column below,
+				     which is what those inputs need. -->
+				<div class="flex flex-wrap gap-2">
+					{#each members as member (member.id)}
+						{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
+						<label
+							class="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors {isBeneficiary
+								? 'border-primary bg-primary/10'
+								: 'hover:bg-accent'}"
+						>
 							<Checkbox
 								checked={isBeneficiary}
 								onCheckedChange={(v) => toggleBeneficiary(member.id, !!v)}
 							/>
 							{member.displayName}
 						</label>
-						{#if isBeneficiary && $formData.splitMode === 'amount'}
-							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs" aria-hidden="true"
-									>{entryCurrency.symbol}</span
-								>
-								<Input
-									inputmode="decimal"
-									placeholder="0.00"
-									aria-label="Amount for {member.displayName}"
-									value={amountInputs[member.id] ?? ''}
-									oninput={(e) => setRawAmount(member.id, e.currentTarget.value)}
-									class="h-10 w-24"
+					{/each}
+				</div>
+			{:else}
+				<div>
+					{#each members as member (member.id)}
+						{@const isBeneficiary = selectedBeneficiaryIds.has(member.id)}
+						<div class="flex min-h-11 items-center justify-between gap-2">
+							<label class="flex flex-1 items-center gap-3 text-sm">
+								<Checkbox
+									checked={isBeneficiary}
+									onCheckedChange={(v) => toggleBeneficiary(member.id, !!v)}
 								/>
-							</div>
-						{:else if isBeneficiary && $formData.splitMode === 'share'}
-							<Input
-								inputmode="numeric"
-								placeholder="1"
-								aria-label="Shares for {member.displayName}"
-								value={$formData.beneficiaries.find((b) => b.memberId === member.id)?.shareWeight ??
-									1}
-								oninput={(e) => setShareWeight(member.id, e.currentTarget.value)}
-								class="h-10 w-20"
-							/>
-						{/if}
-					</div>
-				{/each}
-			</div>
+								{member.displayName}
+							</label>
+							{#if isBeneficiary && $formData.splitMode === 'amount'}
+								<div class="flex items-center gap-1">
+									<span class="text-muted-foreground text-xs" aria-hidden="true"
+										>{entryCurrency.symbol}</span
+									>
+									<Input
+										inputmode="decimal"
+										placeholder="0.00"
+										aria-label="Amount for {member.displayName}"
+										value={amountInputs[member.id] ?? ''}
+										oninput={(e) => setRawAmount(member.id, e.currentTarget.value)}
+										class="h-10 w-24"
+									/>
+								</div>
+							{:else if isBeneficiary && $formData.splitMode === 'share'}
+								<Input
+									inputmode="numeric"
+									placeholder="1"
+									aria-label="Shares for {member.displayName}"
+									value={$formData.beneficiaries.find((b) => b.memberId === member.id)
+										?.shareWeight ?? 1}
+									oninput={(e) => setShareWeight(member.id, e.currentTarget.value)}
+									class="h-10 w-20"
+								/>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
 			{#if $errors.beneficiaries?._errors}
 				<p class="text-destructive text-sm">{$errors.beneficiaries._errors}</p>
 			{/if}
@@ -1039,70 +1198,94 @@
 								/>
 							</div>
 						</div>
+						<!-- An icon, not the word "Remove": as a text button it was as wide as
+						     the amount field beside it, squeezing the item name down to ~90px
+						     so its placeholder clipped to "e.g. Piz:". -->
 						<Button
 							type="button"
 							variant="ghost"
-							size="sm"
-							class="min-h-11"
+							size="icon"
+							class="size-11 shrink-0"
 							onclick={() => removeItem(index)}
 							disabled={$formData.items.length <= 1}
 							aria-label="Remove item {index + 1}"
 						>
-							Remove
+							<Trash2Icon class="size-4" aria-hidden="true" />
 						</Button>
 					</div>
 
-					<!-- Per-item split mode (equal/amount/share). -->
-					<Tabs.Root
-						value={item.splitMode}
-						onValueChange={(v) => setItemSplitMode(index, v as Item['splitMode'])}
-					>
-						<Tabs.List class="grid w-full grid-cols-3">
-							<Tabs.Trigger value="equal">Equal</Tabs.Trigger>
-							<Tabs.Trigger value="amount">Amount</Tabs.Trigger>
-							<Tabs.Trigger value="share">Share</Tabs.Trigger>
-						</Tabs.List>
-					</Tabs.Root>
+					<!-- The per-item split is COLLAPSED by default. Every item repeated the
+					     full member checkbox list AND a three-tab mode switcher, so two
+					     items on a four-person trip ran past 2,000px on a phone — while most
+					     items just take the obvious "everyone, evenly". The summary states
+					     the current split, so collapsing hides nothing you need to verify.
+					     `<details>` keeps it reachable with JS disabled. -->
+					<details class="group/item">
+						<summary
+							class="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-xs focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+						>
+							<ChevronDownIcon
+								class="size-4 transition-transform group-open/item:rotate-180"
+								aria-hidden="true"
+							/>
+							<span class="sr-only">Item {index + 1} split —</span>
+							Split {item.beneficiaries.length}
+							{item.beneficiaries.length === 1 ? 'way' : 'ways'} · {item.splitMode}
+						</summary>
+						<div class="space-y-3 pt-2">
+							<!-- Per-item split mode (equal/amount/share). -->
+							<Tabs.Root
+								value={item.splitMode}
+								onValueChange={(v) => setItemSplitMode(index, v as Item['splitMode'])}
+							>
+								<Tabs.List class="grid w-full grid-cols-3">
+									<Tabs.Trigger value="equal">Equal</Tabs.Trigger>
+									<Tabs.Trigger value="amount">Amount</Tabs.Trigger>
+									<Tabs.Trigger value="share">Share</Tabs.Trigger>
+								</Tabs.List>
+							</Tabs.Root>
 
-					<!-- Per-item beneficiaries + the per-item-mode input. -->
-					<div>
-						{#each members as member (member.id)}
-							{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
-							<div class="flex min-h-11 items-center justify-between gap-2">
-								<label class="flex flex-1 items-center gap-3 text-sm">
-									<Checkbox
-										checked={isBeneficiary}
-										onCheckedChange={(v) => toggleItemBeneficiary(index, member.id, !!v)}
-									/>
-									{member.displayName}
-								</label>
-								{#if isBeneficiary && item.splitMode === 'amount'}
-									<div class="flex items-center gap-1">
-										<span class="text-muted-foreground text-xs" aria-hidden="true"
-											>{entryCurrency.symbol}</span
-										>
-										<Input
-											inputmode="decimal"
-											placeholder="0.00"
-											aria-label="Item {index + 1} amount for {member.displayName}"
-											value={itemMemberAmountInputs[`${index}:${member.id}`] ?? ''}
-											oninput={(e) => setItemRawAmount(index, member.id, e.currentTarget.value)}
-											class="h-10 w-24"
-										/>
+							<!-- Per-item beneficiaries + the per-item-mode input. -->
+							<div>
+								{#each members as member (member.id)}
+									{@const isBeneficiary = itemHasBeneficiary(index, member.id)}
+									<div class="flex min-h-11 items-center justify-between gap-2">
+										<label class="flex flex-1 items-center gap-3 text-sm">
+											<Checkbox
+												checked={isBeneficiary}
+												onCheckedChange={(v) => toggleItemBeneficiary(index, member.id, !!v)}
+											/>
+											{member.displayName}
+										</label>
+										{#if isBeneficiary && item.splitMode === 'amount'}
+											<div class="flex items-center gap-1">
+												<span class="text-muted-foreground text-xs" aria-hidden="true"
+													>{entryCurrency.symbol}</span
+												>
+												<Input
+													inputmode="decimal"
+													placeholder="0.00"
+													aria-label="Item {index + 1} amount for {member.displayName}"
+													value={itemMemberAmountInputs[`${index}:${member.id}`] ?? ''}
+													oninput={(e) => setItemRawAmount(index, member.id, e.currentTarget.value)}
+													class="h-10 w-24"
+												/>
+											</div>
+										{:else if isBeneficiary && item.splitMode === 'share'}
+											<Input
+												inputmode="numeric"
+												placeholder="1"
+												aria-label="Item {index + 1} shares for {member.displayName}"
+												value={itemShareWeightValue(index, member.id)}
+												oninput={(e) => setItemShareWeight(index, member.id, e.currentTarget.value)}
+												class="h-10 w-20"
+											/>
+										{/if}
 									</div>
-								{:else if isBeneficiary && item.splitMode === 'share'}
-									<Input
-										inputmode="numeric"
-										placeholder="1"
-										aria-label="Item {index + 1} shares for {member.displayName}"
-										value={itemShareWeightValue(index, member.id)}
-										oninput={(e) => setItemShareWeight(index, member.id, e.currentTarget.value)}
-										class="h-10 w-20"
-									/>
-								{/if}
+								{/each}
 							</div>
-						{/each}
-					</div>
+						</div>
+					</details>
 				</div>
 			{/each}
 
@@ -1254,25 +1437,46 @@
 						</span>
 					</div>
 				</div>
+			</div>
+		{/if}
+	{/if}
 
-				{#if itemizedBreakdown.shares.length > 0}
-					<div class="space-y-1 border-t pt-2">
-						<p class="font-medium">Each person owes</p>
-						{#each itemizedBreakdown.shares as share (share.memberId)}
-							<div class="flex items-center justify-between">
-								<span>{memberName(share.memberId)}</span>
-								<span class="text-right">
-									<span class="block">{entryDisplay(share.amountOwed)}</span>
-									{#if isForeign && settlementShares}
-										<span class="text-muted-foreground block text-xs">
-											{settlementDisplay(settlementShares.get(share.memberId) ?? 0)}
-										</span>
-									{/if}
+	<!-- Live preview of the resolved split.
+
+	     This "each person owes" panel used to live INSIDE the itemized branch, so the
+	     modes almost everyone uses — equal, amount, share — committed blind: you
+	     could not see that ¥6,800 four ways is ¥1,700 each until after saving. It now
+	     renders for every mode. A cleanly-dividing equal split collapses to one line;
+	     everything else lists per member. -->
+	{#if previewShares && previewShares.length > 0}
+		{#if equalEach !== null}
+			<div class="bg-muted/40 flex items-center justify-between rounded-md border p-3 text-sm">
+				<span class="text-muted-foreground">Each person owes</span>
+				<span class="text-right">
+					<span class="block font-medium tabular-nums">{entryDisplay(equalEach)}</span>
+					{#if isForeign && settlementShares}
+						<span class="text-muted-foreground block text-xs tabular-nums">
+							{settlementDisplay(settlementShares.get(previewShares[0].memberId) ?? 0)}
+						</span>
+					{/if}
+				</span>
+			</div>
+		{:else}
+			<div class="bg-muted/40 space-y-1 rounded-md border p-3 text-sm">
+				<p class="font-medium">Each person owes</p>
+				{#each previewShares as share (share.memberId)}
+					<div class="flex items-center justify-between">
+						<span>{memberName(share.memberId)}</span>
+						<span class="text-right">
+							<span class="block tabular-nums">{entryDisplay(share.amountOwed)}</span>
+							{#if isForeign && settlementShares}
+								<span class="text-muted-foreground block text-xs tabular-nums">
+									{settlementDisplay(settlementShares.get(share.memberId) ?? 0)}
 								</span>
-							</div>
-						{/each}
+							{/if}
+						</span>
 					</div>
-				{/if}
+				{/each}
 			</div>
 		{/if}
 	{/if}

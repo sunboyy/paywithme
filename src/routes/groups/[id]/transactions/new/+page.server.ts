@@ -19,7 +19,7 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import { setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
-import { categoriesFor, getCategory } from '$lib/categories';
+import { categoriesFor, defaultCategoryFor, getCategory } from '$lib/categories';
 import { getCurrency, CURRENCIES, MAX_SAFE_MINOR, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
@@ -163,7 +163,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				title: '',
 				// Editable real-world date (§7.1) — defaults to today (UTC); user can backdate.
 				date: new Date().toISOString().slice(0, 10),
-				categoryId: categoriesFor('spending')[0]?.id ?? '',
+				// Neutral "Other", NOT the first category (Food & Drink) — see
+				// `defaultCategoryFor`: a wrong guess looks deliberate and mislabels data.
+				categoryId: defaultCategoryFor('spending'),
 				amountTotal: 0,
 				currency: settlementCurrency,
 				exchangeRate: '1',

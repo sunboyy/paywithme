@@ -53,7 +53,7 @@ function seededFor(overrides: Partial<TransactionInput> = {}) {
 	};
 }
 
-function renderForm(overrides: Partial<TransactionInput> = {}) {
+function renderForm(overrides: Partial<TransactionInput> = {}, currencies?: FormCurrency[]) {
 	let form!: SuperForm<TransactionInput>;
 	const result = render(TransactionFormHarness, {
 		props: {
@@ -61,11 +61,18 @@ function renderForm(overrides: Partial<TransactionInput> = {}) {
 			members,
 			categories,
 			currency,
+			currencies,
 			onform: (f) => (form = f)
 		}
 	});
 	return { form, ...result };
 }
+
+/** A second supported currency, so the FX picker has something to choose between. */
+const MULTI_CURRENCY: FormCurrency[] = [
+	currency,
+	{ code: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
+];
 
 afterEach(() => cleanup());
 
@@ -116,10 +123,30 @@ describe('TransactionForm a11y', () => {
 		expect(container.querySelector('[aria-label="Amount for Alex"]')).not.toBeNull();
 	});
 
-	it('gives the category and currency Select triggers accessible names', () => {
+	it('gives the category Select trigger an accessible name', () => {
 		const { container } = renderForm();
 		expect(container.querySelector('[aria-label="Category"]')).not.toBeNull();
+	});
+
+	it('gives the currency Select trigger an accessible name when there is a choice', () => {
+		const { container } = renderForm({}, MULTI_CURRENCY);
 		expect(container.querySelector('[aria-label="Currency"]')).not.toBeNull();
+	});
+
+	it('OMITS the currency picker entirely when only one currency is supported', () => {
+		// Nothing to choose between: the control would be a permanent full-width row
+		// serving a decision the user cannot make.
+		const { container } = renderForm();
+		expect(container.querySelector('[aria-label="Currency"]')).toBeNull();
+	});
+
+	it('opens the currency disclosure already expanded for a FOREIGN entry currency', () => {
+		// Otherwise the FX rate entry below it would sit behind an extra click on the
+		// one path that actually needs it (an edit, or a §8.4 settle-up prefill).
+		const { container } = renderForm({ currency: 'JPY' }, MULTI_CURRENCY);
+		const disclosure = container.querySelector('details.group\\/currency');
+		expect(disclosure).not.toBeNull();
+		expect((disclosure as HTMLDetailsElement).open).toBe(true);
 	});
 
 	it('associates the title validation error with the input (aria-invalid + describedby)', async () => {
@@ -138,5 +165,89 @@ describe('TransactionForm a11y', () => {
 		expect(message?.textContent).toContain('A title is required');
 		// Sanity: the store actually holds the error we set.
 		expect(get(form.errors).title).toEqual(['A title is required']);
+	});
+});
+
+// ── The live "each person owes" preview (plan 005 item 3.4) ───────────────────
+//
+// This panel previously rendered ONLY for the itemized split, so equal / amount /
+// share — the modes almost everyone uses — committed blind. These assert it now
+// renders for every mode, and that it stays silent rather than guessing when the
+// form isn't in a resolvable state.
+describe('TransactionForm split preview', () => {
+	it('shows a single "each" line for an equal split that divides cleanly', () => {
+		// ฿90.00 between two members = ฿45.00 each, exactly.
+		const { getByText } = renderForm({
+			splitMode: 'equal',
+			amountTotal: 9000,
+			beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
+		});
+
+		expect(getByText('Each person owes')).toBeTruthy();
+		expect(getByText('฿45.00')).toBeTruthy();
+	});
+
+	it('lists PER MEMBER when an equal split leaves a remainder', () => {
+		// ฿0.01 between two cannot be equal: one owes 0.01, the other 0.00. A single
+		// "each" figure would be a lie, so the per-member list is used instead.
+		const { container, queryByText } = renderForm({
+			splitMode: 'equal',
+			amountTotal: 1,
+			beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
+		});
+
+		expect(queryByText('Each person owes')).toBeTruthy();
+		expect(container.textContent).toContain('Alex');
+		expect(container.textContent).toContain('Bo');
+	});
+
+	it('previews an AMOUNT split from the entered per-member amounts', () => {
+		const { container } = renderForm({
+			splitMode: 'amount',
+			amountTotal: 9000,
+			beneficiaries: [
+				{ memberId: 'm-alex', rawAmount: 6000 },
+				{ memberId: 'm-bo', rawAmount: 3000 }
+			]
+		});
+
+		expect(container.textContent).toContain('฿60.00');
+		expect(container.textContent).toContain('฿30.00');
+	});
+
+	it("previews a SHARE split weighted by each member's weight", () => {
+		// 2:1 over ฿90.00 → ฿60.00 / ฿30.00.
+		const { container } = renderForm({
+			splitMode: 'share',
+			amountTotal: 9000,
+			beneficiaries: [
+				{ memberId: 'm-alex', shareWeight: 2 },
+				{ memberId: 'm-bo', shareWeight: 1 }
+			]
+		});
+
+		expect(container.textContent).toContain('฿60.00');
+		expect(container.textContent).toContain('฿30.00');
+	});
+
+	it('shows NOTHING when no amount has been entered yet', () => {
+		// A half-filled form must show no preview rather than a wrong one.
+		const { queryByText } = renderForm({
+			splitMode: 'equal',
+			amountTotal: 0,
+			beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
+		});
+
+		expect(queryByText('Each person owes')).toBeNull();
+	});
+
+	it('shows NOTHING when nobody is selected to split between', () => {
+		const { queryByText } = renderForm({
+			splitMode: 'equal',
+			amountTotal: 9000,
+			beneficiaries: []
+		});
+
+		expect(queryByText('Each person owes')).toBeNull();
 	});
 });

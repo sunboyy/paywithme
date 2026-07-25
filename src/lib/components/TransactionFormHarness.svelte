@@ -16,12 +16,15 @@
 		members,
 		categories,
 		currency,
+		currencies,
 		onform
 	}: {
 		seeded: SuperValidated<TransactionInput>;
 		members: FormMember[];
 		categories: { spending: FormCategory[]; transfer: FormCategory[] };
 		currency: FormCurrency;
+		/** Optional multi-currency list, so a test can exercise the FX picker. */
+		currencies?: FormCurrency[];
 		/** Hand the live superForm back to the test so it can drive the error store. */
 		onform?: (form: ReturnType<typeof superForm<TransactionInput>>) => void;
 	} = $props();
@@ -37,4 +40,4 @@
 	onform?.(form);
 </script>
 
-<TransactionForm {form} {members} {categories} {currency} />
+<TransactionForm {form} {members} {categories} {currency} {currencies} />

@@ -150,3 +150,24 @@ export function categoriesFor(appliesTo: Category['appliesTo']): readonly Catego
 		(a, b) => a.sortOrder - b.sortOrder
 	);
 }
+
+/**
+ * The category a NEW transaction of `appliesTo` starts on (PLAN §7.3).
+ *
+ * Deliberately NOT `categoriesFor(type)[0]`, which is what the add form used to
+ * seed: for spending that is "Food & Drink", so every rent payment, flight and
+ * taxi filed itself as food unless the user noticed and changed it — a wrong
+ * guess is worse than no guess, because it looks deliberate.
+ *
+ * Spending therefore starts on the neutral "Other"; the category is still one
+ * tap away and nothing is mislabelled in the meantime. Transfers start on "Debt
+ * settlement", which is not a guess — it is what a transfer overwhelmingly IS,
+ * and it is what the §8.4 settle-up prefill sets anyway.
+ *
+ * Falls back to the first category of the type if these slugs ever disappear, so
+ * this can never return an id that isn't in the set.
+ */
+export function defaultCategoryFor(appliesTo: Category['appliesTo']): string {
+	const preferred = appliesTo === 'transfer' ? 'transfer-debt-settlement' : 'spending-other';
+	return getCategory(preferred)?.id ?? categoriesFor(appliesTo)[0]?.id ?? '';
+}

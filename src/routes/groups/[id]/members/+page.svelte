@@ -28,6 +28,7 @@
 	import GroupNav from '$lib/components/GroupNav.svelte';
 	import UsersIcon from '@lucide/svelte/icons/users';
 	import LinkIcon from '@lucide/svelte/icons/link';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -183,85 +184,118 @@
 					</div>
 				</div>
 			{:else}
+				<!-- The roster is READ-ONLY by default: one line per member.
+
+				     It used to render every member's edit form permanently open — a
+				     filled text input, a full-width Rename button and a Remove button
+				     for each — so a four-person group was twelve controls and roughly
+				     600px of form on a screen whose job is "who is in this group?".
+				     Editing now lives behind a per-row disclosure.
+
+				     `<details>` rather than a JS popover on purpose: the whole page is
+				     progressively enhanced, and this keeps rename/remove reachable with
+				     JS disabled (the forms inside are unchanged real form actions). -->
 				<ul class="divide-border divide-y" aria-label="Group members">
 					{#each data.members as member (member.id)}
 						{@const isYou = member.isLinked && member.userId === data.viewerUserId}
 						{@const isInactive = member.deactivatedAt != null}
-						<li class="space-y-3 py-3">
-							<div class="flex flex-wrap items-center gap-2">
-								<span class="font-medium {isInactive ? 'text-muted-foreground' : ''}">
-									{member.displayName}
-								</span>
-								{#if isYou}
-									<Badge variant="secondary">You</Badge>
-								{:else if member.isLinked}
-									<Badge variant="outline">Linked</Badge>
-								{/if}
-								{#if isInactive}
-									<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
-								{/if}
-							</div>
-
-							<!-- Rename (works without JS): a real form, name pre-filled. -->
-							<form
-								method="POST"
-								action="?/renameMember"
-								use:renameEnhance
-								class="flex flex-col gap-2 sm:flex-row sm:items-center"
-							>
-								<input type="hidden" name="memberId" value={member.id} />
-								<Input
-									type="text"
-									name="displayName"
-									value={member.displayName}
-									aria-label="Display name for {member.displayName}"
-									maxlength={100}
-									class="sm:max-w-xs"
-								/>
-								<Button
-									type="submit"
-									variant="outline"
-									size="sm"
-									class="min-h-11"
-									disabled={network.offline}
-									title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}>Rename</Button
+						<li class="py-1">
+							<details class="group/member">
+								<summary
+									class="hover:bg-accent/50 focus-visible:ring-ring flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-md px-1 py-2 focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
 								>
-							</form>
+									<span
+										class="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-medium"
+										aria-hidden="true"
+									>
+										{member.displayName.trim().charAt(0).toUpperCase()}
+									</span>
+									<span class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+										<span class="font-medium {isInactive ? 'text-muted-foreground' : ''}">
+											{member.displayName}
+										</span>
+										{#if isYou}
+											<Badge variant="secondary">You</Badge>
+										{:else if member.isLinked}
+											<Badge variant="outline">Linked</Badge>
+										{/if}
+										{#if isInactive}
+											<Badge variant="outline" class="text-muted-foreground">Inactive</Badge>
+										{/if}
+									</span>
+									<!-- The chevron is decorative; the accessible name for the toggle is
+									     the visually-hidden text, so screen readers hear which member
+									     this row's controls belong to. -->
+									<span class="sr-only">Manage {member.displayName}</span>
+									<ChevronDownIcon
+										class="text-muted-foreground size-4 shrink-0 transition-transform group-open/member:rotate-180"
+										aria-hidden="true"
+									/>
+								</summary>
 
-							<div class="flex flex-wrap gap-2">
-								{#if isInactive}
-									<!-- Reactivate (flag flip, §6.3). -->
-									<form method="POST" action="?/reactivate" use:reactivateEnhance>
+								<div class="space-y-3 px-1 pt-1 pb-3 pl-12">
+									<!-- Rename (works without JS): a real form, name pre-filled. -->
+									<form
+										method="POST"
+										action="?/renameMember"
+										use:renameEnhance
+										class="flex flex-col gap-2 sm:flex-row sm:items-center"
+									>
 										<input type="hidden" name="memberId" value={member.id} />
+										<Input
+											type="text"
+											name="displayName"
+											value={member.displayName}
+											aria-label="Display name for {member.displayName}"
+											maxlength={100}
+											class="sm:max-w-xs"
+										/>
 										<Button
 											type="submit"
 											variant="outline"
 											size="sm"
 											class="min-h-11"
-											disabled={$reactivating || network.offline}
-											title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+											disabled={network.offline}
+											title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}>Rename</Button
 										>
-											Reactivate
-										</Button>
 									</form>
-								{:else}
-									<!-- Remove: soft-deactivate if they have activity, else hard-delete
-									     (§6.3). Destructive → confirmation gate (PLAN §10). -->
-									<ConfirmSubmit
-										action="?/removeMember"
-										enhance={removeEnhance}
-										hiddenName="memberId"
-										hiddenValue={member.id}
-										triggerLabel="Remove {member.displayName}"
-										title="Remove {member.displayName}?"
-										description={isYou
-											? `${member.displayName} (you) will be removed from this group and you'll lose access — you'll be sent back to your groups.`
-											: `${member.displayName} will be removed. If they have past activity they're deactivated and kept in history; otherwise they're deleted.`}
-										confirmLabel="Remove"
-										disabled={$removing || network.offline}
-									/>
-								{/if}
-							</div>
+
+									<div class="flex flex-wrap gap-2">
+										{#if isInactive}
+											<!-- Reactivate (flag flip, §6.3). -->
+											<form method="POST" action="?/reactivate" use:reactivateEnhance>
+												<input type="hidden" name="memberId" value={member.id} />
+												<Button
+													type="submit"
+													variant="outline"
+													size="sm"
+													class="min-h-11"
+													disabled={$reactivating || network.offline}
+													title={network.offline ? OFFLINE_WRITE_MESSAGE : undefined}
+												>
+													Reactivate
+												</Button>
+											</form>
+										{:else}
+											<!-- Remove: soft-deactivate if they have activity, else hard-delete
+											     (§6.3). Destructive → confirmation gate (PLAN §10). -->
+											<ConfirmSubmit
+												action="?/removeMember"
+												enhance={removeEnhance}
+												hiddenName="memberId"
+												hiddenValue={member.id}
+												triggerLabel="Remove {member.displayName}"
+												title="Remove {member.displayName}?"
+												description={isYou
+													? `${member.displayName} (you) will be removed from this group and you'll lose access — you'll be sent back to your groups.`
+													: `${member.displayName} will be removed. If they have past activity they're deactivated and kept in history; otherwise they're deleted.`}
+												confirmLabel="Remove"
+												disabled={$removing || network.offline}
+											/>
+										{/if}
+									</div>
+								</div>
+							</details>
 						</li>
 					{/each}
 				</ul>

@@ -2,7 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { CATEGORIES, getCategory, categoriesFor, type Category } from './categories';
+import {
+	CATEGORIES,
+	getCategory,
+	categoriesFor,
+	defaultCategoryFor,
+	type Category
+} from './categories';
 
 // Unit tests for the canonical category data (PLAN §7.3). These lock the exact
 // fixed set of 14 categories (10 spending + 4 transfer), their names → lucide
@@ -154,5 +160,30 @@ describe('Category type', () => {
 	it('is the element type of CATEGORIES', () => {
 		const first: Category = CATEGORIES[0];
 		expect(first.id).toBe('spending-food-drink');
+	});
+});
+
+describe('defaultCategoryFor', () => {
+	it('starts SPENDING on the neutral "Other", not on Food & Drink', () => {
+		// The add form used to seed `categoriesFor('spending')[0]`, which is Food &
+		// Drink — so rent, flights and taxis filed themselves as food unless the
+		// user noticed. A wrong guess is worse than a neutral one: it looks
+		// deliberate. This assertion is the whole point of the helper.
+		expect(defaultCategoryFor('spending')).toBe('spending-other');
+		expect(defaultCategoryFor('spending')).not.toBe(categoriesFor('spending')[0].id);
+	});
+
+	it('starts TRANSFERS on Debt settlement', () => {
+		// Not a guess: it is what a transfer overwhelmingly is, and what the §8.4
+		// settle-up prefill sets anyway.
+		expect(defaultCategoryFor('transfer')).toBe('transfer-debt-settlement');
+	});
+
+	it('returns an id that actually exists and applies to that type', () => {
+		for (const type of ['spending', 'transfer'] as const) {
+			const category = getCategory(defaultCategoryFor(type));
+			expect(category, `default for ${type} must resolve`).toBeDefined();
+			expect(category!.appliesTo).toBe(type);
+		}
 	});
 });
