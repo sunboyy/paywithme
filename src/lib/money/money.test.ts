@@ -3,6 +3,7 @@ import {
 	scaleFactor,
 	parseAmount,
 	parseMinor,
+	sanitizeAmountInput,
 	formatAmount,
 	formatMinor,
 	symbolPrefix,
@@ -127,6 +128,59 @@ describe('parseAmount', () => {
 	it('accepts the largest safe value', () => {
 		expect(MAX_SAFE_MINOR).toBe(Number.MAX_SAFE_INTEGER);
 		expect(parseAmount(String(Number.MAX_SAFE_INTEGER), 'JPY')).toBe(Number.MAX_SAFE_INTEGER);
+	});
+});
+
+describe('sanitizeAmountInput', () => {
+	// The entry-side counterpart to parseAmount: it keeps whatever can still BECOME
+	// a valid amount, so a field can render exactly what the user typed without the
+	// display drifting away from the value that gets parsed out of it.
+
+	it('keeps a well-formed amount untouched', () => {
+		expect(sanitizeAmountInput('12.50', 'THB')).toBe('12.50');
+		expect(sanitizeAmountInput('0', 'USD')).toBe('0');
+		expect(sanitizeAmountInput('', 'USD')).toBe('');
+	});
+
+	it('drops non-numeric junk instead of letting it sit in the field', () => {
+		expect(sanitizeAmountInput('12a', 'THB')).toBe('12');
+		expect(sanitizeAmountInput('abc', 'THB')).toBe('');
+		expect(sanitizeAmountInput('$5', 'USD')).toBe('5');
+		expect(sanitizeAmountInput('-5', 'USD')).toBe('5'); // entry is non-negative
+		expect(sanitizeAmountInput('1,234', 'USD')).toBe('1234'); // same amount
+	});
+
+	it('caps the fraction at the currency exponent as it is typed', () => {
+		expect(sanitizeAmountInput('12.345', 'THB')).toBe('12.34');
+		expect(sanitizeAmountInput('1.99999', 'USD')).toBe('1.99');
+		// Whatever survives must be something parseAmount actually accepts.
+		expect(parseAmount(sanitizeAmountInput('12.345', 'THB'), 'THB')).toBe(1234);
+	});
+
+	it('allows NO fraction at all for a 0-dp currency', () => {
+		expect(sanitizeAmountInput('12.5', 'JPY')).toBe('12');
+		expect(sanitizeAmountInput('12.', 'JPY')).toBe('12');
+		expect(parseAmount(sanitizeAmountInput('12.5', 'JPY'), 'JPY')).toBe(12);
+	});
+
+	it('keeps only the first decimal point', () => {
+		expect(sanitizeAmountInput('1.2.3', 'THB')).toBe('1.23');
+	});
+
+	it('preserves a trailing point — the midpoint of typing "12.50"', () => {
+		expect(sanitizeAmountInput('12.', 'THB')).toBe('12.');
+	});
+
+	it('gives a leading point its zero so the result parses', () => {
+		expect(sanitizeAmountInput('.5', 'THB')).toBe('0.5');
+		expect(parseAmount(sanitizeAmountInput('.5', 'THB'), 'THB')).toBe(50);
+	});
+
+	it('is idempotent — re-sanitizing its own output changes nothing', () => {
+		for (const raw of ['12.345', 'abc', '.5', '1.2.3', '12.', '-1,000.999']) {
+			const once = sanitizeAmountInput(raw, 'THB');
+			expect(sanitizeAmountInput(once, 'THB')).toBe(once);
+		}
 	});
 });
 

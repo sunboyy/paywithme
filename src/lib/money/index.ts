@@ -21,6 +21,7 @@ export {
 	MAX_SAFE_MINOR,
 	scaleFactor,
 	parseAmount,
+	sanitizeAmountInput,
 	formatAmount,
 	symbolPrefix,
 	distribute,

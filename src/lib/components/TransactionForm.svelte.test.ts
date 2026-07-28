@@ -295,6 +295,39 @@ describe('TransactionForm per-payer amounts', () => {
 		expect(input.value).toBe('12.');
 	});
 
+	it('refuses characters that are not part of an amount', async () => {
+		const { container, form } = renderForm(twoPayers);
+		const input = paidInput(container, 'Alex')!;
+
+		await fireEvent.input(input, { target: { value: '12a' } });
+		expect(input.value).toBe('12');
+		// The refused keystroke must not survive in the DOM either: the cleaned string
+		// equals the last rendered one, so nothing but a direct write clears it.
+		expect(get(form.form).payers).toContainEqual({ memberId: 'm-alex', amountPaid: 1200 });
+	});
+
+	it('refuses a decimal place the currency does not have', async () => {
+		// ฿ has 2. Typing a third digit must not land — the old behaviour left "12.345"
+		// on screen while parseAmount rejected it, recording 0 paid.
+		const { container, form } = renderForm(twoPayers);
+		const input = paidInput(container, 'Alex')!;
+
+		await fireEvent.input(input, { target: { value: '12.34' } });
+		await fireEvent.input(input, { target: { value: '12.345' } });
+
+		expect(input.value).toBe('12.34');
+		expect(get(form.form).payers).toContainEqual({ memberId: 'm-alex', amountPaid: 1234 });
+	});
+
+	it('takes the exponent from the ENTRY currency, not the settlement one', async () => {
+		// Entry in JPY (0 dp) while the group settles in THB: no decimals at all.
+		const { container } = renderForm({ ...twoPayers, currency: 'JPY' }, MULTI_CURRENCY);
+		const input = paidInput(container, 'Alex')!;
+
+		await fireEvent.input(input, { target: { value: '1200.5' } });
+		expect(input.value).toBe('1200');
+	});
+
 	it('seeds each input from an existing multi-payer transaction', () => {
 		const { container } = renderForm({
 			amountTotal: 9000,
@@ -326,5 +359,119 @@ describe('TransactionForm per-payer amounts', () => {
 
 		expect(paidInput(container, 'Alex')?.value).toBe('90.00');
 		expect(paidInput(container, 'Bo')?.value).toBe('');
+	});
+});
+
+// ── Every OTHER money field on the form ──────────────────────────────────────
+//
+// The per-payer boxes were the reported case, but the total, the per-member and
+// per-item amounts, the FX settlement total and an absolute charge all take a raw
+// typed string the same way. Each one used to accept a keystroke `parseAmount`
+// refuses — leaving "12.345" on screen for an amount stored as 0.
+describe('TransactionForm money-field entry', () => {
+	function byLabel(container: HTMLElement, label: string) {
+		return container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
+	}
+
+	it('constrains the AMOUNT total', async () => {
+		const { container, form } = renderForm({ splitMode: 'equal' });
+		const input = container.querySelector<HTMLInputElement>('#amountTotal')!;
+
+		await fireEvent.input(input, { target: { value: '12.34' } });
+		await fireEvent.input(input, { target: { value: '12.345' } });
+		expect(input.value).toBe('12.34');
+
+		await fireEvent.input(input, { target: { value: '12.34x' } });
+		expect(input.value).toBe('12.34');
+		expect(get(form.form).amountTotal).toBe(1234);
+	});
+
+	it('constrains a per-member AMOUNT-split box', async () => {
+		const { container, form } = renderForm({
+			splitMode: 'amount',
+			amountTotal: 1234,
+			beneficiaries: [{ memberId: 'm-alex', rawAmount: 0 }]
+		});
+		const input = byLabel(container, 'Amount for Alex');
+
+		await fireEvent.input(input, { target: { value: '12.34' } });
+		await fireEvent.input(input, { target: { value: '12.345' } });
+
+		expect(input.value).toBe('12.34');
+		expect(get(form.form).beneficiaries).toContainEqual({ memberId: 'm-alex', rawAmount: 1234 });
+	});
+
+	it('constrains an ITEM amount, which the derived total is summed from', async () => {
+		// The worst case of the set: a refused item amount used to parse to 0 and drop
+		// out of the itemized total silently, with no error anywhere on the form.
+		const { container, form } = renderForm({
+			splitMode: 'itemized',
+			items: [{ label: 'Pizza', amount: 0, splitMode: 'equal', beneficiaries: [] }]
+		});
+		const input = byLabel(container, 'Item 1 amount');
+
+		await fireEvent.input(input, { target: { value: '12.34' } });
+		await fireEvent.input(input, { target: { value: '12.345' } });
+
+		expect(input.value).toBe('12.34');
+		expect(get(form.form).items[0].amount).toBe(1234);
+	});
+
+	it('constrains a per-member amount INSIDE an item', async () => {
+		const { container, form } = renderForm({
+			splitMode: 'itemized',
+			items: [
+				{
+					label: 'Pizza',
+					amount: 1234,
+					splitMode: 'amount',
+					beneficiaries: [{ memberId: 'm-alex', rawAmount: 0 }]
+				}
+			]
+		});
+		const input = byLabel(container, 'Item 1 amount for Alex');
+
+		await fireEvent.input(input, { target: { value: '12.345' } });
+		expect(input.value).toBe('12.34');
+		expect(get(form.form).items[0].beneficiaries).toContainEqual({
+			memberId: 'm-alex',
+			rawAmount: 1234
+		});
+	});
+
+	it('constrains an ABSOLUTE charge but leaves a PERCENT alone', async () => {
+		const { container, form } = renderForm({
+			splitMode: 'itemized',
+			items: [{ label: 'Pizza', amount: 1000, splitMode: 'equal', beneficiaries: [] }],
+			charges: [
+				{ kind: 'service', mode: 'absolute', value: 0, base: 'items_subtotal', sortOrder: 0 },
+				{ kind: 'vat', mode: 'percent', value: 0, base: 'items_subtotal', sortOrder: 1 }
+			]
+		});
+
+		const absolute = byLabel(container, 'Charge 1 value');
+		await fireEvent.input(absolute, { target: { value: '5.678' } });
+		expect(absolute.value).toBe('5.67');
+		expect(get(form.form).charges[0].value).toBe(567);
+
+		// A percent is a different grammar (0–100 → basis points) and is deliberately
+		// NOT run through the money sanitizer — 7.5% must keep its tenth of a percent.
+		const percent = byLabel(container, 'Charge 2 value');
+		await fireEvent.input(percent, { target: { value: '7.5' } });
+		expect(percent.value).toBe('7.5');
+		expect(get(form.form).charges[1].value).toBe(750);
+	});
+
+	it('constrains the FX settlement total by the SETTLEMENT currency', async () => {
+		// Entry in JPY, settling in THB: this box is THB (2 dp) even though the amount
+		// box beside it is JPY (0 dp).
+		const { container } = renderForm({ currency: 'JPY' }, MULTI_CURRENCY);
+		const input = container.querySelector<HTMLInputElement>('#fx-total')!;
+
+		await fireEvent.input(input, { target: { value: '970.12' } });
+		expect(input.value).toBe('970.12');
+
+		await fireEvent.input(input, { target: { value: '970.123' } });
+		expect(input.value).toBe('970.12');
 	});
 });

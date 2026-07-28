@@ -91,6 +91,47 @@ export function parseAmount(input: string, code: CurrencyCode, opts?: ParseAmoun
 	return parseMinor(input, exponentOf(code), { ...opts, code });
 }
 
+/**
+ * Constrain a **partially typed** major-unit string to something `parseAmount`
+ * can accept for `code` — the entry-side counterpart to {@link parseAmount}.
+ *
+ * `parseAmount` is all-or-nothing: it throws on junk, which is right for a value
+ * being committed but useless for a field being typed into, where the input is
+ * legitimately incomplete between keystrokes. This keeps only what can still
+ * become a valid amount:
+ *
+ *   - non-numeric characters are dropped (`"12a"` → `"12"`, `"$5"` → `"5"`), so a
+ *     rejected keystroke simply never appears rather than sitting in the box
+ *     making the field disagree with the value it parses to;
+ *   - thousands separators are dropped (`"1,234"` → `"1234"`) — same amount;
+ *   - only the FIRST decimal point survives (`"1.2.3"` → `"1.23"`);
+ *   - fractional digits are capped at the currency's exponent, so the extra digit
+ *     is refused AS IT IS TYPED (`"1.234"` → `"1.23"` for THB) — that is a refused
+ *     keystroke the user sees immediately, not a complete value silently rounded,
+ *     which {@link parseAmount} still rejects outright;
+ *   - a 0-dp currency keeps no fraction at all (`"5.5"` → `"5"` for JPY);
+ *   - a leading point gains its `0` (`".5"` → `"0.5"`), which parses;
+ *   - a TRAILING point is preserved (`"12."`), because it is the normal midpoint
+ *     of typing "12.50" — it parses to nothing, so the caller treats it as 0 until
+ *     a digit follows.
+ *
+ * Signs are dropped: every field this backs is non-negative entry.
+ *
+ * @example sanitizeAmountInput('12.345', 'THB') // → '12.34'
+ * @example sanitizeAmountInput('12.5', 'JPY')   // → '12'
+ */
+export function sanitizeAmountInput(input: string, code: CurrencyCode): string {
+	const exponent = exponentOf(code);
+	const cleaned = input.replace(/[^\d.]/g, '');
+	const dot = cleaned.indexOf('.');
+	if (dot === -1) return cleaned;
+
+	const intDigits = cleaned.slice(0, dot);
+	if (exponent === 0) return intDigits;
+	const fracDigits = cleaned.slice(dot + 1).replace(/\./g, '');
+	return `${intDigits === '' ? '0' : intDigits}.${fracDigits.slice(0, exponent)}`;
+}
+
 /** Options for {@link parseMinor} — {@link ParseAmountOptions} plus a label for errors. */
 interface ParseMinorOptions extends ParseAmountOptions {
 	/** A label (typically the ISO code) for the "too many decimal places" message. */

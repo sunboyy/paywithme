@@ -66,7 +66,7 @@
 </script>
 
 <script lang="ts">
-	import { formatAmount, parseAmount, type CurrencyCode } from '$lib/money';
+	import { formatAmount, parseAmount, sanitizeAmountInput, type CurrencyCode } from '$lib/money';
 	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
 	import { defaultCategoryFor } from '$lib/categories';
 	import * as Tabs from '$lib/components/ui/tabs';
@@ -184,6 +184,22 @@
 				.map((b) => [b.memberId, formatAmount(b.rawAmount ?? 0, currencyCode, { symbol: false })])
 		)
 	);
+
+	// ── How every money field on this form is wired ──────────────────────────────
+	// Each one renders the RAW string the user typed (never `formatAmount` of the
+	// parsed value — that re-formats under the caret, rewriting a typed "5" to
+	// "5.00" mid-keystroke), and constrains that string with `sanitizeAmountInput`
+	// on the way in. Without the constraint the two drift apart in the other
+	// direction: `parseAmount` throws on "12a" / on a decimal place the currency
+	// doesn't have, `toMinor` turns that into 0, and the field sits there showing
+	// "12.345" for an amount recorded as nothing.
+	//
+	// They are `bind:value` ACCESSOR pairs rather than one-way `value=` for one
+	// reason: a refused keystroke ("12" + "a" → "12") leaves the rendered string
+	// unchanged, so a one-way binding repaints nothing and the character stays on
+	// screen. Svelte's input binding re-reads the getter after the setter runs and,
+	// when they disagree, rewrites the element and restores the caret — its
+	// documented "respect any validation in accessors" path.
 
 	/** Parse a major-unit string → minor units; returns null on an invalid entry. */
 	function toMinor(value: string): number | null {
@@ -320,8 +336,21 @@
 
 	function onSettlementTotalInput(raw: string) {
 		fxDriver = 'total';
-		settlementTotalInput = raw;
+		// The SETTLEMENT currency's precision, not the entry currency's — this box is
+		// denominated in what the group settles in (§7.6).
+		settlementTotalInput = sanitizeAmountInput(raw, settlementCode);
 	}
+
+	// What the settlement box shows: the typed string while the user is driving the
+	// pair from this side, otherwise the total derived from the rate (read-only in
+	// effect — typing here switches the driver).
+	const settlementFieldValue = $derived(
+		fxDriver === 'total'
+			? settlementTotalInput
+			: settlementPreview
+				? formatAmount($formData.amountTotalSettlement, settlementCode, { symbol: false })
+				: ''
+	);
 
 	const selectedCurrencyLabel = $derived(
 		`${entryCurrency.code}${entryCurrency.name ? ` · ${entryCurrency.name}` : ''}`
@@ -401,8 +430,9 @@
 	}
 
 	function setRawAmount(memberId: string, raw: string) {
-		amountInputs[memberId] = raw;
-		const minor = toMinor(raw) ?? 0;
+		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		amountInputs[memberId] = cleaned;
+		const minor = toMinor(cleaned) ?? 0;
 		$formData.beneficiaries = $formData.beneficiaries.map((b) =>
 			b.memberId === memberId ? { memberId, rawAmount: minor } : b
 		);
@@ -454,9 +484,11 @@
 		}
 	}
 
+	/** A keystroke in a payer's amount box (see the money-field note above). */
 	function setPaid(memberId: string, raw: string) {
-		paidInputs[memberId] = raw;
-		const minor = toMinor(raw) ?? 0;
+		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		paidInputs[memberId] = cleaned;
+		const minor = toMinor(cleaned) ?? 0;
 		$formData.payers = $formData.payers.map((p) =>
 			p.memberId === memberId ? { memberId, amountPaid: minor } : p
 		);
@@ -590,8 +622,14 @@
 	}
 
 	function setChargeValue(index: number, raw: string) {
-		chargeValueInputs[index] = raw;
-		patchCharge(index, { value: parseChargeValue($formData.charges[index].mode, raw) });
+		const mode = $formData.charges[index].mode;
+		// Only the ABSOLUTE mode is a money amount in the entry currency. A PERCENT is
+		// a different grammar (0–100 → basis points, its own precision rule), so it is
+		// left as typed here rather than run through a money sanitizer that would
+		// mangle it; constraining that entry is a separate change.
+		const cleaned = mode === 'absolute' ? sanitizeAmountInput(raw, currencyCode) : raw;
+		chargeValueInputs[index] = cleaned;
+		patchCharge(index, { value: parseChargeValue(mode, cleaned) });
 	}
 
 	function chargeKindLabel(kind: string): string {
@@ -631,8 +669,9 @@
 	}
 
 	function setItemAmount(index: number, raw: string) {
-		itemAmountInputs[index] = raw;
-		patchItem(index, { amount: toMinor(raw) ?? 0 });
+		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		itemAmountInputs[index] = cleaned;
+		patchItem(index, { amount: toMinor(cleaned) ?? 0 });
 	}
 
 	/** Switch one item's split mode, normalizing its beneficiary lines (mirrors top-level). */
@@ -688,8 +727,9 @@
 	}
 
 	function setItemRawAmount(index: number, memberId: string, raw: string) {
-		itemMemberAmountInputs[`${index}:${memberId}`] = raw;
-		const minor = toMinor(raw) ?? 0;
+		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		itemMemberAmountInputs[`${index}:${memberId}`] = cleaned;
+		const minor = toMinor(cleaned) ?? 0;
 		const beneficiaries = $formData.items[index].beneficiaries.map((b) =>
 			b.memberId === memberId ? { memberId, rawAmount: minor } : b
 		);
@@ -864,7 +904,7 @@
 					placeholder="0.00"
 					aria-invalid={$errors.amountTotal ? 'true' : undefined}
 					aria-describedby={$errors.amountTotal ? 'amountTotal-error' : undefined}
-					bind:value={totalInput}
+					bind:value={() => totalInput, (v) => (totalInput = sanitizeAmountInput(v, currencyCode))}
 					class="h-14 flex-1 border-0 bg-transparent px-1 text-2xl font-semibold tabular-nums shadow-none focus-visible:ring-0"
 				/>
 			</div>
@@ -995,12 +1035,7 @@
 							placeholder="0.00"
 							aria-invalid={$errors.amountTotalSettlement ? 'true' : undefined}
 							aria-describedby={$errors.amountTotalSettlement ? 'fx-error' : undefined}
-							value={fxDriver === 'total'
-								? settlementTotalInput
-								: settlementPreview
-									? formatAmount($formData.amountTotalSettlement, settlementCode, { symbol: false })
-									: ''}
-							oninput={(e) => onSettlementTotalInput(e.currentTarget.value)}
+							bind:value={() => settlementFieldValue, (v) => onSettlementTotalInput(v)}
 						/>
 					</div>
 				</div>
@@ -1057,8 +1092,8 @@
 								inputmode="decimal"
 								placeholder="0.00"
 								aria-label="Amount paid by {member.displayName}"
-								value={paidInputs[member.id] ?? ''}
-								oninput={(e) => setPaid(member.id, e.currentTarget.value)}
+								bind:value={() => paidInputs[member.id] ?? '',
+								(v) => setPaid(member.id, v)}
 								class="h-10 w-24"
 							/>
 						</div>
@@ -1162,8 +1197,8 @@
 										inputmode="decimal"
 										placeholder="0.00"
 										aria-label="Amount for {member.displayName}"
-										value={amountInputs[member.id] ?? ''}
-										oninput={(e) => setRawAmount(member.id, e.currentTarget.value)}
+										bind:value={() => amountInputs[member.id] ?? '',
+										(v) => setRawAmount(member.id, v)}
 										class="h-10 w-24"
 									/>
 								</div>
@@ -1218,8 +1253,8 @@
 									inputmode="decimal"
 									placeholder="0.00"
 									aria-label="Item {index + 1} amount"
-									value={itemAmountInputs[index] ?? ''}
-									oninput={(e) => setItemAmount(index, e.currentTarget.value)}
+									bind:value={() => itemAmountInputs[index] ?? '',
+									(v) => setItemAmount(index, v)}
 								/>
 							</div>
 						</div>
@@ -1291,8 +1326,9 @@
 													inputmode="decimal"
 													placeholder="0.00"
 													aria-label="Item {index + 1} amount for {member.displayName}"
-													value={itemMemberAmountInputs[`${index}:${member.id}`] ?? ''}
-													oninput={(e) => setItemRawAmount(index, member.id, e.currentTarget.value)}
+													bind:value={() =>
+														itemMemberAmountInputs[`${index}:${member.id}`] ?? '',
+													(v) => setItemRawAmount(index, member.id, v)}
 													class="h-10 w-24"
 												/>
 											</div>
@@ -1390,8 +1426,8 @@
 									inputmode="decimal"
 									placeholder={charge.mode === 'percent' ? '10' : '0.00'}
 									aria-label="Charge {index + 1} value"
-									value={chargeValueInputs[index] ?? ''}
-									oninput={(e) => setChargeValue(index, e.currentTarget.value)}
+									bind:value={() => chargeValueInputs[index] ?? '',
+									(v) => setChargeValue(index, v)}
 								/>
 							</div>
 						</div>
