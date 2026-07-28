@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { defaults } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
@@ -249,5 +249,82 @@ describe('TransactionForm split preview', () => {
 		});
 
 		expect(queryByText('Each person owes')).toBeNull();
+	});
+});
+
+// ── Per-payer amount entry (multiple payers) ─────────────────────────────────
+//
+// These inputs are typed into digit by digit, so what they render must be the
+// user's raw string — NOT `formatAmount(amountPaid)`, which re-formatted on every
+// keystroke and turned the first "5" into "5.00" under the caret.
+describe('TransactionForm per-payer amounts', () => {
+	const twoPayers = {
+		payers: [
+			{ memberId: 'm-alex', amountPaid: 0 },
+			{ memberId: 'm-bo', amountPaid: 0 }
+		]
+	} satisfies Partial<TransactionInput>;
+
+	/** The payer amount input for `name`, which only renders with >1 payer. */
+	function paidInput(container: HTMLElement, name: string) {
+		return container.querySelector<HTMLInputElement>(`[aria-label="Amount paid by ${name}"]`);
+	}
+
+	it('keeps the raw keystrokes instead of re-formatting mid-typing', async () => {
+		const { container, form } = renderForm(twoPayers);
+		const input = paidInput(container, 'Alex');
+		expect(input).not.toBeNull();
+
+		await fireEvent.input(input!, { target: { value: '5' } });
+		expect(input!.value).toBe('5');
+
+		// ...and the next digit extends it rather than landing after an injected ".00".
+		await fireEvent.input(input!, { target: { value: '50' } });
+		expect(input!.value).toBe('50');
+
+		// The parsed minor units still track what was typed (฿50.00 = 5000).
+		expect(get(form.form).payers).toContainEqual({ memberId: 'm-alex', amountPaid: 5000 });
+	});
+
+	it('keeps a trailing decimal point while it is being typed', async () => {
+		const { container } = renderForm(twoPayers);
+		const input = paidInput(container, 'Bo')!;
+
+		await fireEvent.input(input, { target: { value: '12' } });
+		await fireEvent.input(input, { target: { value: '12.' } });
+		expect(input.value).toBe('12.');
+	});
+
+	it('seeds each input from an existing multi-payer transaction', () => {
+		const { container } = renderForm({
+			amountTotal: 9000,
+			payers: [
+				{ memberId: 'm-alex', amountPaid: 6000 },
+				{ memberId: 'm-bo', amountPaid: 3000 }
+			]
+		});
+
+		expect(paidInput(container, 'Alex')?.value).toBe('60.00');
+		expect(paidInput(container, 'Bo')?.value).toBe('30.00');
+	});
+
+	it('shows the mirrored total once a second payer is added', async () => {
+		// A single payer covers the whole total implicitly (no input rendered). When a
+		// second payer joins, the first one's box must open ALREADY holding that total
+		// rather than blank — otherwise Σ paid silently stops matching the total.
+		const { container } = renderForm({
+			amountTotal: 9000,
+			payers: [{ memberId: 'm-alex', amountPaid: 9000 }]
+		});
+		expect(paidInput(container, 'Alex')).toBeNull();
+
+		const paidBy = [...container.querySelectorAll('fieldset')].find(
+			(f) => f.querySelector('legend')?.textContent === 'Paid by'
+		)!;
+		const boCheckbox = [...paidBy.querySelectorAll('[role="checkbox"]')][1];
+		await fireEvent.click(boCheckbox);
+
+		expect(paidInput(container, 'Alex')?.value).toBe('90.00');
+		expect(paidInput(container, 'Bo')?.value).toBe('');
 	});
 });

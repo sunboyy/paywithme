@@ -411,30 +411,55 @@
 	// ── Payer selection ───────────────────────────────────────────────────────────
 	const selectedPayerIds = $derived(new Set($formData.payers.map((p) => p.memberId)));
 
+	// Per-payer amount display strings, keyed by member id — the same parallel-string
+	// pattern as `amountInputs`. The input must NOT render `formatAmount(amountPaid)`:
+	// that re-formats on every keystroke, so typing "5" was immediately rewritten to
+	// "5.00" (cursor jumping past the decimals, "50" becoming "5.00" + "0").
+	let paidInputs = $state<Record<string, string>>(
+		Object.fromEntries(
+			$formData.payers
+				.filter((p) => p.amountPaid > 0)
+				.map((p) => [p.memberId, formatAmount(p.amountPaid, currencyCode, { symbol: false })])
+		)
+	);
+
+	/**
+	 * Re-seed any display string that no longer parses back to its payer's amount.
+	 * A string the user is mid-way through typing always round-trips (it's what
+	 * produced `amountPaid`), so it is left untouched; a payer whose amount was set
+	 * behind the input's back — the single-payer mirror in the effect above — is
+	 * refreshed before the per-payer inputs become visible.
+	 */
+	function syncPaidInputs() {
+		for (const p of $formData.payers) {
+			if ((toMinor(paidInputs[p.memberId] ?? '') ?? 0) !== p.amountPaid) {
+				paidInputs[p.memberId] =
+					p.amountPaid > 0 ? formatAmount(p.amountPaid, currencyCode, { symbol: false }) : '';
+			}
+		}
+	}
+
 	function togglePayer(memberId: string, checked: boolean) {
 		if (checked) {
 			if (!selectedPayerIds.has(memberId)) {
 				// New payer: 0 paid by default. A single payer is kept in sync with the
 				// total by the effect above; with multiple payers the user enters each.
 				$formData.payers = [...$formData.payers, { memberId, amountPaid: 0 }];
+				paidInputs[memberId] = '';
+				syncPaidInputs();
 			}
 		} else {
 			$formData.payers = $formData.payers.filter((p) => p.memberId !== memberId);
+			delete paidInputs[memberId];
 		}
 	}
 
 	function setPaid(memberId: string, raw: string) {
+		paidInputs[memberId] = raw;
 		const minor = toMinor(raw) ?? 0;
 		$formData.payers = $formData.payers.map((p) =>
 			p.memberId === memberId ? { memberId, amountPaid: minor } : p
 		);
-	}
-
-	function paidInputValue(memberId: string): string {
-		const payer = $formData.payers.find((p) => p.memberId === memberId);
-		return payer && payer.amountPaid > 0
-			? formatAmount(payer.amountPaid, currencyCode, { symbol: false })
-			: '';
 	}
 
 	const selectedCategoryName = $derived(
@@ -1032,7 +1057,7 @@
 								inputmode="decimal"
 								placeholder="0.00"
 								aria-label="Amount paid by {member.displayName}"
-								value={paidInputValue(member.id)}
+								value={paidInputs[member.id] ?? ''}
 								oninput={(e) => setPaid(member.id, e.currentTarget.value)}
 								class="h-10 w-24"
 							/>
