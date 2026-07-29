@@ -57,7 +57,12 @@ export const AUDIT_ACTIONS = [
 	'reactivate',
 	'revoke',
 	'rename',
-	'currency_set'
+	'currency_set',
+	// A maintenance re-resolve of an ALREADY-RECORDED transaction (ADR-0013's
+	// rounding backfill). Deliberately NOT `edit`: nobody changed the transaction,
+	// and the feed should not claim they did — but a member's owed amount can move
+	// by a minor unit, so it is a mutation and §12.1 requires a row for it.
+	'recalculate'
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

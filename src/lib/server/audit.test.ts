@@ -166,7 +166,10 @@ describe('constrained value sets (PLAN §12.1)', () => {
 			'reactivate',
 			'revoke',
 			'rename',
-			'currency_set'
+			'currency_set',
+			// Maintenance re-resolve (ADR-0013 rounding backfill) — distinct from `edit`
+			// because nobody edited anything, but still a mutation §12.1 must record.
+			'recalculate'
 		]);
 	});
 
