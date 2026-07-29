@@ -201,29 +201,41 @@ export const MAX_PERCENT_BPS = 10_000;
  * express two ranges). `base` selects what a `percent` applies to; `sort_order`
  * is the application order.
  */
-const chargeSchema = z
-	.object({
-		// `tip` is reserved by §7.2.2 ("extensible later") and treated as an additive
-		// kind; v1 entry uses service/vat/discount but accepting tip keeps the schema
-		// forward-compatible with the DB column's documented value set.
-		kind: z.enum(['service', 'vat', 'discount', 'tip'], { message: 'Select a charge kind' }),
-		mode: z.enum(['percent', 'absolute'], { message: 'Select a charge mode' }),
-		// Non-negative magnitude; the mode-specific upper bound is refined below.
-		value: minorUnitsField,
-		base: z.enum(['items_subtotal', 'running_total'], { message: 'Select a charge base' }),
-		sortOrder: z
-			.number({ message: 'A sort order is required' })
-			.int({ message: 'Sort order must be a whole number' })
-			.nonnegative({ message: 'Sort order must be zero or more' })
-	})
-	.refine((c) => c.mode !== 'percent' || c.value <= MAX_PERCENT_BPS, {
-		// `percent` value is basis points, 0–10000 (PLAN §7.4).
-		message: 'A percentage charge must be between 0 and 10000 basis points (0–100%)',
-		path: ['value']
-	});
+const chargeSchema = z.object({
+	// `tip` is reserved by §7.2.2 ("extensible later") and treated as an additive
+	// kind; v1 entry uses service/vat/discount but accepting tip keeps the schema
+	// forward-compatible with the DB column's documented value set.
+	kind: z.enum(['service', 'vat', 'discount', 'tip'], { message: 'Select a charge kind' }),
+	mode: z.enum(['percent', 'absolute'], { message: 'Select a charge mode' }),
+	// Non-negative magnitude; the mode-specific upper bound is refined below.
+	value: minorUnitsField,
+	base: z.enum(['items_subtotal', 'running_total'], { message: 'Select a charge base' }),
+	sortOrder: z
+		.number({ message: 'A sort order is required' })
+		.int({ message: 'Sort order must be a whole number' })
+		.nonnegative({ message: 'Sort order must be zero or more' })
+});
 
 /** Inferred single-charge input (PLAN §7.2.2). */
 export type ChargeInput = z.infer<typeof chargeSchema>;
+
+/**
+ * The per-charge rule (PLAN §7.4): a `percent` value is basis points, 0–10000.
+ * Gated on itemized by the built schema for the same reason as {@link itemIssues}
+ * — charges exist only for an itemized split, so a row left over from a visit to
+ * the Itemized tab must not block a non-itemized save.
+ */
+function chargeIssues(charge: ChargeInput): { message: string; path: (string | number)[] }[] {
+	if (charge.mode === 'percent' && charge.value > MAX_PERCENT_BPS) {
+		return [
+			{
+				message: 'A percentage charge must be between 0 and 10000 basis points (0–100%)',
+				path: ['value']
+			}
+		];
+	}
+	return [];
+}
 
 /** `true` for additive kinds (service/vat/tip), `false` for the subtractive `discount` (§7.2.2). */
 function chargeAdds(kind: ChargeInput['kind']): boolean {
@@ -448,32 +460,52 @@ const shareSchema = z.object({
  * its own per-item split mode, and its beneficiaries (≥1, refined below). Each
  * item's own split must be internally valid (amount/share rules per item, §7.4).
  */
-const itemSchema = z
-	.object({
-		label: titleField,
-		amount: minorUnitsField,
-		splitMode: itemSplitModeSchema,
-		beneficiaries: z.array(shareSchema)
-	})
-	.refine((item) => item.amount > 0, {
-		// Each item amount must be > 0 (PLAN §7.4 / §7.2.1).
-		message: 'Each item amount must be greater than 0',
-		path: ['amount']
-	})
-	.refine((item) => item.beneficiaries.length >= 1, {
-		// Each item needs ≥1 beneficiary (PLAN §7.4 / §7.2.3 edge case).
-		message: 'Each item needs at least one beneficiary',
-		path: ['beneficiaries']
-	})
-	.refine((item) => splitInputsValid(item.splitMode, item.amount, item.beneficiaries), {
-		// Each item's own split must be valid: amount → Σ rawAmount == item amount;
-		// share → Σ weight > 0; equal → nothing extra (PLAN §7.4, per item).
-		message: 'This item split does not add up to the item amount',
-		path: ['beneficiaries']
-	});
+const itemSchema = z.object({
+	// Length-bounded here; the NON-EMPTY requirement is an itemized-only rule (see
+	// `itemIssues`), so a blank row parked outside itemized doesn't fail the parse.
+	label: z.string().trim().max(200, { message: 'Title must be 200 characters or fewer' }),
+	amount: minorUnitsField,
+	splitMode: itemSplitModeSchema,
+	beneficiaries: z.array(shareSchema)
+});
 
 /** Inferred item input (PLAN §7.2.1). */
 export type ItemInput = z.infer<typeof itemSchema>;
+
+/**
+ * The per-item rules (PLAN §7.4 / §7.2.1), as issues rather than element-level
+ * refinements: they hold ONLY for an itemized transaction, so the built schema
+ * applies them from a top-level `superRefine` gated on `split_mode`.
+ *
+ * Why not refine `itemSchema` itself: a non-itemized transaction IGNORES `items`
+ * entirely (nothing is persisted from them — see `server/transactions.ts`), and
+ * refining the element made leftover rows — e.g. the starter item the form seeds
+ * when you peek at Itemized — block saving an equal/amount/share split with an
+ * error the form has nowhere to show.
+ */
+function itemIssues(item: ItemInput): { message: string; path: (string | number)[] }[] {
+	const issues: { message: string; path: (string | number)[] }[] = [];
+	if (item.label.length === 0) {
+		// Every item needs a name (PLAN §7.2.1).
+		issues.push({ message: 'A title is required', path: ['label'] });
+	}
+	if (item.amount <= 0) {
+		// Each item amount must be > 0 (PLAN §7.4 / §7.2.1).
+		issues.push({ message: 'Each item amount must be greater than 0', path: ['amount'] });
+	}
+	if (item.beneficiaries.length < 1) {
+		// Each item needs ≥1 beneficiary (PLAN §7.4 / §7.2.3 edge case).
+		issues.push({ message: 'Each item needs at least one beneficiary', path: ['beneficiaries'] });
+	} else if (!splitInputsValid(item.splitMode, item.amount, item.beneficiaries)) {
+		// Each item's own split must be valid: amount → Σ rawAmount == item amount;
+		// share → Σ weight > 0; equal → nothing extra (PLAN §7.4, per item).
+		issues.push({
+			message: 'This item split does not add up to the item amount',
+			path: ['beneficiaries']
+		});
+	}
+	return issues;
+}
 
 /**
  * Validate a split's per-member inputs against a target total (PLAN §7.4). Shared
@@ -617,6 +649,32 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 			.refine((tx) => tx.splitMode !== 'itemized' || tx.items.length >= 1, {
 				message: 'An itemized transaction needs at least one item',
 				path: ['items']
+			})
+			// ── itemized: every item obeys the per-item rules (see `itemIssues`). Only
+			//    for itemized — other modes ignore `items`, so stale rows left behind by
+			//    a visit to the Itemized tab must not block the save. ─────────────────
+			.superRefine((tx, ctx) => {
+				if (tx.splitMode !== 'itemized') {
+					return;
+				}
+				tx.items.forEach((item, index) => {
+					for (const issue of itemIssues(item)) {
+						ctx.addIssue({
+							code: 'custom',
+							message: issue.message,
+							path: ['items', index, ...issue.path]
+						});
+					}
+				});
+				tx.charges.forEach((charge, index) => {
+					for (const issue of chargeIssues(charge)) {
+						ctx.addIssue({
+							code: 'custom',
+							message: issue.message,
+							path: ['charges', index, ...issue.path]
+						});
+					}
+				});
 			})
 			// ── itemized: amount_total == items_subtotal + Σ signed charges (§7.2.2). ─
 			.refine(

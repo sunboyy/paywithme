@@ -475,3 +475,58 @@ describe('TransactionForm money-field entry', () => {
 		expect(input.value).toBe('970.12');
 	});
 });
+
+// ── Switching split modes must not strand invalid state ───────────────────────
+//
+// Peeking at the Itemized tab and coming back used to make the form unsavable:
+// entering itemized cleared the beneficiaries and seeded a blank starter item,
+// and that leftover item still had to pass the per-item rules (amount > 0, ≥1
+// beneficiary) — an error with nowhere to render on a non-itemized form, so the
+// Save button just did nothing. Items/charges are ignored outside itemized, so
+// the round trip must be lossless AND leave a valid payload.
+describe('TransactionForm split-mode round trip', () => {
+	/** Click a split-mode tab by its visible label. */
+	async function clickTab(container: HTMLElement, label: string) {
+		const tab = [...container.querySelectorAll('button, [role="tab"]')].find(
+			(el) => el.textContent?.trim() === label
+		);
+		expect(tab, `no "${label}" tab`).toBeTruthy();
+		await fireEvent.click(tab!);
+	}
+
+	const equalSplit = {
+		splitMode: 'equal',
+		title: 'Dinner',
+		// A real category id (the schema checks it against the constants, unlike the
+		// display-only `categories` prop the picker renders).
+		categoryId: 'spending-food-drink',
+		amountTotal: 9000,
+		amountTotalSettlement: 9000,
+		payers: [{ memberId: 'm-alex', amountPaid: 9000 }],
+		beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
+	} satisfies Partial<TransactionInput>;
+
+	it('leaves a SAVEABLE payload after equal → itemized → equal', async () => {
+		const { container, form } = renderForm(equalSplit);
+
+		await clickTab(container, 'Itemized');
+		expect(get(form.form).splitMode).toBe('itemized');
+		// The starter item the itemized UI seeds is what used to poison the payload.
+		expect(get(form.form).items.length).toBeGreaterThan(0);
+
+		await clickTab(container, 'Equal');
+		expect(get(form.form).splitMode).toBe('equal');
+
+		const res = schema.safeParse(get(form.form));
+		expect(res.success).toBe(true);
+	});
+
+	it('keeps the chosen beneficiaries across the itemized detour', async () => {
+		const { container, form } = renderForm(equalSplit);
+
+		await clickTab(container, 'Itemized');
+		await clickTab(container, 'Equal');
+
+		expect(get(form.form).beneficiaries).toEqual([{ memberId: 'm-alex' }, { memberId: 'm-bo' }]);
+	});
+});

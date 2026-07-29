@@ -281,6 +281,37 @@ describe('buildTransactionSchema — non-itemized split rules (§7.4)', () => {
 		);
 		expect(res.success).toBe(false);
 	});
+
+	// A non-itemized transaction IGNORES `items`/`charges` — nothing from them is
+	// persisted. They used to be validated anyway, so a row left over from a look at
+	// the Itemized tab (the form seeds a blank starter item) failed the parse with an
+	// error the non-itemized form has nowhere to render: the save button did nothing.
+	it('IGNORES leftover items when the split is not itemized', () => {
+		const res = thbSchema.safeParse(
+			baseSpending({
+				// A blank starter row: zero amount, nobody on it — invalid AS an item.
+				items: [{ label: '', amount: 0, splitMode: 'equal', beneficiaries: [] }]
+			})
+		);
+		expect(res.success).toBe(true);
+	});
+
+	it('IGNORES leftover charges when the split is not itemized', () => {
+		const res = thbSchema.safeParse(
+			baseSpending({
+				charges: [
+					{
+						kind: 'vat',
+						mode: 'percent',
+						value: MAX_PERCENT_BPS + 1, // out of range AS a charge
+						base: 'items_subtotal',
+						sortOrder: 0
+					}
+				]
+			})
+		);
+		expect(res.success).toBe(true);
+	});
 });
 
 describe('buildTransactionSchema — itemized rules (§7.4 / §7.2.1)', () => {
