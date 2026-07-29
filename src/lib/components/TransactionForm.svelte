@@ -1091,8 +1091,7 @@
 								inputmode="decimal"
 								placeholder="0.00"
 								aria-label="Amount paid by {member.displayName}"
-								bind:value={() => paidInputs[member.id] ?? '',
-								(v) => setPaid(member.id, v)}
+								bind:value={() => paidInputs[member.id] ?? '', (v) => setPaid(member.id, v)}
 								class="h-10 w-24"
 							/>
 						</div>
@@ -1196,8 +1195,9 @@
 										inputmode="decimal"
 										placeholder="0.00"
 										aria-label="Amount for {member.displayName}"
-										bind:value={() => amountInputs[member.id] ?? '',
-										(v) => setRawAmount(member.id, v)}
+										bind:value={
+											() => amountInputs[member.id] ?? '', (v) => setRawAmount(member.id, v)
+										}
 										class="h-10 w-24"
 									/>
 								</div>
@@ -1252,8 +1252,7 @@
 									inputmode="decimal"
 									placeholder="0.00"
 									aria-label="Item {index + 1} amount"
-									bind:value={() => itemAmountInputs[index] ?? '',
-									(v) => setItemAmount(index, v)}
+									bind:value={() => itemAmountInputs[index] ?? '', (v) => setItemAmount(index, v)}
 								/>
 							</div>
 						</div>
@@ -1325,9 +1324,10 @@
 													inputmode="decimal"
 													placeholder="0.00"
 													aria-label="Item {index + 1} amount for {member.displayName}"
-													bind:value={() =>
-														itemMemberAmountInputs[`${index}:${member.id}`] ?? '',
-													(v) => setItemRawAmount(index, member.id, v)}
+													bind:value={
+														() => itemMemberAmountInputs[`${index}:${member.id}`] ?? '',
+														(v) => setItemRawAmount(index, member.id, v)
+													}
 													class="h-10 w-24"
 												/>
 											</div>
@@ -1425,8 +1425,7 @@
 									inputmode="decimal"
 									placeholder={charge.mode === 'percent' ? '10' : '0.00'}
 									aria-label="Charge {index + 1} value"
-									bind:value={() => chargeValueInputs[index] ?? '',
-									(v) => setChargeValue(index, v)}
+									bind:value={() => chargeValueInputs[index] ?? '', (v) => setChargeValue(index, v)}
 								/>
 							</div>
 						</div>
