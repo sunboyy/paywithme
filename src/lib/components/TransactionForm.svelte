@@ -393,22 +393,21 @@
 	// the per-member input the new mode expects (weights for share, amounts for
 	// amount, neither for equal). Keeps the payload valid as the UI switches.
 	//
-	// `itemized` (Spending only, §7.2.3): the beneficiaries live on the ITEMS, so the
-	// top-level `beneficiaries` array is emptied; the item rows drive the split. We
-	// seed one starter item if none exist yet so the UI has a row to edit.
+	// `itemized` (Spending only, §7.2.3): the beneficiaries live on the ITEMS — the
+	// item rows drive the split and the top-level `beneficiaries` are ignored (by the
+	// schema and by the server) — so we LEAVE them alone rather than emptying them.
+	// Switching back to equal/amount/share then restores who was ticked instead of
+	// making you re-pick everyone. We seed one starter item if none exist yet so the
+	// UI has a row to edit; items and charges are likewise ignored outside itemized,
+	// so they too survive the round trip.
 	function onSplitModeChange(mode: TransactionInput['splitMode']) {
 		$formData.splitMode = mode;
 		if (mode === 'itemized') {
-			$formData.beneficiaries = [];
 			if ($formData.items.length === 0) {
 				addItem();
 			}
 			return;
 		}
-		// Charges apply to itemized only (§7.2.3); clear them when leaving itemized so
-		// the non-itemized payload stays valid (charges would otherwise be ignored).
-		$formData.charges = [];
-		chargeValueInputs = [];
 		$formData.beneficiaries = $formData.beneficiaries.map((b) => {
 			if (mode === 'share') return { memberId: b.memberId, shareWeight: b.shareWeight ?? 1 };
 			if (mode === 'amount')
