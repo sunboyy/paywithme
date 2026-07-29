@@ -11,6 +11,11 @@
 //                  throwing `TransactionCursorError`, translated by the wrapper).
 //   - `type`       'spending' | 'transfer'.
 //   - `categoryId` a category id.
+//   - `memberId`   only transactions this member is involved in — as a payer, a
+//                  beneficiary, or both (§10). An id that matches nothing (including
+//                  a member of another group) is an EMPTY page, not an error.
+//   - `role`       'paid' | 'owes' — narrows `memberId` to one side. Ignored on its
+//                  own; an unrecognized value → 422 like any other enum.
 //   - `from`/`to`  INCLUSIVE date range on `createdAt` (the §7.1 real-world date);
 //                  an unparseable date → 422. A bare `to=YYYY-MM-DD` coerces to that
 //                  day's MIDNIGHT UTC, but every `createdAt` is anchored at NOON UTC
@@ -67,7 +72,14 @@ const listQuerySchema = z.object({
 	type: z.enum(['spending', 'transfer']).optional(),
 	categoryId: z.string().min(1).optional(),
 	from: z.coerce.date().optional(),
-	to: z.coerce.date().optional()
+	to: z.coerce.date().optional(),
+	// The §10 member filter: only transactions this member is involved in, with
+	// `role` narrowing that to one side. An id matching nothing is an EMPTY page,
+	// not a 404 — same as `categoryId`, and it leaks no cross-group member
+	// existence. A `role` without a `memberId` is meaningless, so it is IGNORED
+	// rather than rejected (a no-op is not a wrong answer worth a turn).
+	memberId: z.string().min(1).optional(),
+	role: z.enum(['paid', 'owes']).optional()
 });
 
 /**
@@ -86,7 +98,7 @@ function endOfUtcDay(date: Date): Date {
 /** Collect only the PRESENT query params so Zod defaults/optionals behave (absent → undefined). */
 function presentParams(url: URL): Record<string, string> {
 	const raw: Record<string, string> = {};
-	for (const key of ['limit', 'cursor', 'type', 'categoryId', 'from', 'to']) {
+	for (const key of ['limit', 'cursor', 'type', 'categoryId', 'from', 'to', 'memberId', 'role']) {
 		const value = url.searchParams.get(key);
 		if (value !== null) raw[key] = value;
 	}
@@ -109,7 +121,7 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 	// never a 500). The cursor is passed through raw and decoded by the service.
 	const parsed = listQuerySchema.safeParse(presentParams(url));
 	if (!parsed.success) return validationError(parsed.error);
-	const { limit, cursor, type, categoryId, from, to } = parsed.data;
+	const { limit, cursor, type, categoryId, from, to, memberId, role } = parsed.data;
 
 	const filters: TransactionListFilters = {};
 	if (type) filters.type = type;
@@ -119,6 +131,11 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 	// Inclusive upper bound: roll `to` to end-of-day so a noon-anchored txn on that
 	// day is INCLUDED (§16.4). `from` stays start-of-day (midnight `gte` includes noon).
 	if (to) filters.to = endOfUtcDay(to);
+	// `role` only applies alongside a member (see the schema comment).
+	if (memberId) {
+		filters.memberId = memberId;
+		filters.memberRole = role;
+	}
 
 	// Over-fetch by one to detect a next page WITHOUT a second count query. The
 	// service throws `GroupAccessError` (→ 404) on no access and

@@ -1,7 +1,7 @@
 <script lang="ts">
 	// `/groups/[id]/transactions` — group transaction list (task 4.7; PLAN §7, §10).
 	//
-	// Mobile-first: a stacked card list on small screens with a type/category
+	// Mobile-first: a stacked card list on small screens with a type/category/member
 	// filter that posts via plain GET links (server-first; works without JS). Each
 	// row links to the per-transaction page (task 4.11). Empty state when none.
 	import { goto } from '$app/navigation';
@@ -26,7 +26,9 @@
 
 	// Empty-state branching (task 8.1): distinguish "no transactions yet" (offer
 	// the create CTA) from "your filter matched nothing" (offer to clear it).
-	const filterActive = $derived(hasActiveFilter(data.filters.type, data.filters.category));
+	const filterActive = $derived(
+		hasActiveFilter(data.filters.type, data.filters.category, data.filters.member)
+	);
 	const emptyKind = $derived(emptyStateKind(data.transactions.length, filterActive));
 
 	// Categories shown in the filter depend on the active type filter (§7.3).
@@ -42,15 +44,46 @@
 	const newPath = $derived(resolve('/groups/[id]/transactions/new', { id: data.group.id }));
 
 	/** Build the list URL for a given filter state, dropping empty params. */
-	function filterUrl(next: { type?: string | null; category?: string | null }): string {
+	function filterUrl(next: {
+		type?: string | null;
+		category?: string | null;
+		member?: string | null;
+		role?: string | null;
+	}): string {
 		const type = next.type !== undefined ? next.type : data.filters.type;
 		const category = next.category !== undefined ? next.category : data.filters.category;
+		const member = next.member !== undefined ? next.member : data.filters.member;
+		// `role` only means something alongside a member, so clearing the member
+		// clears the role with it — otherwise a stale `role=paid` would sit in the URL
+		// doing nothing and reappear the moment another person was selected.
+		const role = member ? (next.role !== undefined ? next.role : data.filters.role) : null;
 		// Plain query-string assembly (no mutable URLSearchParams instance held in
 		// component state — eslint svelte/prefer-svelte-reactivity).
 		const parts: string[] = [];
 		if (type) parts.push(`type=${encodeURIComponent(type)}`);
 		if (category) parts.push(`category=${encodeURIComponent(category)}`);
+		if (member) parts.push(`member=${encodeURIComponent(member)}`);
+		if (role) parts.push(`role=${encodeURIComponent(role)}`);
 		return parts.length > 0 ? `${listPath}?${parts.join('&')}` : listPath;
+	}
+
+	/** Clear every filter at once (the empty-state / "clear filter" target). */
+	const unfilteredUrl = $derived(
+		filterUrl({ type: null, category: null, member: null, role: null })
+	);
+
+	// Member filter (§10 "show only what relates to me"). The viewer's own member
+	// slot is pinned first and labelled "Me" — it is the reason this control exists.
+	// A solo group has nothing to filter, so the control is hidden below 2 members.
+	const memberOptions = $derived(
+		[...data.members].sort((a, b) => Number(b.isSelf) - Number(a.isSelf))
+	);
+	const selectedMember = $derived(data.members.find((m) => m.id === data.filters.member));
+
+	/** Dropdown label: "Me (Ada)" for the viewer, plus an inactive marker (§6.3). */
+	function memberLabel(m: { displayName: string; isSelf: boolean; isInactive: boolean }): string {
+		const base = m.isSelf ? `Me (${m.displayName})` : m.displayName;
+		return m.isInactive ? `${base} (inactive)` : base;
 	}
 
 	// Day sections instead of a per-row date (which repeated the same string on
@@ -119,7 +152,61 @@
 				{/each}
 			</Select.Content>
 		</Select.Root>
+
+		<!-- Member filter (§10): "show only what relates to me / to <person>".
+		     Pointless in a solo group, so it only appears from 2 members up. -->
+		{#if data.members.length > 1}
+			<Select.Root
+				type="single"
+				value={data.filters.member ?? ''}
+				onValueChange={(v) =>
+					// eslint-disable-next-line svelte/no-navigation-without-resolve
+					goto(filterUrl({ member: v === '' ? null : v }))}
+			>
+				<Select.Trigger class="w-48">
+					{selectedMember ? memberLabel(selectedMember) : 'Everyone'}
+				</Select.Trigger>
+				<Select.Content>
+					<Select.Item value="">Everyone</Select.Item>
+					{#each memberOptions as member (member.id)}
+						<Select.Item value={member.id} label={memberLabel(member)}>
+							{memberLabel(member)}
+						</Select.Item>
+					{/each}
+				</Select.Content>
+			</Select.Root>
+		{/if}
 	</div>
+
+	<!-- Which SIDE of the transaction the selected person is on. Only meaningful
+	     once someone is selected, so it appears with them. Plain links like the
+	     type chips above — no JS required. -->
+	{#if selectedMember}
+		<div class="flex flex-wrap items-center gap-2">
+			<!-- Name then bare verbs, rather than a sentence — "Ada · Paid" reads the
+			     same whoever is selected, so the copy needs no pronoun. -->
+			<span class="text-muted-foreground text-xs">
+				{selectedMember.isSelf ? 'Me' : selectedMember.displayName}
+			</span>
+			<div class="flex gap-1">
+				<Button
+					variant={data.filters.role === null ? 'default' : 'outline'}
+					size="sm"
+					href={filterUrl({ role: null })}>Either</Button
+				>
+				<Button
+					variant={data.filters.role === 'paid' ? 'default' : 'outline'}
+					size="sm"
+					href={filterUrl({ role: 'paid' })}>Paid</Button
+				>
+				<Button
+					variant={data.filters.role === 'owes' ? 'default' : 'outline'}
+					size="sm"
+					href={filterUrl({ role: 'owes' })}>Owes</Button
+				>
+			</div>
+		</div>
+	{/if}
 
 	{#if emptyKind === 'filtered-empty'}
 		<!-- Filtered-empty (task 8.1): the filter matched nothing → offer to clear
@@ -127,15 +214,13 @@
 		<EmptyState
 			icon={FilterXIcon}
 			title="No transactions match these filters"
-			description="Nothing here for the current filter. Try a different type or category, or clear the filter to see everything."
+			description="Nothing here for the current filter. Try a different type, category or person, or clear the filter to see everything."
 		>
 			{#snippet action()}
 				<!-- `filterUrl` returns a `resolve()`d path with an appended query string
 				     (already a resolved URL); Button's `href` is the same link control the
 				     filter buttons above use. -->
-				<Button variant="outline" href={filterUrl({ type: null, category: null })}>
-					Clear filter
-				</Button>
+				<Button variant="outline" href={unfilteredUrl}>Clear filter</Button>
 			{/snippet}
 		</EmptyState>
 	{:else if emptyKind === 'nothing-yet'}

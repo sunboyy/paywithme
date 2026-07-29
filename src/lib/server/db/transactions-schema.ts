@@ -185,7 +185,13 @@ export const transactionPayers = pgTable(
 		// Composite PK: one payer row per (transaction, member).
 		primaryKey({ columns: [table.transactionId, table.memberId] }),
 		// PLAN §9: transaction_payers(transaction_id).
-		index('transaction_payers_transaction_id_idx').on(table.transactionId)
+		index('transaction_payers_transaction_id_idx').on(table.transactionId),
+		// Member-first lookup for the "relates to this member" list filter (§10). The
+		// composite PK (transaction_id, member_id) already serves the correlated
+		// EXISTS when the planner drives from `transactions`; this index gives it the
+		// OTHER direction — start from the member's (typically few) rows and semi-join
+		// back — which is the selective plan for "only my transactions" in a big group.
+		index('transaction_payers_member_id_idx').on(table.memberId, table.transactionId)
 	]
 );
 
@@ -211,7 +217,10 @@ export const transactionShares = pgTable(
 		// Composite PK: one share row per (transaction, member).
 		primaryKey({ columns: [table.transactionId, table.memberId] }),
 		// PLAN §9: transaction_shares(transaction_id).
-		index('transaction_shares_transaction_id_idx').on(table.transactionId)
+		index('transaction_shares_transaction_id_idx').on(table.transactionId),
+		// Member-first lookup for the "relates to this member" list filter (§10) — see
+		// the matching index on `transaction_payers` for why both directions exist.
+		index('transaction_shares_member_id_idx').on(table.memberId, table.transactionId)
 	]
 );
 

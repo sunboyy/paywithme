@@ -1035,6 +1035,74 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(cabs.transactions[0].category.id).toBe('spending-transportation');
 		});
 
+		it('filters by the MEMBER involved, and by which SIDE they are on (§10)', async () => {
+			// Alice pays and shares → she is on BOTH sides (the fan-out trap).
+			await seed('Shared dinner');
+			// Alice pays, only Bob benefits → Alice paid, Alice does not owe.
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [s.bob],
+					amount: 4000,
+					title: 'Bob only'
+				})
+			});
+			// Bob pays for Bob → Alice is on neither side.
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.bob,
+					beneficiaryIds: [s.bob],
+					amount: 2000,
+					title: 'Bob alone'
+				})
+			});
+
+			// Either side — and 'Shared dinner' appears ONCE despite Alice being both
+			// payer and beneficiary (the EXISTS semi-join, not a join).
+			const mine = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberId: s.alice
+			});
+			expect(mine.transactions.map((t) => t.title.value).sort()).toEqual([
+				'Bob only',
+				'Shared dinner'
+			]);
+			expect(new Set(mine.transactions.map((t) => t.id)).size).toBe(2);
+
+			// `role: 'owes'` drops the one Alice merely paid for.
+			const owes = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberId: s.alice,
+				role: 'owes'
+			});
+			expect(owes.transactions.map((t) => t.title.value)).toEqual(['Shared dinner']);
+
+			// `role: 'paid'` keeps both of Alice's, and never Bob's own.
+			const paid = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberId: s.alice,
+				role: 'paid'
+			});
+			expect(paid.transactions.map((t) => t.title.value).sort()).toEqual([
+				'Bob only',
+				'Shared dinner'
+			]);
+
+			// NO EXISTENCE ORACLE: an unknown member id is an empty page, not an error.
+			const nobody = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberId: 'mbr_does_not_exist'
+			});
+			expect(nobody.transactions).toEqual([]);
+			expect(nobody.hasMore).toBe(false);
+		});
+
 		it('filters by an INCLUSIVE `from`/`to` date range on the real-world date (§7.1)', async () => {
 			// Three rows on three distinct calendar days (the §7.1 editable date).
 			await seed('May 1st', { date: '2026-05-01' });

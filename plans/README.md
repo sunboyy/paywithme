@@ -20,6 +20,7 @@ incremental improvements, not part of the original build loop.
 | 003  | Settlement-lifecycle integration test                | P1       | M      | —          | DONE   |
 | 004  | Mark inactive members in the settle-up balances list | P3       | S      | —          | DONE   |
 | 005  | UX/UI improvement pass (4 stages)                    | P1       | L      | —          | DONE   |
+| 006  | Filter transactions by member (paid / for / both)    | P2       | M      | —          | DONE   |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -46,6 +47,9 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   the balances query (`src/lib/server/balances.ts:69-88`) filters/joins on
   `transaction_id` + `transactions.group_id` (both indexed); `member_id` is only
   in the SELECT list, so an index on it wouldn't change the query plan. Mis-analysis.
+  **Superseded by plan 006** (done): the member transaction filter is the first
+  query that _filters_ on `member_id`, so both tables now carry a
+  `(member_id, transaction_id)` index (`drizzle/0015_lying_dakota_north.sql`).
 - **N+1 in transaction detail / group-list caching** — detail issues a fixed set
   of batched queries (not per-item); caching adds invalidation risk for marginal gain.
 - **Latent IDOR in invite/members** — the DB-layer `WHERE groupId` guard makes
