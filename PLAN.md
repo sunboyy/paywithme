@@ -28,6 +28,9 @@
   each transaction may be recorded in a different currency with a **manual
   exchange rate** entered per transaction (no FX API). Debt math is in the
   settlement currency. (See §7.6.)
+- **Captures:** a few-seconds "this exists, details later" note per group, kept
+  out of the ledger, resolved into a real transaction when there's time. (§7.7,
+  ADR-0012.)
 - Debt summary per group: net balance per member, who owes whom.
 - Settle a debt by recording a new Transfer transaction.
 - **Audit log:** since anyone can create/edit/delete, record which user performed
@@ -740,6 +743,58 @@ is invalid (§7.4). Re-editing a transaction can change the rate; the settlement
 amounts re-resolve. Changing the transaction currency to match the settlement
 currency clears the rate to 1.
 
+### 7.7 Captures — record-later placeholders
+
+The moment an expense happens is the worst moment to record it: you're leaving the
+restaurant and the form wants a category, a split mode, payers and beneficiaries.
+Late entry is already supported — `created_at` is the **editable real-world date**
+(§7.1), so recording Saturday's dinner on Tuesday, dated Saturday, is correct. The
+gap is only **saying "this exists" in a few seconds**, and **being brought back to
+it**.
+
+A **Capture** fills that gap. It is its own entity, **not** a transaction in a
+draft state — see **ADR-0012** for why (in short: `transactions` invariants like
+"payer amounts sum to the total" would have to be relaxed for every row, and every
+consumer of the table would need a new exclusion filter alongside `deleted_at`).
+
+**Shape.** Deliberately shallow: free-text `note` (the only required content),
+optional `amount_minor` + `currency`, and `captured_for` (the real-world date,
+defaulting to today). **No payers, beneficiaries, split mode, FX rate, or items** —
+if you had time to fill those in, you had time to record the transaction. This
+shallowness is a rule, not a starting point: a Capture that can hold splits is a
+second transaction form.
+
+**Never in the ledger.** §8 balance math, `/settle`, `/api/v1`, and the MCP
+transaction tools do not read `captures` — not even as a provisional "±฿1,200
+pending" note on a balance. Nothing that computes a balance can see a Capture.
+
+**Group-visible.** Every member sees the group's open Captures, each attributed to
+its author. The point isn't social pressure — it's **deduplication**: if two people
+paid parts of the same dinner, a visible "Sur — dinner, ~฿1,200, not recorded yet"
+stops the second person entering it twice. `note` is **member-authored text**
+(untrusted to agents, always attributed).
+
+**Resolving.** "Record it" opens `/groups/[id]/transactions/new` prefilled with the
+note as the title, plus the amount and date. On save the Capture is stamped
+`resolved_transaction_id` + `resolved_at` — never deleted, so the trail from
+remembering to recording survives. Creating and resolving each write an
+`audit_log` row in the same DB transaction (§12.1).
+
+**Recall (no push).** Push notifications are out of scope (§1), so: a persistent
+**unrecorded count** on `/groups` and the group overview, plus a **"Not recorded
+yet"** tray above the transaction list. Deferred, needing their own decision: the
+**PWA app badge** (`navigator.setAppBadge` — no push server, but §1's exclusion
+needs an explicit ruling on it) and an **email nudge** (`sendEmail` exists; a
+scheduler does not).
+
+**Naming.** "Capture" is internal vocabulary; no user-facing string says it. The UI
+says **"Not recorded yet"**. See §15 / `CONTEXT.md`.
+
+**Edge cases.** A Capture requires a group — "I forget which group this was" is
+deliberately unsolved (a Capture nobody can see has no deduplication value). A
+Capture may be discarded without resolving (soft, with an audit row). Amount and
+currency stay uninterpreted: no rate, no conversion, no settlement equivalent.
+
 ---
 
 ## 8. Debt Summarization & Settlement
@@ -836,6 +891,14 @@ transaction_charges     (id, transaction_id, kind,           -- service|vat|disc
                   base,                  -- items_subtotal | running_total
                   sort_order)            -- application order (discount-before/after-tax)
 
+-- Record-later placeholders (§7.7) — NOT transactions; never read by §8:
+captures         (id, group_id, created_by, note,       -- free text, required
+                  amount_minor?, currency?,             -- both optional; no rate, no
+                                                        -- conversion, no settlement equiv.
+                  captured_for,                         -- real-world date, defaults today
+                  resolved_transaction_id?, resolved_at?,  -- → transactions.id on record
+                  discarded_at?, created_at)            -- soft-discard; never hard-deleted
+
 -- Append-only audit trail (§12.1):
 audit_log        (id, group_id, actor_user_id,  -- → user.id (who performed it)
                   action,                -- create|edit|delete|restore|add|deactivate|...
@@ -858,6 +921,9 @@ Notes:
 - `transaction_shares` always holds the **resolved, aggregated** per-member owed
   (source of truth for §8); for itemized it's derived from
   `transaction_item_shares` + `transaction_charges` (the editable inputs).
+- `captures` holds **no** payer/beneficiary/split/FX structure by design (§7.7);
+  it is invisible to §8 balance math and to the `/api/v1` + MCP transaction
+  surfaces. `resolved_transaction_id` is the only link into the ledger.
 - "One member per user per group" enforced by
   `unique(members.group_id, members.user_id)` (where `user_id` not null).
 - `audit_log` is **append-only**, written in the same DB transaction as the
@@ -868,6 +934,7 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 `transactions(group_id, occurred_at)`, `transaction_payers(transaction_id)`,
 `transaction_shares(transaction_id)`, `transaction_items(transaction_id)`,
 `transaction_item_shares(item_id)`, `transaction_charges(transaction_id)`,
+`captures(group_id, resolved_at)` — partial index on open rows for the count,
 `audit_log(group_id, occurred_at DESC)`, `audit_log(entity_type, entity_id)`.
 
 ---
@@ -886,7 +953,10 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 /groups/[id]              Group overview: balance summary + recent transactions
 /groups/[id]/members      Manage members; create/copy/revoke invite links (7-day
                           expiry, multiple active); link/claim
-/groups/[id]/transactions Full transaction list (filter by type/category)
+/groups/[id]/transactions Full transaction list (filter by type/category), with the
+                          "Not recorded yet" Capture tray above it (§7.7)
+/groups/[id]/captures/new Quick capture: note + optional amount + date. One screen,
+                          one required field; reachable in one tap from the group
 /groups/[id]/transactions/new   Add spending/transfer (type toggle; split-mode
                           picker incl. itemized with items + service/VAT/discount)
 /groups/[id]/transactions/[txid]  View/edit transaction
@@ -1131,6 +1201,10 @@ init`, which also pulls in `@lucide/svelte`); add base components via the CLI;
   may differ from the settlement currency.
 - **Exchange rate** — manual, per-transaction; settlement-currency units per 1
   unit of the transaction currency (no FX API).
+- **Capture** — a record-later placeholder: "this expense exists, details later".
+  Free text + optional amount, never in the ledger, resolved into a real
+  transaction when there's time (§7.7). Internal vocabulary — the UI says "Not
+  recorded yet".
 - **Audit log** — append-only, immutable record of who performed which mutation
   (create/edit/delete/…) and when; shown per group, newest first (§12.1).
 - **API key** — a bearer secret that authenticates a programmatic caller to the

@@ -17,6 +17,19 @@ via the Settle up flow. Distinct from "Settle up": that is the action, this is t
 resulting transaction's category and title. A Transfer is not necessarily a Debt
 settlement — other transfer categories are Cash, Bank transfer, and Other.
 
+## Capture
+
+A **record-later placeholder**: "this expense exists, I'll fill in the details
+later". Free text plus an optional amount and a date — never payers,
+beneficiaries, a split mode, or a rate. A Capture is **not a transaction in a
+draft state**; it lives outside the ledger and no balance can see it, until it is
+_resolved_ into a real transaction (ADR-0012). Deliberately shallow: if it could
+hold splits it would be a second transaction form.
+
+"Capture" is **internal vocabulary**. Nothing user-facing says it — the UI calls
+the tray and the count **"Not recorded yet"**. The noun exists to avoid colliding
+with "placeholder" (an unlinked member slot) and "pending" (an idempotency row).
+
 ## Connector
 
 paywithme as installed **into an AI assistant** — the agent-facing surface, as
