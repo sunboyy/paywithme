@@ -953,8 +953,10 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 /groups/[id]              Group overview: balance summary + recent transactions
 /groups/[id]/members      Manage members; create/copy/revoke invite links (7-day
                           expiry, multiple active); link/claim
-/groups/[id]/transactions Full transaction list (filter by type/category), with the
-                          "Not recorded yet" Capture tray above it (§7.7)
+/groups/[id]/transactions Full transaction list (filter by type/category/member —
+                          the member filter narrows to who paid, who owes, or
+                          either side), with the "Not recorded yet" Capture tray
+                          above it (§7.7)
 /groups/[id]/captures/new Quick capture: note + optional amount + date. One screen,
                           one required field; reachable in one tap from the group
 /groups/[id]/transactions/new   Add spending/transfer (type toggle; split-mode

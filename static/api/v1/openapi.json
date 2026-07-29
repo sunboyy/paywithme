@@ -302,6 +302,12 @@
 						"$ref": "#/components/parameters/CategoryIdFilter"
 					},
 					{
+						"$ref": "#/components/parameters/MemberIdFilter"
+					},
+					{
+						"$ref": "#/components/parameters/RoleFilter"
+					},
+					{
 						"$ref": "#/components/parameters/FromFilter"
 					},
 					{
@@ -788,6 +794,26 @@
 				"schema": {
 					"type": "string",
 					"minLength": 1
+				}
+			},
+			"MemberIdFilter": {
+				"name": "memberId",
+				"in": "query",
+				"required": false,
+				"description": "Only transactions this member is involved in — as a payer, as a beneficiary, or both. Involvement is participation, not a non-zero amount: a beneficiary whose resolved share is `0` still matches. An id that matches nothing (including a member of another group) returns an empty page, not an error. Member ids come from `GET /groups/{gid}/members`.",
+				"schema": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"RoleFilter": {
+				"name": "role",
+				"in": "query",
+				"required": false,
+				"description": "Narrows `memberId` to one side of the transaction: `paid` (the member paid) or `owes` (the member is a beneficiary). Omit for either side. Ignored when `memberId` is absent.",
+				"schema": {
+					"type": "string",
+					"enum": ["paid", "owes"]
 				}
 			},
 			"FromFilter": {

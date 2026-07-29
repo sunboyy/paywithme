@@ -43,7 +43,21 @@
 // the same-day sort tie-break). `updated_at` = real `now()`, bumped on every edit
 // (NOT the editable date — an edit's wall-clock time, decoupled from `created_at`).
 
-import { and, asc, desc, eq, gte, inArray, isNull, isNotNull, lt, lte, or } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	desc,
+	eq,
+	gte,
+	inArray,
+	isNull,
+	isNotNull,
+	lt,
+	lte,
+	or,
+	sql,
+	type SQL
+} from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from './db';
 import {
@@ -715,6 +729,46 @@ export interface TransactionListFilters {
 	 * with `createdAt <= to` pass.
 	 */
 	to?: Date;
+	/**
+	 * Restrict to transactions this MEMBER is involved in. Involvement is ROW
+	 * PRESENCE, not a non-zero amount: a beneficiary whose resolved share is 0 was
+	 * still named on the receipt, so hiding that row would make the filter lie about
+	 * who was on it. An id that matches nothing — including a real member of ANOTHER
+	 * group — simply yields no rows (never an error, exactly like `categoryId`; it is
+	 * also why this leaks no cross-group member existence).
+	 */
+	memberId?: string;
+	/**
+	 * Narrow {@link memberId} to ONE side of the transaction: `'paid'` (they have a
+	 * `transaction_payers` row) or `'owes'` (they have a `transaction_shares` row).
+	 * `undefined` means EITHER side — the "relates to me" default. Ignored when
+	 * `memberId` is absent (a role alone has no meaning).
+	 */
+	memberRole?: 'paid' | 'owes';
+}
+
+/**
+ * The WHERE fragment for the "relates to this member" filter, or `undefined` when
+ * there is nothing to filter on (no `memberId` — a bare `role` is ignored).
+ *
+ * A correlated `EXISTS` per side, NOT a join: joining `transaction_shares` would
+ * emit one row PER BENEFICIARY, silently multiplying the list, breaking the
+ * caller's `limit`, and corrupting the §16.4 keyset order. A semi-join keeps the
+ * result exactly one row per transaction even when the member both PAID and OWES.
+ *
+ * Exported for direct unit testing (the shape of the generated SQL) — callers
+ * should use {@link listTransactions}.
+ */
+export function memberInvolvementCondition(
+	memberId: string | undefined,
+	role?: 'paid' | 'owes'
+): SQL | undefined {
+	if (!memberId) return undefined;
+	const paid = sql`exists (select 1 from ${transactionPayers} where ${transactionPayers.transactionId} = ${transactions.id} and ${transactionPayers.memberId} = ${memberId})`;
+	const owes = sql`exists (select 1 from ${transactionShares} where ${transactionShares.transactionId} = ${transactions.id} and ${transactionShares.memberId} = ${memberId})`;
+	if (role === 'paid') return paid;
+	if (role === 'owes') return owes;
+	return or(paid, owes);
 }
 
 /** The shape the list page renders per transaction row. */
@@ -763,9 +817,11 @@ export interface TransactionListItem {
 /**
  * List a group's non-soft-deleted transactions, newest first by `created_at` (the
  * §7.1 display/sort date), with category name/icon + the settlement total.
- * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10), an
- * inclusive `from`/`to` date range on `createdAt`, and a §16.4 keyset `after`
- * cursor. Rows are returned in the total order `(createdAt DESC, occurredAt DESC,
+ * Access-checked. Supports filtering by `type` and `categoryId` (PLAN §10), by the
+ * MEMBER involved (`memberId` + optional `memberRole`), by an inclusive `from`/`to`
+ * date range on `createdAt`, and by a §16.4 keyset `after` cursor. The member filter
+ * is a semi-join, so a transaction never appears twice however many payer/share rows
+ * match. Rows are returned in the total order `(createdAt DESC, occurredAt DESC,
  * id DESC)`; `limit` caps them (NO default/max clamp here — that's the API layer's
  * job, #18; this internal function honours whatever cap the caller passes and
  * returns all rows when `limit` is omitted).
@@ -807,6 +863,12 @@ export async function listTransactions({
 	}
 	if (filters.to) {
 		conditions.push(lte(transactions.createdAt, filters.to));
+	}
+	// "Relates to this member" — a semi-join over the payer / share rows (see
+	// `memberInvolvementCondition`; a bare `memberRole` yields nothing).
+	const memberCondition = memberInvolvementCondition(filters.memberId, filters.memberRole);
+	if (memberCondition) {
+		conditions.push(memberCondition);
 	}
 	// §16.4 keyset: decode the opaque cursor (throws TransactionCursorError on a bad
 	// value — never silently ignored) and keep only rows strictly after it.

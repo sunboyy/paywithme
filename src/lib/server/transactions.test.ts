@@ -911,6 +911,32 @@ describe('listTransactions (PLAN §7, §10)', () => {
 		expect(result[0].type).toBe('spending');
 	});
 
+	it('accepts the member filter alongside every other filter (builder wiring)', async () => {
+		// This stub can't introspect the WHERE — the SQL SHAPE of the member predicate
+		// is asserted in `transactions-member-filter.test.ts` (real tables + PgDialect)
+		// and its row semantics in `tests/integration/transaction-member-filter.test.ts`.
+		// What's checked HERE is that the filter composes with the others without
+		// disturbing the query build or the row shaping.
+		for (const memberRole of [undefined, 'paid', 'owes'] as const) {
+			queueSelects(ACCESS_OK, SETTLEMENT_ROW, ROWS);
+			const result = await listTransactions({
+				userId: 'u1',
+				groupId: 'g1',
+				filters: {
+					type: 'spending',
+					categoryId: 'spending-food-drink',
+					memberId: 'm1',
+					memberRole,
+					from: new Date('2026-01-01T00:00:00.000Z'),
+					to: new Date('2026-12-31T23:59:59.999Z')
+				}
+			});
+			// One row per transaction — a member filter must never fan rows out.
+			expect(result).toHaveLength(2);
+			expect(result.map((r) => r.id)).toEqual(['t1', 't2']);
+		}
+	});
+
 	it('surfaces occurredAt (ISO) so the API layer can mint the next-page cursor (§16.4)', async () => {
 		const occurred = new Date('2026-03-01T00:00:05.000Z');
 		const rows = [{ ...ROWS[0], occurredAt: occurred }];

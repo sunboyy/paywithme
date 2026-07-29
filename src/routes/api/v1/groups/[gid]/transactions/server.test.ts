@@ -230,6 +230,55 @@ describe('GET /api/v1/groups/{gid}/transactions', () => {
 		expect(arg.filters.to.toISOString()).toBe('2026-01-31T23:59:59.999Z');
 	});
 
+	// ── The §10 member filter (`memberId` + `role`) ────────────────────────────
+
+	it('forwards memberId with no role (EITHER side — the "relates to me" default)', async () => {
+		listTransactions.mockResolvedValue(items(1));
+		await GET(makeEvent('?memberId=m1'));
+		const arg = listTransactions.mock.calls[0][0];
+		expect(arg.filters.memberId).toBe('m1');
+		expect(arg.filters.memberRole).toBeUndefined();
+	});
+
+	it.each(['paid', 'owes'] as const)('forwards memberId + role=%s', async (role) => {
+		listTransactions.mockResolvedValue(items(1));
+		await GET(makeEvent(`?memberId=m1&role=${role}`));
+		const arg = listTransactions.mock.calls[0][0];
+		expect(arg.filters.memberId).toBe('m1');
+		expect(arg.filters.memberRole).toBe(role);
+	});
+
+	it('IGNORES a role sent without a memberId (a no-op, not a 422)', async () => {
+		listTransactions.mockResolvedValue(items(1));
+		const { status } = await read((await GET(makeEvent('?role=paid'))) as Response);
+		expect(status).toBe(200);
+		const arg = listTransactions.mock.calls[0][0];
+		expect(arg.filters.memberId).toBeUndefined();
+		expect(arg.filters.memberRole).toBeUndefined();
+	});
+
+	it('unrecognized role value → 422 validation_error (like any other enum)', async () => {
+		const { status, body } = await read(
+			(await GET(makeEvent('?memberId=m1&role=bogus'))) as Response
+		);
+		expect(status).toBe(422);
+		expect(body.error.code).toBe('validation_error');
+		expect(listTransactions).not.toHaveBeenCalled();
+	});
+
+	it('composes the member filter with type/categoryId/limit', async () => {
+		listTransactions.mockResolvedValue(items(1));
+		await GET(makeEvent('?type=spending&categoryId=food&memberId=m1&role=owes&limit=2'));
+		const arg = listTransactions.mock.calls[0][0];
+		expect(arg.limit).toBe(3);
+		expect(arg.filters).toMatchObject({
+			type: 'spending',
+			categoryId: 'food',
+			memberId: 'm1',
+			memberRole: 'owes'
+		});
+	});
+
 	it('the forwarded end-of-day `to` genuinely includes a noon-anchored row on that day', () => {
 		// Prove the fix end-to-end against the REAL range predicate: the `createdAt` of
 		// a txn dated exactly on the `to` day (noon UTC, per `dateOnlyToCreatedAt`) must

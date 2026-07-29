@@ -50,7 +50,14 @@ const listTransactionsArgs = z.strictObject({
 	// Inclusive date bounds on the §7.1 real-world date. Coerced from an ISO date
 	// string; an unparseable value is a self-correctable `validation_error`.
 	from: z.coerce.date().optional(),
-	to: z.coerce.date().optional()
+	to: z.coerce.date().optional(),
+	// The §10 member filter. An id that matches nothing yields an EMPTY page rather
+	// than an error (there is no member-existence oracle here, by design), and a
+	// `role` without a `memberId` is a no-op rather than a `validation_error` — an
+	// agent that guesses the pair wrong gets a truthful empty answer, not a turn
+	// spent on a correction.
+	memberId: z.string().min(1).optional(),
+	role: z.enum(['paid', 'owes']).optional()
 });
 
 /**
@@ -77,8 +84,12 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 		title: 'List transactions',
 		description:
 			"Returns ONE PAGE of a group's transactions (max 25), newest first, for FINDING " +
-			'a transaction — filter by date range (`from`/`to`), `type`, or `categoryId`, and ' +
-			'page with `cursor`. DO NOT compute balances, totals, or "who owes what" from this ' +
+			'a transaction — filter by date range (`from`/`to`), `type`, `categoryId`, or the ' +
+			'member involved (`memberId` from `list_members`, optionally narrowed with ' +
+			'`role`), and page with `cursor`. A `memberId` filter does NOT make this page ' +
+			'summable: it is still ONE page of a longer list. DO NOT compute balances, ' +
+			'totals, or "who owes what" from this list — it is paginated (see `hasMore`) ' +
+			'and currency-mixed, and you WILL get the ' +
 			'list — it is paginated (see `hasMore`) and currency-mixed, and you WILL get the ' +
 			'wrong answer. For any owed amount, call `get_balances`, which computes it ' +
 			'server-side. `hasMore: true` means there are more transactions than this page ' +
@@ -103,6 +114,20 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 					description:
 						'Restrict to one category id, exactly as returned on a transaction. Never a name.'
 				},
+				memberId: {
+					type: 'string',
+					description:
+						'Restrict to transactions this member is involved in — as a payer, as a ' +
+						'beneficiary, or both. A member id from `list_members`, never a name. An id ' +
+						'that matches nothing returns an empty page.'
+				},
+				role: {
+					type: 'string',
+					enum: ['paid', 'owes'],
+					description:
+						'Narrows `memberId` to one side: `paid` (they paid) or `owes` (they are a ' +
+						'beneficiary). Omit for either side. Ignored without `memberId`.'
+				},
 				from: {
 					type: 'string',
 					description: 'Inclusive start date (YYYY-MM-DD) on the transaction’s real-world date.'
@@ -123,7 +148,7 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 			openWorldHint: false
 		}
 	},
-	run: async ({ principal }, { groupId, cursor, type, categoryId, from, to }) => {
+	run: async ({ principal }, { groupId, cursor, type, categoryId, from, to, memberId, role }) => {
 		const filters: TransactionListFilters = {};
 		if (type) filters.type = type;
 		if (categoryId) filters.categoryId = categoryId;
@@ -132,6 +157,11 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 		// Inclusive upper bound: roll `to` to end-of-day so a noon-anchored txn on that
 		// day is INCLUDED (§16.4), matching REST. `from` stays start-of-day.
 		if (to) filters.to = endOfUtcDay(to);
+		// `role` only applies alongside a member (see the args schema).
+		if (memberId) {
+			filters.memberId = memberId;
+			filters.memberRole = role;
+		}
 
 		// Over-fetch by ONE (the SAME trick the REST route uses) to detect a next page
 		// without a second count query — that is what makes `hasMore` free (ADR-0008).

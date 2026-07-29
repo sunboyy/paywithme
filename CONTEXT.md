@@ -17,6 +17,15 @@ via the Settle up flow. Distinct from "Settle up": that is the action, this is t
 resulting transaction's category and title. A Transfer is not necessarily a Debt
 settlement — other transfer categories are Cash, Bank transfer, and Other.
 
+## Involved
+
+A member is **involved** in a transaction when they are one of its **payers**, one
+of its **beneficiaries**, or both — the sense of "show only what relates to me".
+Involvement is participation, not a non-zero amount: a beneficiary whose resolved
+share works out to zero was still named on the receipt, and is still involved. The
+two sides can be named separately — **paid** (a payer) and **owes** (a
+beneficiary) — and "either" is their union, never their sum.
+
 ## Capture
 
 A **record-later placeholder**: "this expense exists, I'll fill in the details
