@@ -73,6 +73,9 @@ describe('transactions drizzle table', () => {
 			'groupId',
 			'id',
 			'occurredAt',
+			// Rounding-rotation ordinal (ADR-0013): which beneficiary absorbs a leftover
+			// minor unit. Stored so an edit re-resolves the split byte-identically.
+			'roundingSeq',
 			'splitMode',
 			'title',
 			'type',

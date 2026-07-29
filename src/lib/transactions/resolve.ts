@@ -5,7 +5,9 @@
 // task 4.4), produce each beneficiary's RESOLVED `amount_owed` in
 // transaction-currency MINOR UNITS — the source-of-truth value §8 debt math
 // reads. Every mode's resolved owed amounts sum **exactly** to `amount_total`,
-// using largest-remainder rounding with the ascending-`member_id` tie-break.
+// using largest-remainder rounding with the ascending-`member_id` tie-break
+// ROTATED by the transaction's `rounding_seq` (ADR-0013), so the member who
+// absorbs a leftover minor unit takes turns instead of being fixed for the group.
 //
 // ── Why this lives in `src/lib/transactions/` (NOT `$lib/server`) ─────────────
 // The transaction form's live breakdown UI (task 4.9) resolves shares CLIENT-side
@@ -73,6 +75,18 @@ export interface ResolveSharesInput {
 }
 
 /**
+ * The transaction's rounding-rotation offset (ADR-0013) — its stored
+ * `transactions.rounding_seq`. Threaded into every `distribute` call this module
+ * makes so the beneficiary who absorbs a leftover minor unit ROTATES from one
+ * transaction to the next rather than always being the lowest `member_id`.
+ *
+ * Defaults to 0 everywhere, which is byte-identical to the pre-ADR-0013
+ * behaviour — so a caller that has no transaction context yet (a test, or the
+ * form previewing an unsaved transaction) still gets a deterministic split.
+ */
+export type RoundingRotation = number;
+
+/**
  * Resolve a non-itemized transaction's beneficiary shares to per-member
  * `amount_owed` in transaction-currency MINOR UNITS (PLAN §7.2), dispatching on
  * `split_mode`:
@@ -84,8 +98,10 @@ export interface ResolveSharesInput {
  *                  validated `Σ raw_amount == amount_total` in task 4.4).
  *
  * For EVERY mode the returned `amountOwed` values sum **exactly** to `amountTotal`
- * in minor units, and ties in the largest-remainder rounding go to the lower
- * `member_id` (ascending) — both inherited from `distribute`.
+ * in minor units, and ties in the largest-remainder rounding go to the ascending
+ * `member_id` order ROTATED by `rotation` (ADR-0013) — both inherited from
+ * `distribute`. A non-itemized transaction is ONE split line, so it uses the
+ * transaction's `rounding_seq` directly (line ordinal 0).
  *
  * Order: results are returned in the SAME order as the input `beneficiaries`
  * (input order). `distribute` echoes its `shares` order, and `amount` maps
@@ -95,18 +111,25 @@ export interface ResolveSharesInput {
  *   an `amount` line is missing its `rawAmount` (schema guarantees it is present).
  *   `equal`/`share` weight errors surface from `distribute`.
  */
-export function resolveShares(input: ResolveSharesInput): ResolvedShare[] {
-	return resolveSplitLine(input.splitMode, input.amountTotal, input.beneficiaries);
+export function resolveShares(
+	input: ResolveSharesInput,
+	rotation: RoundingRotation = 0
+): ResolvedShare[] {
+	return resolveSplitLine(input.splitMode, input.amountTotal, input.beneficiaries, rotation);
 }
 
 /**
  * The SHARED per-split-line core (PLAN §7.2): resolve a single `target` total
  * across its `beneficiaries` by `mode` (equal/amount/share), rounding by
- * largest-remainder + ascending-`member_id` so the resolved owed sums **exactly**
+ * largest-remainder + rotated-`member_id` so the resolved owed sums **exactly**
  * to `target`. Used by BOTH the non-itemized {@link resolveShares} (the whole
  * transaction is one line) AND {@link resolveItemizedShares} (one call per item,
  * each item's `amount` its own target) — so the equal/amount/share math is ONE
  * code path at both levels and can never drift.
+ *
+ * `rotation` is the LINE's offset, not the transaction's: itemized callers pass
+ * `rounding_seq + lineOrdinal` so a receipt's items don't all dump their leftover
+ * minor unit on the same member (ADR-0013).
  *
  * @throws if `beneficiaries` is empty, or — defensively — an `amount` line is
  *   missing its `rawAmount`. `equal`/`share` weight errors surface from `distribute`.
@@ -114,7 +137,8 @@ export function resolveShares(input: ResolveSharesInput): ResolvedShare[] {
 function resolveSplitLine(
 	mode: 'equal' | 'amount' | 'share',
 	target: number,
-	beneficiaries: ResolveSharesInput['beneficiaries']
+	beneficiaries: ResolveSharesInput['beneficiaries'],
+	rotation: RoundingRotation
 ): ResolvedShare[] {
 	if (beneficiaries.length === 0) {
 		// The schema requires ≥1 beneficiary per split line (top-level or per item);
@@ -124,19 +148,22 @@ function resolveSplitLine(
 
 	switch (mode) {
 		case 'equal':
-			// Every beneficiary gets weight 1; the remainder is handed out by the
-			// largest-remainder + ascending-memberId rule inside `distribute`.
+			// Every beneficiary gets weight 1, so EVERY remainder ties and `rotation`
+			// alone decides who absorbs the leftover minor unit (ADR-0013).
 			return fromDistribute(
 				target,
-				beneficiaries.map((b) => ({ memberId: b.memberId, weight: 1 }))
+				beneficiaries.map((b) => ({ memberId: b.memberId, weight: 1 })),
+				rotation
 			);
 
 		case 'share':
 			// Entered weights drive the proportional split; `distribute` rounds by
-			// largest remainder and sums exactly to `target`.
+			// largest remainder and sums exactly to `target`. `rotation` only matters
+			// where two weights produce the SAME remainder (e.g. all-equal weights).
 			return fromDistribute(
 				target,
-				beneficiaries.map((b) => ({ memberId: b.memberId, weight: shareWeightOf(b) }))
+				beneficiaries.map((b) => ({ memberId: b.memberId, weight: shareWeightOf(b) })),
+				rotation
 			);
 
 		case 'amount':
@@ -188,9 +215,14 @@ export interface ResolvedItemized {
  * Resolve an ITEMIZED spending (PLAN §7.2.1 / §7.2.3 resolution, items-only for
  * 4.8). For each item: resolve its beneficiaries against the item's own `amount`
  * via the SHARED {@link resolveSplitLine} core (the same equal/amount/share +
- * largest-remainder/ascending-`member_id` rounding the non-itemized path uses),
+ * largest-remainder/rotated-`member_id` rounding the non-itemized path uses),
  * so EACH item's shares sum EXACTLY to its `amount`. Then aggregate per member by
  * summing their owed across every item they appear in.
+ *
+ * Each item rounds at `rotation + itemIndex` (ADR-0013), NOT at a single
+ * transaction-wide offset: a receipt of six equally-split items would otherwise
+ * hand all six leftover minor units to the same member, which is worse than the
+ * behaviour rotation exists to fix. Advancing per line spreads them instead.
  *
  * Because each item sums exactly to its `amount`, the aggregated per-member totals
  * sum exactly to `Σ item.amount = items_subtotal`, which (no charges in 4.8) equals
@@ -203,7 +235,10 @@ export interface ResolvedItemized {
  *   beneficiaries / a missing `amount`-mode `rawAmount` (both schema-guaranteed;
  *   guarded defensively by the per-line core).
  */
-export function resolveItemizedShares(items: readonly ItemInput[]): ResolvedItemized {
+export function resolveItemizedShares(
+	items: readonly ItemInput[],
+	rotation: RoundingRotation = 0
+): ResolvedItemized {
 	if (items.length === 0) {
 		// Schema requires ≥1 item for an itemized split; guard so misuse fails loudly
 		// rather than producing an empty aggregate that can't sum to the subtotal.
@@ -216,8 +251,14 @@ export function resolveItemizedShares(items: readonly ItemInput[]): ResolvedItem
 
 	const resolvedItems: ResolvedItem[] = items.map((item, itemIndex) => {
 		// Resolve THIS item against its OWN amount — rounding happens WITHIN the item,
-		// so the item's shares sum exactly to `item.amount`.
-		const shares = resolveSplitLine(item.splitMode, item.amount, item.beneficiaries);
+		// so the item's shares sum exactly to `item.amount`. The item's index advances
+		// the rotation so consecutive items don't stack their leftovers (ADR-0013).
+		const shares = resolveSplitLine(
+			item.splitMode,
+			item.amount,
+			item.beneficiaries,
+			rotation + itemIndex
+		);
 		for (const share of shares) {
 			aggregate.set(share.memberId, (aggregate.get(share.memberId) ?? 0) + share.amountOwed);
 		}
@@ -303,10 +344,11 @@ export interface ResolvedItemizedWithCharges {
  */
 export function resolveItemizedWithCharges(
 	items: readonly ItemInput[],
-	charges: readonly ChargeInput[] = []
+	charges: readonly ChargeInput[] = [],
+	rotation: RoundingRotation = 0
 ): ResolvedItemizedWithCharges {
 	// 1) Per-item resolution + per-member subtotal shares (the 4.8 behaviour).
-	const itemized = resolveItemizedShares(items);
+	const itemized = resolveItemizedShares(items, rotation);
 	const subtotalShares = itemized.shares;
 	const itemsSubtotal = subtotalShares.reduce((acc, s) => acc + s.amountOwed, 0);
 
@@ -321,11 +363,17 @@ export function resolveItemizedWithCharges(
 	// 3) Allocate each charge's signed total in proportion to subtotal share. Weight
 	//    is the member's subtotal share, so a 0-share member is excluded (weight 0 →
 	//    `distribute` gives it 0). `distribute` handles negative totals (discounts)
-	//    with the same largest-remainder + ascending-`member_id` tie-break.
-	const resolvedCharges: ResolvedCharge[] = perCharge.map(({ charge, signedEffect }) => {
+	//    with the same largest-remainder + rotated-`member_id` tie-break.
+	//
+	//    Charges continue the LINE ORDINAL sequence after the items (ADR-0013): a
+	//    receipt whose members all hold equal subtotal shares makes every charge
+	//    allocation an all-tie distribution too, so a service charge and a discount
+	//    would otherwise both land their leftover satang on the same member.
+	const resolvedCharges: ResolvedCharge[] = perCharge.map(({ charge, signedEffect }, i) => {
 		const allocated = distribute(
 			signedEffect,
-			subtotalShares.map((s) => ({ memberId: s.memberId, weight: s.amountOwed }))
+			subtotalShares.map((s) => ({ memberId: s.memberId, weight: s.amountOwed })),
+			rotation + items.length + i
 		);
 		const allocations: ResolvedShare[] = allocated.map((a) => ({
 			memberId: String(a.memberId),
@@ -356,8 +404,13 @@ export function resolveItemizedWithCharges(
  * units — already converted once from the transaction total via
  * `convertToSettlement`) across the given transaction-currency lines, weighted by
  * each line's txn-currency amount, using `distribute` (largest-remainder +
- * ascending-`member_id` tie-break). The returned settlement amounts sum **exactly**
+ * rotated-`member_id` tie-break). The returned settlement amounts sum **exactly**
  * to `settlementTotal` (PLAN §7.6 step 2/3).
+ *
+ * `rotation` is the transaction's `rounding_seq` (ADR-0013). It bites when every
+ * line carries the SAME txn-currency amount — an equal split of a foreign-currency
+ * spending — where the conversion's leftover minor unit is another all-tie
+ * distribution that would otherwise always land on the lowest `member_id`.
  *
  * This is the convert-THEN-distribute primitive shared by BOTH the owed side
  * (`transaction_share.amount_owed`) and the paid side
@@ -383,11 +436,13 @@ export function resolveItemizedWithCharges(
  */
 export function distributeToSettlement(
 	lines: readonly { readonly memberId: string; readonly amount: number }[],
-	settlementTotal: number
+	settlementTotal: number,
+	rotation: RoundingRotation = 0
 ): ResolvedShare[] {
 	return distribute(
 		settlementTotal,
-		lines.map((l) => ({ memberId: l.memberId, weight: l.amount }))
+		lines.map((l) => ({ memberId: l.memberId, weight: l.amount })),
+		rotation
 	).map((r) => ({ memberId: String(r.memberId), amountOwed: r.amount }));
 }
 
@@ -399,9 +454,10 @@ export function distributeToSettlement(
  */
 function fromDistribute(
 	amountTotal: number,
-	shares: readonly { memberId: string; weight: number }[]
+	shares: readonly { memberId: string; weight: number }[],
+	rotation: RoundingRotation
 ): ResolvedShare[] {
-	return distribute(amountTotal, shares).map((r) => ({
+	return distribute(amountTotal, shares, rotation).map((r) => ({
 		memberId: String(r.memberId),
 		amountOwed: r.amount
 	}));

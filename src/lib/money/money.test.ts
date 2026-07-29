@@ -300,7 +300,7 @@ describe('distribute (largest-remainder, PLAN §7.2)', () => {
 		expect(sum(out)).toBe(900);
 	});
 
-	it('gives leftover minor units to lowest memberId on a tie', () => {
+	it('gives leftover minor units to lowest memberId on a tie (rotation 0)', () => {
 		// 100 / 3 = 33 each, remainder 1; all remainders equal → goes to lowest id.
 		const out = distribute(100, [
 			{ memberId: 3, weight: 1 },
@@ -310,6 +310,102 @@ describe('distribute (largest-remainder, PLAN §7.2)', () => {
 		const byId = Object.fromEntries(out.map((r) => [r.memberId, r.amount]));
 		expect(byId).toEqual({ 1: 34, 2: 33, 3: 33 });
 		expect(sum(out)).toBe(100);
+	});
+
+	// ── Rotated tie-break (ADR-0013) ──────────────────────────────────────────
+	// `member_id` is a UUID in production, so "lowest id" is arbitrary AND fixed:
+	// without rotation the same member absorbs the leftover minor unit on every
+	// unevenly-divisible split for the life of the group.
+
+	it('rotates which tied member takes the leftover unit, one member per step', () => {
+		const shares = [
+			{ memberId: 3, weight: 1 },
+			{ memberId: 1, weight: 1 },
+			{ memberId: 2, weight: 1 }
+		];
+		const takerAt = (rotation: number) =>
+			distribute(100, shares, rotation).find((r) => r.amount === 34)?.memberId;
+
+		expect(takerAt(0)).toBe(1);
+		expect(takerAt(1)).toBe(2);
+		expect(takerAt(2)).toBe(3);
+		// Wraps: rotation n returns to the start, so the cycle is exactly n long.
+		expect(takerAt(3)).toBe(1);
+	});
+
+	it('THE REQUIREMENT: three ฿100 splits three ways charge each member the extra satang once', () => {
+		// ฿100 = 10 000 satang across 3 members = 3 333 each, 1 left over. Across three
+		// consecutive transactions (ordinals 0/1/2) every member pays ฿33.34 exactly once
+		// and ฿33.33 twice, so nobody is systematically out of pocket.
+		const memberIds = ['uuid-c', 'uuid-a', 'uuid-b'];
+		const paid = new Map<string | number, number[]>(memberIds.map((id) => [id, []]));
+
+		for (let roundingSeq = 0; roundingSeq < 3; roundingSeq++) {
+			const out = distributeEqually(10_000, memberIds, roundingSeq);
+			expect(sum(out)).toBe(10_000);
+			for (const r of out) paid.get(r.memberId)!.push(r.amount);
+		}
+
+		for (const amounts of paid.values()) {
+			expect(amounts.filter((a) => a === 3334)).toHaveLength(1);
+			expect(amounts.filter((a) => a === 3333)).toHaveLength(2);
+		}
+	});
+
+	it('rotation never overrides a larger remainder — only genuine ties reorder', () => {
+		// Weights 1:2:3 over 100 → exact 16.67 / 33.33 / 50. Remainders differ, so the
+		// two leftover units are owed to the two largest regardless of rotation: this is
+		// why `share`-mode and FX distributions are unaffected in practice.
+		const shares = [
+			{ memberId: 'a', weight: 1 },
+			{ memberId: 'b', weight: 2 },
+			{ memberId: 'c', weight: 3 }
+		];
+		const at0 = distribute(100, shares, 0);
+		for (let rotation = 1; rotation < 6; rotation++) {
+			expect(distribute(100, shares, rotation)).toEqual(at0);
+		}
+		expect(sum(at0)).toBe(100);
+	});
+
+	it('sums exactly to the total at every rotation, for any weights', () => {
+		const shares = [
+			{ memberId: 'm1', weight: 1 },
+			{ memberId: 'm2', weight: 1 },
+			{ memberId: 'm3', weight: 1 },
+			{ memberId: 'm4', weight: 1 }
+		];
+		for (let rotation = -4; rotation <= 8; rotation++) {
+			for (const total of [1, 7, 99, 100, 1001, -7]) {
+				const out = distribute(total, shares, rotation);
+				expect(sum(out)).toBe(total);
+			}
+		}
+	});
+
+	it('handles a negative total (discount) with the same rotation', () => {
+		const shares = [
+			{ memberId: 'a', weight: 1 },
+			{ memberId: 'b', weight: 1 },
+			{ memberId: 'c', weight: 1 }
+		];
+		// Magnitude split 34/33/33 then negated; rotation 1 moves the extra to 'b'.
+		const out = distribute(-100, shares, 1);
+		expect(Object.fromEntries(out.map((r) => [r.memberId, r.amount]))).toEqual({
+			a: -33,
+			b: -34,
+			c: -33
+		});
+		expect(sum(out)).toBe(-100);
+	});
+
+	it('rejects a non-integer rotation rather than silently flooring it', () => {
+		const shares = [
+			{ memberId: 'a', weight: 1 },
+			{ memberId: 'b', weight: 1 }
+		];
+		expect(() => distribute(10, shares, 1.5)).toThrow(/rotation must be a safe integer/i);
+		expect(() => distribute(10, shares, NaN)).toThrow(/rotation must be a safe integer/i);
 	});
 
 	it('distributes several leftover units across the largest remainders', () => {

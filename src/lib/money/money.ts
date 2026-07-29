@@ -9,7 +9,9 @@
 //                decimal precision, prefixed with a disambiguated symbol.
 //   3. distribute — split an integer total across beneficiaries by weight using
 //                **largest-remainder** rounding, with leftover minor units broken
-//                by ascending `member_id`, so shares sum EXACTLY to the total.
+//                by ascending `member_id` ROTATED by the caller's rotation offset
+//                (ADR-0013), so shares sum EXACTLY to the total AND the member who
+//                absorbs the leftover unit changes from transaction to transaction.
 //
 // All per-currency precision is read from `getCurrency(code).exponent`
 // (`currencies.ts`, the single source of truth) — NEVER hardcoded "×100" / "2 dp".
@@ -353,8 +355,9 @@ export interface DistributeShare {
 	/**
 	 * The member this share belongs to. Used ONLY as the tie-break key: when two
 	 * beneficiaries have an equal largest remainder, the leftover minor unit goes
-	 * to the lower `memberId` (ascending), per PLAN §7.2. Compared as a string for
-	 * stable ordering whether ids are numeric or UUID-like.
+	 * to the lower `memberId` (ascending) — ROTATED by the caller's `rotation`
+	 * offset (PLAN §7.2 / ADR-0013). Compared as a string for stable ordering
+	 * whether ids are numeric or UUID-like.
 	 */
 	readonly memberId: string | number;
 	/**
@@ -382,24 +385,42 @@ export interface DistributeResult {
  * weights, returning integer minor-unit amounts **guaranteed to sum exactly to
  * `total`**. Each member first gets the floor of its exact proportional share;
  * the leftover minor units (always fewer than the number of beneficiaries) are
- * handed out one at a time to the largest fractional remainders. **Tie-break:**
- * equal remainders favour the **lower `memberId`** (ascending), so the result is
- * fully deterministic and reproducible.
+ * handed out one at a time to the largest fractional remainders.
+ *
+ * **Tie-break (ADR-0013):** equal remainders are broken by ascending `memberId`
+ * ROTATED by `rotation`. At `rotation = 0` (the default) this is exactly "lowest
+ * `memberId` wins"; each increment advances the starting point by one member, so
+ * consecutive transactions hand the leftover unit to a different beneficiary in
+ * turn. Callers pass the transaction's stored `rounding_seq` (+ the split line's
+ * ordinal), which is why an equal split of ฿100 three ways gives the extra satang
+ * to a different member on each of three transactions instead of always the same
+ * one. Rotation only ever reorders TIED remainders — a larger remainder still
+ * wins outright, so `share`/FX/charge distributions are unaffected wherever the
+ * proportions genuinely differ.
  *
  * `total` may be negative (a discount allocates a negative effect): the same
  * algorithm runs on the magnitude and the sign is reapplied, so a negative total
- * still sums exactly and uses the identical ascending tie-break.
+ * still sums exactly and uses the identical rotated tie-break.
  *
- * @throws if `shares` is empty, any weight is negative/non-finite, or the total
- *   weight is 0 while `total ≠ 0` (cannot distribute a non-zero amount with no
- *   weight).
+ * @param rotation  tie-break offset; any integer (negative and ≥ n both wrap).
+ *   Defaults to 0 — the pre-ADR-0013 "lowest `memberId`" behaviour.
+ * @throws if `shares` is empty, any weight is negative/non-finite, `rotation` is
+ *   not a safe integer, or the total weight is 0 while `total ≠ 0` (cannot
+ *   distribute a non-zero amount with no weight).
  */
-export function distribute(total: number, shares: readonly DistributeShare[]): DistributeResult[] {
+export function distribute(
+	total: number,
+	shares: readonly DistributeShare[],
+	rotation = 0
+): DistributeResult[] {
 	if (!Number.isSafeInteger(total)) {
 		throw new Error(`Total must be a safe integer minor amount: ${total}`);
 	}
 	if (shares.length === 0) {
 		throw new Error('Cannot distribute across zero beneficiaries');
+	}
+	if (!Number.isSafeInteger(rotation)) {
+		throw new Error(`Rotation must be a safe integer: ${rotation}`);
 	}
 	for (const s of shares) {
 		if (!Number.isFinite(s.weight) || s.weight < 0) {
@@ -432,17 +453,22 @@ export function distribute(total: number, shares: readonly DistributeShare[]): D
 	const distributed = rows.reduce((sum, r) => sum + r.base, 0);
 	let leftover = absTotal - distributed; // number of extra minor units to hand out
 
+	// Each row's ROTATED rank: its position in the ascending-memberId ordering,
+	// shifted back by `rotation` (ADR-0013). At rotation 0 rank order IS memberId
+	// order, so this reduces exactly to the original "lowest memberId wins".
+	const rank = rotatedRanks(rows, rotation);
+
 	// Order the leftover recipients: largest remainder first; ties broken by the
-	// LOWER memberId (ascending), matching PLAN §7.2 exactly. Compare memberIds as
-	// numbers when both look numeric, else lexicographically — deterministic either
-	// way. `index` is a final stable fallback (only reachable for duplicate ids).
+	// lowest ROTATED rank, per PLAN §7.2 + ADR-0013. `index` is a final stable
+	// fallback (unreachable while ranks are unique — kept so the comparator stays
+	// total regardless).
 	const order = [...rows].sort((a, b) => {
 		if (b.remainder !== a.remainder) {
 			return b.remainder - a.remainder;
 		}
-		const cmp = compareMemberIds(a.memberId, b.memberId);
-		if (cmp !== 0) {
-			return cmp;
+		const rankCmp = rank[a.index] - rank[b.index];
+		if (rankCmp !== 0) {
+			return rankCmp;
 		}
 		return a.index - b.index;
 	});
@@ -460,20 +486,57 @@ export function distribute(total: number, shares: readonly DistributeShare[]): D
 }
 
 /**
+ * Rotated tie-break ranks, by row `index` (ADR-0013).
+ *
+ * Rows are ordered ascending by `memberId` (the pre-ADR-0013 tie-break order),
+ * giving each a position 0…n-1; that position is then shifted back by
+ * `rotation mod n`. So rotation 0 leaves the lowest `memberId` at rank 0,
+ * rotation 1 promotes the SECOND-lowest to rank 0, and so on, wrapping. Ranks
+ * are a permutation of 0…n-1 — unique by construction, so they settle the
+ * tie-break on their own.
+ *
+ * Negative rotations wrap the same way (`((r % n) + n) % n`), so a caller need
+ * not normalise before passing one.
+ */
+function rotatedRanks(
+	rows: readonly { readonly index: number; readonly memberId: string | number }[],
+	rotation: number
+): number[] {
+	const n = rows.length;
+	const byMemberId = [...rows].sort((a, b) => {
+		const cmp = compareMemberIds(a.memberId, b.memberId);
+		return cmp !== 0 ? cmp : a.index - b.index;
+	});
+	const shift = ((rotation % n) + n) % n;
+	const rank = new Array<number>(n).fill(0);
+	byMemberId.forEach((row, position) => {
+		rank[row.index] = (position - shift + n) % n;
+	});
+	return rank;
+}
+
+/**
  * Convenience: split `total` minor units **equally** across the given member ids
  * using {@link distribute} (every weight 1). The remainder is distributed by the
- * same largest-remainder + ascending-`memberId` rule, so an amount that doesn't
+ * same largest-remainder + rotated-`memberId` rule, so an amount that doesn't
  * divide evenly is still split deterministically and sums exactly to `total`.
  *
+ * An equal split makes EVERY remainder tie, so `rotation` decides the whole
+ * leftover assignment here — this is the call where ADR-0013's rotation is most
+ * visible.
+ *
  * @example distributeEqually(100, [1, 2, 3]) // → 34/33/33 (extra unit to id 1)
+ * @example distributeEqually(100, [1, 2, 3], 1) // → 33/34/33 (extra unit to id 2)
  */
 export function distributeEqually(
 	total: number,
-	memberIds: readonly (string | number)[]
+	memberIds: readonly (string | number)[],
+	rotation = 0
 ): DistributeResult[] {
 	return distribute(
 		total,
-		memberIds.map((memberId) => ({ memberId, weight: 1 }))
+		memberIds.map((memberId) => ({ memberId, weight: 1 })),
+		rotation
 	);
 }
 

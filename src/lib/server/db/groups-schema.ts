@@ -1,5 +1,5 @@
 import { isNotNull } from 'drizzle-orm';
-import { pgTable, text, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, index, integer, uniqueIndex } from 'drizzle-orm/pg-core';
 import { user } from './auth-schema';
 
 // Domain schema for groups, members, and invites (task 3.1; PLAN §6, §9).
@@ -44,7 +44,14 @@ export const groups = pgTable('groups', {
 		.references(() => user.id),
 	createdAt: timestamp('created_at').defaultNow().notNull(),
 	// Soft-delete (§6.4): nullable; non-null hides the group everywhere.
-	deletedAt: timestamp('deleted_at')
+	deletedAt: timestamp('deleted_at'),
+	// Rounding-rotation counter (ADR-0013). Allocated — not read — by each
+	// transaction write: `UPDATE groups SET next_rounding_seq = next_rounding_seq + 1
+	// ... RETURNING` hands the transaction its `rounding_seq` and takes a row lock,
+	// so concurrent writes in the same group serialise and never share an ordinal.
+	// Monotonic and never reused: a deleted transaction keeps its ordinal and the
+	// rotation simply skips it.
+	nextRoundingSeq: integer('next_rounding_seq').notNull().default(0)
 });
 
 export const members = pgTable(

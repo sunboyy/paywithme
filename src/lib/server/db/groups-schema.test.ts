@@ -23,6 +23,9 @@ describe('groups drizzle table', () => {
 			'deletedAt',
 			'id',
 			'name',
+			// The rounding-rotation allocator's counter (ADR-0013) — storage only; the
+			// `Group` domain type deliberately omits it so it can't reach an API payload.
+			'nextRoundingSeq',
 			'settlementCurrency'
 		]);
 	});

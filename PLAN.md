@@ -444,11 +444,21 @@ re-editing.
 
 **Rounding:** distribute remainders deterministically (largest-remainder) so
 resolved shares sum exactly to the total in minor units. **Tie-break:** equal
-remainders give the leftover minor unit to the **lower `member_id`** (ascending),
-so distribution is fully reproducible and unit-testable. For itemized, round
-**within each item** first, then aggregate (each item's shares sum to its amount,
-items sum to `amount_total`). The same tie-break applies to charge/discount
-allocation (§7.2.3) and FX share distribution (§7.6).
+remainders give the leftover minor unit to the **lower `member_id`** (ascending)
+**rotated by the transaction's `rounding_seq`** — a per-group ordinal allocated
+at insert from `groups.next_rounding_seq` and stored on the transaction row, so
+that consecutive transactions hand the leftover to a different beneficiary in
+turn instead of always charging the same member (**ADR-0013**; `member_id` is a
+UUID, so an unrotated "lowest id" is arbitrary AND fixed for the life of the
+group). Rotation reorders only **tied** remainders — a larger remainder still
+wins outright. Because the ordinal is stored rather than derived, re-editing a
+transaction re-resolves it byte-identically, and distribution stays fully
+reproducible and unit-testable. For itemized, round **within each item** first,
+then aggregate (each item's shares sum to its amount, items sum to
+`amount_total`); each item rounds at `rounding_seq + item_index`, and each charge
+continues that sequence, so one receipt's leftovers spread across members rather
+than stacking on one. The same tie-break applies to charge/discount allocation
+(§7.2.3) and FX share distribution (§7.6).
 
 #### 7.2.1 Itemized splitting
 

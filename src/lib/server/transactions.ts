@@ -225,6 +225,10 @@ export async function createTransaction({
 
 		const transactionId = crypto.randomUUID();
 
+		// Claim this transaction's rounding-rotation ordinal from the group counter
+		// (ADR-0013) — inside the same tx, so a rolled-back create doesn't burn one.
+		const roundingSeq = await allocateRoundingSeq(tx, groupId);
+
 		// RESOLVE + WRITE the transaction row + ALL child rows (payers / shares / items /
 		// item-shares / charges) through the shared helper that `updateTransaction` also
 		// calls, so create and edit re-resolve IDENTICALLY (settlement amounts recomputed
@@ -236,6 +240,7 @@ export async function createTransaction({
 			userId,
 			settlementCurrency: currency,
 			data,
+			roundingSeq,
 			now
 		});
 
@@ -310,11 +315,26 @@ async function resolveAndWriteTransaction(
 		userId: string;
 		settlementCurrency: CurrencyCode;
 		data: TransactionInput;
+		/**
+		 * The rounding-rotation ordinal (ADR-0013): freshly allocated from the group
+		 * counter on `create`, read back off the existing row on `edit`. Every
+		 * `distribute` call below is seeded from it, so an edit reproduces the
+		 * transaction's original leftover-unit assignment instead of drifting.
+		 */
+		roundingSeq: number;
 		/** Injectable clock — the real `now`, used for `updated_at` on edit (tests). */
 		now: () => Date;
 	}
 ): Promise<{ amountTotalSettlement: number }> {
-	const { transactionId, groupId, userId, settlementCurrency: currency, data, now } = args;
+	const {
+		transactionId,
+		groupId,
+		userId,
+		settlementCurrency: currency,
+		data,
+		roundingSeq,
+		now
+	} = args;
 
 	// Canonical settlement total — RECOMPUTED server-side from trusted context (the
 	// validated currency/rate), NEVER trusting the client's `amountTotalSettlement`
@@ -333,14 +353,19 @@ async function resolveAndWriteTransaction(
 	// per-item resolutions AND the charge rows are persisted too. The aggregated
 	// `resolved` shares are the FINAL owed (subtotal ± allocated charges).
 	const isItemized = data.splitMode === 'itemized';
-	const itemized = isItemized ? resolveItemizedWithCharges(data.items, data.charges) : null;
+	const itemized = isItemized
+		? resolveItemizedWithCharges(data.items, data.charges, roundingSeq)
+		: null;
 	const resolved: ResolvedShare[] = isItemized
 		? itemized!.shares
-		: resolveShares({
-				splitMode: data.splitMode as Exclude<TransactionInput['splitMode'], 'itemized'>,
-				amountTotal: data.amountTotal,
-				beneficiaries: data.beneficiaries
-			});
+		: resolveShares(
+				{
+					splitMode: data.splitMode as Exclude<TransactionInput['splitMode'], 'itemized'>,
+					amountTotal: data.amountTotal,
+					beneficiaries: data.beneficiaries
+				},
+				roundingSeq
+			);
 
 	// CONVERT-THEN-DISTRIBUTE into settlement currency (PLAN §7.6). Splitting /
 	// itemization / charges all ran in the TXN currency above (per-member owed,
@@ -353,12 +378,14 @@ async function resolveAndWriteTransaction(
 	// byte-identical no-op (rate 1, settlement total == txn total).
 	const settlementOwed = distributeToSettlement(
 		resolved.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
-		amountTotalSettlement
+		amountTotalSettlement,
+		roundingSeq
 	);
 	const settlementOwedByMember = new Map(settlementOwed.map((s) => [s.memberId, s.amountOwed]));
 	const settlementPaid = distributeToSettlement(
 		data.payers.map((p) => ({ memberId: p.memberId, amount: p.amountPaid })),
-		amountTotalSettlement
+		amountTotalSettlement,
+		roundingSeq
 	);
 	const settlementPaidByMember = new Map(settlementPaid.map((s) => [s.memberId, s.amountOwed]));
 
@@ -382,6 +409,9 @@ async function resolveAndWriteTransaction(
 			// Server-recomputed canonical settlement total (defense in depth, §7.6).
 			amountTotalSettlement,
 			splitMode: data.splitMode,
+			// Persist the ordinal the shares above were resolved under (ADR-0013), so a
+			// later edit re-resolves with the same rotation. Never set on the edit path.
+			roundingSeq,
 			createdBy: userId,
 			createdAt
 			// `occurred_at` / `updated_at` left to the DB defaults (§7.1).
@@ -537,6 +567,38 @@ async function loadSettlementCurrency(
 		throw new GroupAccessError();
 	}
 	return row.settlementCurrency as CurrencyCode;
+}
+
+/**
+ * Allocate this transaction's rounding-rotation ordinal (ADR-0013) from the
+ * group's counter, on the caller's open transaction handle.
+ *
+ * A single `UPDATE … SET next_rounding_seq = next_rounding_seq + 1 … RETURNING`
+ * both increments and reads in one statement: the row lock it takes is held to
+ * the end of the enclosing `db.transaction`, so two concurrent writes to the same
+ * group serialise here and cannot be handed the same ordinal. Read-then-write
+ * would race. The value RETURNED is the post-increment counter, so the ordinal
+ * this transaction owns is one less — the pre-increment value.
+ *
+ * Only CREATE allocates. An edit reuses the ordinal already stored on the row, so
+ * re-resolving an edited transaction reproduces its original rounding exactly.
+ */
+async function allocateRoundingSeq(executor: DbExecutor, groupId: string): Promise<number> {
+	// Import locally to avoid a top-level cycle through groups-schema's re-exports
+	// (same reason as `loadSettlementCurrency` above).
+	const { groups } = await import('./db/groups-schema');
+	const [row] = await executor
+		.update(groups)
+		.set({ nextRoundingSeq: sql`${groups.nextRoundingSeq} + 1` })
+		.where(eq(groups.id, groupId))
+		.returning({ nextRoundingSeq: groups.nextRoundingSeq });
+	if (!row || typeof row.nextRoundingSeq !== 'number') {
+		// The group was asserted to exist moments ago on this same handle, so this is
+		// a contract violation rather than a user-facing condition — fail loudly
+		// instead of silently falling back to 0 and freezing the rotation.
+		throw new Error(`Failed to allocate a rounding ordinal for group ${groupId}`);
+	}
+	return row.nextRoundingSeq - 1;
 }
 
 /** Build a minimal custom Zod issue for the category guard below. */
@@ -1261,21 +1323,30 @@ export async function getTransactionDetail({
 // Edit / soft-delete / restore — task 4.11 (PLAN §7.1, §9, §12.1).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Read a txn's (group, title, soft-delete state) on `exec`, scoped to `groupId`. */
+/**
+ * Read a txn's (title, soft-delete state, rounding ordinal) on `exec`, scoped to
+ * `groupId`. `roundingSeq` is what makes an edit reproduce the transaction's
+ * original rounding (ADR-0013) — the edit path re-resolves with it rather than
+ * allocating a fresh ordinal, so correcting a title never moves anyone's share.
+ */
 async function loadTransactionForMutation(
 	exec: DbExecutor,
 	groupId: string,
 	txnId: string
-): Promise<{ title: string; deletedAt: Date | null }> {
+): Promise<{ title: string; deletedAt: Date | null; roundingSeq: number }> {
 	const [row] = await exec
-		.select({ title: transactions.title, deletedAt: transactions.deletedAt })
+		.select({
+			title: transactions.title,
+			deletedAt: transactions.deletedAt,
+			roundingSeq: transactions.roundingSeq
+		})
 		.from(transactions)
 		.where(and(eq(transactions.id, txnId), eq(transactions.groupId, groupId)))
 		.limit(1);
 	if (!row) {
 		throw new TransactionNotFoundError();
 	}
-	return { title: row.title, deletedAt: row.deletedAt };
+	return { title: row.title, deletedAt: row.deletedAt, roundingSeq: row.roundingSeq };
 }
 
 /**
@@ -1355,6 +1426,8 @@ export async function updateTransaction({
 			userId,
 			settlementCurrency: currency,
 			data,
+			// REUSE the stored ordinal — never allocate a new one on edit (ADR-0013).
+			roundingSeq: existing.roundingSeq,
 			now
 		});
 

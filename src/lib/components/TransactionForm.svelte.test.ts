@@ -53,12 +53,27 @@ function seededFor(overrides: Partial<TransactionInput> = {}) {
 	};
 }
 
-function renderForm(overrides: Partial<TransactionInput> = {}, currencies?: FormCurrency[]) {
+/**
+ * A three-member group. The default fixture has two, which is enough for most of
+ * these tests but cannot produce MORE THAN ONE floating minor unit — an equal
+ * split between two either divides or leaves exactly one over. The rounding-float
+ * caption's plural branch (ADR-0013) needs a third beneficiary to be reachable.
+ */
+const THREE_MEMBERS: FormMember[] = [
+	...members,
+	{ id: 'm-cam', displayName: 'Cam', isLinked: false }
+];
+
+function renderForm(
+	overrides: Partial<TransactionInput> = {},
+	currencies?: FormCurrency[],
+	formMembers: FormMember[] = members
+) {
 	let form!: SuperForm<TransactionInput>;
 	const result = render(TransactionFormHarness, {
 		props: {
 			seeded: seededFor(overrides),
-			members,
+			members: formMembers,
 			categories,
 			currency,
 			currencies,
@@ -187,18 +202,65 @@ describe('TransactionForm split preview', () => {
 		expect(getByText('฿45.00')).toBeTruthy();
 	});
 
-	it('lists PER MEMBER when an equal split leaves a remainder', () => {
-		// ฿0.01 between two cannot be equal: one owes 0.01, the other 0.00. A single
-		// "each" figure would be a lie, so the per-member list is used instead.
-		const { container, queryByText } = renderForm({
+	it('does not NAME who pays the leftover unit — the server has not chosen yet', () => {
+		// ฿100.00 three ways = ฿33.33 each with one satang over. Which member absorbs
+		// that satang is decided by the transaction's `rounding_seq` (ADR-0013), which is
+		// allocated at INSERT — an unsaved form genuinely cannot know it. So the preview
+		// shows the floor everyone is guaranteed to owe, plus a caption for the float.
+		const { container } = renderForm({
+			splitMode: 'equal',
+			amountTotal: 10_000,
+			beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
+		});
+
+		// Two members here → ฿50.00 each exactly, so use the 3-way case for the float.
+		expect(container.textContent).toContain('฿50.00');
+		expect(container.textContent).not.toContain('assigned when you save');
+	});
+
+	it('captions the floating minor unit instead of pinning it on a member', () => {
+		// ฿0.01 between two: one owes ฿0.01 and the other ฿0.00, but WHICH is not known
+		// until save. Both floors are ฿0.00 and the caption carries the odd satang.
+		const { container, getByText } = renderForm({
 			splitMode: 'equal',
 			amountTotal: 1,
 			beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }]
 		});
 
-		expect(queryByText('Each person owes')).toBeTruthy();
-		expect(container.textContent).toContain('Alex');
-		expect(container.textContent).toContain('Bo');
+		expect(getByText('Each person owes')).toBeTruthy();
+		expect(container.textContent).toContain('฿0.00');
+		expect(container.textContent).toContain('Plus ฿0.01 to one member, assigned when you save.');
+	});
+
+	it('pluralises the caption when several minor units float', () => {
+		// ฿0.02 across THREE → everyone floors to ฿0.00 and two satang are still
+		// floating, so the caption has to say how many rather than "one member".
+		const { container } = renderForm(
+			{
+				splitMode: 'equal',
+				amountTotal: 2,
+				beneficiaries: [{ memberId: 'm-alex' }, { memberId: 'm-bo' }, { memberId: 'm-cam' }]
+			},
+			undefined,
+			THREE_MEMBERS
+		);
+
+		expect(container.textContent).toContain('Plus ฿0.01 each to 2 members');
+	});
+
+	it('never overstates a share: previewed amounts are floors', () => {
+		// A share split of ฿0.01 on equal weights is another all-tie distribution. The
+		// preview must not show one member owing ฿0.01 — that member is not chosen yet.
+		const { container } = renderForm({
+			splitMode: 'share',
+			amountTotal: 1,
+			beneficiaries: [
+				{ memberId: 'm-alex', shareWeight: 1 },
+				{ memberId: 'm-bo', shareWeight: 1 }
+			]
+		});
+
+		expect(container.textContent).toContain('assigned when you save');
 	});
 
 	it('previews an AMOUNT split from the entered per-member amounts', () => {

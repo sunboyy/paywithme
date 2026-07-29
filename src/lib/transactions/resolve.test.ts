@@ -129,6 +129,65 @@ describe('resolveShares — equal split', () => {
 		expect(sumOwed(result)).toBe(4);
 	});
 
+	it('rotates the leftover unit by the transaction ordinal (ADR-0013)', () => {
+		// Same input as the tie-break test above, resolved at successive `rounding_seq`
+		// values: the extra unit walks the members in ascending-id order, wrapping.
+		const input: ResolveSharesInput = {
+			splitMode: 'equal',
+			amountTotal: 4,
+			beneficiaries: [{ memberId: 'm3' }, { memberId: 'm1' }, { memberId: 'm2' }]
+		};
+		const taker = (rotation: number) =>
+			resolveShares(input, rotation).find((s) => s.amountOwed === 2)?.memberId;
+
+		expect(taker(0)).toBe('m1');
+		expect(taker(1)).toBe('m2');
+		expect(taker(2)).toBe('m3');
+		expect(taker(3)).toBe('m1');
+	});
+
+	it('THE REQUIREMENT: three ฿100 three-way splits cost each member the extra satang once', () => {
+		// The case that motivated ADR-0013. ฿100 = 10 000 satang / 3 = 3 333 r1, so one
+		// member owes ฿33.34. Over three transactions (ordinals 0/1/2) that member must
+		// be a different one each time — otherwise the lowest UUID pays every rounding
+		// cent the group ever generates.
+		const input: ResolveSharesInput = {
+			splitMode: 'equal',
+			amountTotal: 10_000,
+			beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+		};
+
+		const owedPerMember = new Map<string, number[]>([
+			['m1', []],
+			['m2', []],
+			['m3', []]
+		]);
+		for (let roundingSeq = 0; roundingSeq < 3; roundingSeq++) {
+			const result = resolveShares(input, roundingSeq);
+			expect(sumOwed(result)).toBe(10_000);
+			for (const s of result) owedPerMember.get(s.memberId)!.push(s.amountOwed);
+		}
+
+		// Everyone pays ฿33.34 exactly once and ฿33.33 twice → equal totals overall.
+		for (const owed of owedPerMember.values()) {
+			expect(owed.filter((a) => a === 3334)).toHaveLength(1);
+			expect(owed.filter((a) => a === 3333)).toHaveLength(2);
+			expect(owed.reduce((a, b) => a + b, 0)).toBe(10_000);
+		}
+	});
+
+	it('is stable for a given ordinal, so an edit re-resolves identically', () => {
+		// `updateTransaction` re-resolves from the STORED `rounding_seq`; resolving the
+		// same input twice at the same ordinal must be byte-identical or an unrelated
+		// edit (a title fix) would silently move a member's balance.
+		const input: ResolveSharesInput = {
+			splitMode: 'equal',
+			amountTotal: 10_000,
+			beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+		};
+		expect(resolveShares(input, 7)).toEqual(resolveShares(input, 7));
+	});
+
 	it('handles a single beneficiary (owes the whole total)', () => {
 		const result = resolveShares({
 			splitMode: 'equal',
@@ -136,6 +195,13 @@ describe('resolveShares — equal split', () => {
 			beneficiaries: [{ memberId: 'm1' }]
 		});
 		expect(result).toEqual([{ memberId: 'm1', amountOwed: 7777 }]);
+		// A single beneficiary has nothing to rotate between — every ordinal agrees.
+		expect(
+			resolveShares(
+				{ splitMode: 'equal', amountTotal: 7777, beneficiaries: [{ memberId: 'm1' }] },
+				5
+			)
+		).toEqual([{ memberId: 'm1', amountOwed: 7777 }]);
 	});
 
 	it('resolves a 0-dp currency (JPY) total in minor units', () => {
@@ -310,6 +376,31 @@ describe('resolveShares — sum-equals-amount_total invariant (property sweep)',
 			if (weights.reduce((a, b) => a + b, 0) === 0) weights[0] = 1;
 			const shareBenes = beneficiaries.map((b, k) => ({ ...b, shareWeight: weights[k] }));
 			const share = resolveShares({ splitMode: 'share', amountTotal, beneficiaries: shareBenes });
+			expect(sumOwed(share)).toBe(amountTotal);
+		}
+	});
+
+	it('Σ amountOwed == amountTotal at EVERY rotation, not just rotation 0', () => {
+		// Rotation reorders who takes a leftover unit; it must never change how many
+		// there are. This sweeps ordinals well past the beneficiary count (and negative)
+		// to prove the exact-sum invariant survives the ADR-0013 tie-break.
+		const rand = lcg(1013);
+		for (let i = 0; i < 300; i++) {
+			const n = 1 + Math.floor(rand() * 8);
+			const amountTotal = Math.floor(rand() * 1_000_000);
+			const beneficiaries = Array.from({ length: n }, (_, k) => ({ memberId: `m${k + 1}` }));
+			const rotation = Math.floor(rand() * 40) - 12;
+
+			const equal = resolveShares({ splitMode: 'equal', amountTotal, beneficiaries }, rotation);
+			expect(sumOwed(equal)).toBe(amountTotal);
+
+			const weights: number[] = beneficiaries.map(() => Math.floor(rand() * 5));
+			if (weights.reduce((a, b) => a + b, 0) === 0) weights[0] = 1;
+			const shareBenes = beneficiaries.map((b, k) => ({ ...b, shareWeight: weights[k] }));
+			const share = resolveShares(
+				{ splitMode: 'share', amountTotal, beneficiaries: shareBenes },
+				rotation
+			);
 			expect(sumOwed(share)).toBe(amountTotal);
 		}
 	});
@@ -576,6 +667,24 @@ describe('resolveItemizedShares — per-item rounding + aggregation', () => {
 			}
 			expect(sumOwed(result.shares)).toBe(subtotal);
 		}
+	});
+
+	it('spreads leftover units ACROSS a receipt instead of stacking them on one member', () => {
+		// Six identical items, each ฿1.00 split three ways → 34/33/33 per item, so six
+		// leftover satang in total. Under a transaction-wide offset all six would land on
+		// the same member (+6); the per-item line ordinal (ADR-0013) hands them out in
+		// turn, so each of the three members takes exactly two.
+		const items: ItemInput[] = Array.from({ length: 6 }, (_, i) => ({
+			label: `Item ${i + 1}`,
+			amount: 100,
+			splitMode: 'equal' as const,
+			beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+		}));
+
+		const result = resolveItemizedShares(items);
+		expect(sumOwed(result.shares)).toBe(600);
+		// 6 items × 33 base = 198 floor each, + 2 leftover satang each = 200.
+		expect(byMember(result.shares)).toEqual({ m1: 200, m2: 200, m3: 200 });
 	});
 });
 
@@ -856,11 +965,17 @@ describe('resolveItemizedWithCharges — edge cases (§7.2.3 notes)', () => {
 		expect(sumOwed(result.shares)).toBe(11300);
 	});
 
-	it('proves the ascending-member_id tie-break in a charge allocation (explicit assignment)', () => {
+	it('rotates the tie-break in a charge allocation past the items (explicit assignment)', () => {
 		// Equal subtotal shares (m3/m1/m2 each 1000, listed lowest-id-NOT-first), a 1%
 		// service on 3000 → +30 split equally → 10 each, no remainder. Use a charge whose
 		// total forces a single leftover unit: an absolute 1 on equal weights → exactly
-		// one minor unit, which must go to the LOWEST member id (m1), not by position.
+		// one minor unit, assigned by rotation rather than by position in the input.
+		//
+		// The charge's line ordinal continues AFTER the items (ADR-0013), so at
+		// rotation 0 with one item the charge rounds at offset 1: the leftover unit
+		// skips m1 (which would have taken the item's leftover, had there been one) and
+		// lands on m2. Before ADR-0013 this asserted m1 — the same member that absorbs
+		// every other tie in the group, which is exactly the stacking rotation removes.
 		const { items, charges } = validItemized(
 			[
 				{
@@ -873,11 +988,18 @@ describe('resolveItemizedWithCharges — edge cases (§7.2.3 notes)', () => {
 			[{ kind: 'service', mode: 'absolute', value: 1, base: 'items_subtotal', sortOrder: 0 }]
 		);
 		const result = resolveItemizedWithCharges(items, charges);
-		// +1 absolute over equal subtotal shares → leftover unit to lowest id m1.
-		expect(byMember(result.charges[0].allocations)).toEqual({ m1: 1, m2: 0, m3: 0 });
-		// Subtotal each 1000; only m1 gets the +1.
-		expect(byMember(result.shares)).toEqual({ m1: 1001, m2: 1000, m3: 1000 });
+		// +1 absolute over equal subtotal shares → leftover unit to m2 (offset 1).
+		expect(byMember(result.charges[0].allocations)).toEqual({ m1: 0, m2: 1, m3: 0 });
+		// Subtotal each 1000; only m2 gets the +1.
+		expect(byMember(result.shares)).toEqual({ m1: 1000, m2: 1001, m3: 1000 });
 		expect(sumOwed(result.shares)).toBe(3001);
+
+		// The transaction's own ordinal shifts it again: at rounding_seq 1 the charge
+		// rounds at offset 2 and the unit moves on to m3. Same inputs, different
+		// transaction, different member — the property the ADR exists for.
+		const rotated = resolveItemizedWithCharges(items, charges, 1);
+		expect(byMember(rotated.charges[0].allocations)).toEqual({ m1: 0, m2: 0, m3: 1 });
+		expect(sumOwed(rotated.shares)).toBe(3001);
 	});
 
 	it('resolves a JPY (0-dp) itemized + charges bill, summing exactly to amount_total', () => {

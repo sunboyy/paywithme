@@ -143,7 +143,14 @@ export function assertSettlementCurrencyEditable(hasTransactions: boolean): void
 }
 
 /** A group row as returned by the service. */
-export type Group = typeof groups.$inferSelect;
+/**
+ * A group as the app and the API see it. Deliberately OMITS
+ * `next_rounding_seq` — that column is the rounding-rotation allocator's internal
+ * counter (ADR-0013), not group data. Nothing outside the transaction-write path
+ * has any business reading it, and it must never reach an API payload, so it is
+ * excluded here rather than being selected and then remembered to be stripped.
+ */
+export type Group = Omit<typeof groups.$inferSelect, 'nextRoundingSeq'>;
 
 /**
  * Create a group AND its creator's member slot in a single transaction.

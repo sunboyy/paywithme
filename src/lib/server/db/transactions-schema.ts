@@ -123,6 +123,13 @@ export const transactions = pgTable(
 		amountTotalSettlement: bigint('amount_total_settlement', { mode: 'number' }).notNull(),
 		// Constrained value set: 'equal' | 'amount' | 'share' | 'itemized' (text).
 		splitMode: text('split_mode').notNull(),
+		// Rounding-rotation ordinal (ADR-0013), allocated from `groups.next_rounding_seq`
+		// at INSERT and never changed afterwards. It decides which beneficiary absorbs a
+		// leftover minor unit when remainders tie, so consecutive transactions in a group
+		// rotate that member instead of always charging the lowest `member_id`.
+		// STORED rather than derived precisely so an edit re-resolves byte-identically:
+		// `updateTransaction` reads this value back and passes it to the same resolver.
+		roundingSeq: integer('rounding_seq').notNull().default(0),
 		// Author → user.id. NOT NULL + default restrict (durable authorship).
 		createdBy: text('created_by')
 			.notNull()

@@ -770,20 +770,99 @@
 	// Best-effort by design: null whenever the form isn't in a resolvable state yet
 	// (nothing typed, no beneficiaries, an `amount` split that doesn't add up), so a
 	// half-filled form shows no preview rather than a wrong one.
-	const previewShares = $derived.by(() => {
-		if ($formData.splitMode === 'itemized') return itemizedBreakdown?.shares ?? null;
+	//
+	// ROTATION (ADR-0013): the leftover minor unit of a split that doesn't divide
+	// cleanly goes to a beneficiary chosen by the transaction's `rounding_seq` — a
+	// per-group ordinal the server allocates at INSERT. An unsaved form has no
+	// ordinal, so the preview genuinely cannot know who absorbs it, and naming
+	// someone would be a guess rendered as a fact. `resolveAt` therefore resolves at
+	// an EXPLICIT rotation, and the preview below sweeps every rotation to find what
+	// is actually knowable now: each member's floor, plus how many units float.
+	function resolveAt(rotation: number) {
+		if ($formData.splitMode === 'itemized') {
+			if ($formData.items.length === 0) return null;
+			try {
+				return resolveItemizedWithCharges($formData.items, $formData.charges, rotation).shares;
+			} catch {
+				return null;
+			}
+		}
 
 		const total = toMinor(totalInput) ?? 0;
 		if (total <= 0 || $formData.beneficiaries.length === 0) return null;
 		try {
-			return resolveShares({
-				splitMode: $formData.splitMode,
-				amountTotal: total,
-				beneficiaries: $formData.beneficiaries
-			});
+			return resolveShares(
+				{
+					splitMode: $formData.splitMode,
+					amountTotal: total,
+					beneficiaries: $formData.beneficiaries
+				},
+				rotation
+			);
 		} catch {
 			return null;
 		}
+	}
+
+	const previewShares = $derived.by(() => resolveAt(0));
+
+	/**
+	 * What the preview can honestly show: every member's GUARANTEED owed (their
+	 * floor) and the number of minor units still floating between them.
+	 *
+	 * Rotation only ever moves a leftover unit from one member to another — never
+	 * changes how many there are — so sweeping rotations 0…n-1 and taking each
+	 * member's minimum yields the amount they owe under every possible ordinal. The
+	 * difference between the true total and the sum of those floors is the float.
+	 * `leftoverUnits === 0` means the split divides cleanly and the per-member
+	 * figures are exact, which is the common case and renders exactly as before.
+	 *
+	 * n rotations × a handful of members per keystroke is negligible, and it keeps
+	 * this honest for itemized and share splits too — not just the equal split that
+	 * motivated the ADR — because any all-tied distribution rotates.
+	 */
+	const previewFloors = $derived.by(() => {
+		const base = previewShares;
+		if (!base || base.length === 0) return null;
+
+		// A plain record, not a Map: this is a derived computation, and `svelte/
+		// prefer-svelte-reactivity` (rightly) rejects a mutable Map in component scope.
+		const floors: Record<string, number> = {};
+		for (const s of base) floors[s.memberId] = s.amountOwed;
+		for (let rotation = 1; rotation < base.length; rotation++) {
+			const shares = resolveAt(rotation);
+			if (!shares) return null;
+			for (const share of shares) {
+				const current = floors[share.memberId];
+				if (current === undefined || share.amountOwed < current) {
+					floors[share.memberId] = share.amountOwed;
+				}
+			}
+		}
+
+		const exactTotal = base.reduce((sum, s) => sum + s.amountOwed, 0);
+		const flooredTotal = Object.values(floors).reduce((sum, v) => sum + v, 0);
+		return {
+			shares: base.map((s) => ({ memberId: s.memberId, amountOwed: floors[s.memberId] ?? 0 })),
+			leftoverUnits: exactTotal - flooredTotal
+		};
+	});
+
+	/** The per-member figures the preview renders: floors, so nothing is overstated. */
+	const previewFloorShares = $derived(previewFloors?.shares ?? null);
+
+	/**
+	 * The "+฿0.01 to N members on save" caption, or null when the split divides
+	 * cleanly. Phrased in whole minor units of the ENTRY currency, since that is
+	 * what the amounts above it are denominated in.
+	 */
+	const leftoverNote = $derived.by(() => {
+		const units = previewFloors?.leftoverUnits ?? 0;
+		if (units <= 0) return null;
+		const one = entryDisplay(1);
+		return units === 1
+			? `Plus ${one} to one member, assigned when you save.`
+			: `Plus ${one} each to ${units} members, assigned when you save.`;
 	});
 
 	/**
@@ -793,28 +872,43 @@
 	 * so those fall through to the per-member list instead.
 	 */
 	const equalEach = $derived.by(() => {
-		if ($formData.splitMode !== 'equal' || !previewShares || previewShares.length === 0) {
+		if ($formData.splitMode !== 'equal' || !previewFloorShares || previewFloorShares.length === 0) {
 			return null;
 		}
-		const first = previewShares[0].amountOwed;
-		return previewShares.every((s) => s.amountOwed === first) ? first : null;
+		const first = previewFloorShares[0].amountOwed;
+		return previewFloorShares.every((s) => s.amountOwed === first) ? first : null;
 	});
 
 	// Per-member SETTLEMENT-converted owed for the itemized breakdown (§7.6): convert
 	// the txn total once, then distribute across members by their txn-currency owed —
 	// the SAME convert-then-distribute the service persists. Null when not foreign or
 	// the breakdown/rate isn't ready.
+	//
+	// The settlement distribution rotates too (ADR-0013) — an equal split of a foreign
+	// spending is an all-tie distribution on BOTH sides — so this takes the same
+	// per-member floor across rotations as the entry-currency figures. Reporting an
+	// exact settlement amount under a floored entry amount would contradict itself.
 	const settlementShares = $derived.by(() => {
 		if (!isForeign || !previewShares || previewShares.length === 0) return null;
 		const stl = $formData.amountTotalSettlement;
 		if (stl <= 0) return null;
 		try {
-			return new Map(
-				distributeToSettlement(
-					previewShares.map((s) => ({ memberId: s.memberId, amount: s.amountOwed })),
-					stl
-				).map((s) => [s.memberId, s.amountOwed])
-			);
+			const floors: Record<string, number> = {};
+			for (let rotation = 0; rotation < previewShares.length; rotation++) {
+				const shares = resolveAt(rotation);
+				if (!shares) return null;
+				for (const s of distributeToSettlement(
+					shares.map((share) => ({ memberId: share.memberId, amount: share.amountOwed })),
+					stl,
+					rotation
+				)) {
+					const current = floors[s.memberId];
+					if (current === undefined || s.amountOwed < current) {
+						floors[s.memberId] = s.amountOwed;
+					}
+				}
+			}
+			return floors;
 		} catch {
 			return null;
 		}
@@ -1506,36 +1600,50 @@
 	     modes almost everyone uses — equal, amount, share — committed blind: you
 	     could not see that ¥6,800 four ways is ¥1,700 each until after saving. It now
 	     renders for every mode. A cleanly-dividing equal split collapses to one line;
-	     everything else lists per member. -->
-	{#if previewShares && previewShares.length > 0}
+	     everything else lists per member.
+
+	     Amounts are each member's FLOOR across every possible rounding rotation
+	     (ADR-0013). When a split doesn't divide cleanly the leftover minor unit is
+	     assigned by an ordinal the server allocates at save time, so `leftoverNote`
+	     states that a unit is still floating rather than pinning it on a member the
+	     server has not chosen yet. -->
+	{#if previewFloorShares && previewFloorShares.length > 0}
 		{#if equalEach !== null}
-			<div class="bg-muted/40 flex items-center justify-between rounded-md border p-3 text-sm">
-				<span class="text-muted-foreground">Each person owes</span>
-				<span class="text-right">
-					<span class="block font-medium tabular-nums">{entryDisplay(equalEach)}</span>
-					{#if isForeign && settlementShares}
-						<span class="text-muted-foreground block text-xs tabular-nums">
-							{settlementDisplay(settlementShares.get(previewShares[0].memberId) ?? 0)}
-						</span>
-					{/if}
-				</span>
+			<div class="bg-muted/40 space-y-1 rounded-md border p-3 text-sm">
+				<div class="flex items-center justify-between">
+					<span class="text-muted-foreground">Each person owes</span>
+					<span class="text-right">
+						<span class="block font-medium tabular-nums">{entryDisplay(equalEach)}</span>
+						{#if isForeign && settlementShares}
+							<span class="text-muted-foreground block text-xs tabular-nums">
+								{settlementDisplay(settlementShares[previewFloorShares[0].memberId] ?? 0)}
+							</span>
+						{/if}
+					</span>
+				</div>
+				{#if leftoverNote}
+					<p class="text-muted-foreground text-xs">{leftoverNote}</p>
+				{/if}
 			</div>
 		{:else}
 			<div class="bg-muted/40 space-y-1 rounded-md border p-3 text-sm">
 				<p class="font-medium">Each person owes</p>
-				{#each previewShares as share (share.memberId)}
+				{#each previewFloorShares as share (share.memberId)}
 					<div class="flex items-center justify-between">
 						<span>{memberName(share.memberId)}</span>
 						<span class="text-right">
 							<span class="block tabular-nums">{entryDisplay(share.amountOwed)}</span>
 							{#if isForeign && settlementShares}
 								<span class="text-muted-foreground block text-xs tabular-nums">
-									{settlementDisplay(settlementShares.get(share.memberId) ?? 0)}
+									{settlementDisplay(settlementShares[share.memberId] ?? 0)}
 								</span>
 							{/if}
 						</span>
 					</div>
 				{/each}
+				{#if leftoverNote}
+					<p class="text-muted-foreground text-xs">{leftoverNote}</p>
+				{/if}
 			</div>
 		{/if}
 	{/if}

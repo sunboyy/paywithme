@@ -16,96 +16,120 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //   - `listTransactions` filters by type/category and shapes rows newest-first.
 
 // --- Fluent DB mock -------------------------------------------------------
-const { selectQueue, inserts, updates, deletes, updateReturningQueue, makeDb, lastTxHandle } =
-	vi.hoisted(() => {
-		const selectQueue: unknown[][] = [];
-		// Records: which table + values for every insert, plus the tx handle used.
-		const inserts: { table: string; values: Record<string, unknown>; via: object }[] = [];
-		// Records: which table + the .set() values for every update, plus the tx handle.
-		const updates: { table: string; values: Record<string, unknown>; via: object }[] = [];
-		// Records: which table was deleted from, plus the tx handle.
-		const deletes: { table: string; via: object }[] = [];
-		// Row-sets the NEXT update `.returning()` resolves to (rows-affected count). Empty
-		// → default to ONE affected row so a real state transition writes its audit; push
-		// `[]` to simulate a NO-OP update (0 rows affected → audit gated off, §16.6).
-		const updateReturningQueue: unknown[][] = [];
-		const lastTxHandle: { current: object | null } = { current: null };
+const {
+	selectQueue,
+	inserts,
+	updates,
+	deletes,
+	updateReturningQueue,
+	groupRoundingSeq,
+	makeDb,
+	lastTxHandle
+} = vi.hoisted(() => {
+	const selectQueue: unknown[][] = [];
+	// Records: which table + values for every insert, plus the tx handle used.
+	const inserts: { table: string; values: Record<string, unknown>; via: object }[] = [];
+	// Records: which table + the .set() values for every update, plus the tx handle.
+	const updates: { table: string; values: Record<string, unknown>; via: object }[] = [];
+	// Records: which table was deleted from, plus the tx handle.
+	const deletes: { table: string; via: object }[] = [];
+	// Row-sets the NEXT update `.returning()` resolves to (rows-affected count). Empty
+	// → default to ONE affected row so a real state transition writes its audit; push
+	// `[]` to simulate a NO-OP update (0 rows affected → audit gated off, §16.6).
+	const updateReturningQueue: unknown[][] = [];
+	const lastTxHandle: { current: object | null } = { current: null };
+	// Stands in for `groups.next_rounding_seq` (ADR-0013). The service allocates a
+	// transaction's rounding ordinal by incrementing this and reading it back, so
+	// the mock has to behave like a counter, not like a rows-affected result.
+	const groupRoundingSeq = { current: 0 };
 
-		function nextSelectRows(): unknown[] {
-			return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
-		}
+	function nextSelectRows(): unknown[] {
+		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
+	}
 
-		function selectChain() {
-			const rows = nextSelectRows();
-			const chain: Record<string, unknown> = {};
-			const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
-			for (const m of methods) chain[m] = () => chain;
-			chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
-			return chain;
-		}
+	function selectChain() {
+		const rows = nextSelectRows();
+		const chain: Record<string, unknown> = {};
+		const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
+		for (const m of methods) chain[m] = () => chain;
+		chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
+		return chain;
+	}
 
-		function tableName(table: unknown): string {
-			// Drizzle tables carry their SQL name on a Symbol; fall back to a tag we set
-			// in the mock. We instead tag inserts by identity in the executor below.
-			return (table as { __name?: string }).__name ?? 'unknown';
-		}
+	function tableName(table: unknown): string {
+		// Drizzle tables carry their SQL name on a Symbol; fall back to a tag we set
+		// in the mock. We instead tag inserts by identity in the executor below.
+		return (table as { __name?: string }).__name ?? 'unknown';
+	}
 
-		function makeExecutor(via: object) {
-			return {
-				select: () => selectChain(),
-				insert: (table: unknown) => ({
-					values(values: Record<string, unknown>) {
-						inserts.push({ table: tableName(table), values, via });
-						return Promise.resolve(undefined);
-					}
-				}),
-				update: (table: unknown) => {
-					const chain: Record<string, unknown> = {};
-					chain.set = (values: Record<string, unknown>) => {
-						updates.push({ table: tableName(table), values, via });
-						return chain;
-					};
-					chain.where = () => chain;
-					// `.returning()` resolves to the rows-affected set (softDelete/restore read
-					// its length to gate the audit write, §16.6). Default: ONE affected row.
-					chain.returning = () =>
-						Promise.resolve(
-							updateReturningQueue.length > 0
-								? (updateReturningQueue.shift() as unknown[])
-								: [{ id: 'affected' }]
-						);
-					chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
-					return chain;
-				},
-				delete: (table: unknown) => ({
-					where: () => {
-						deletes.push({ table: tableName(table), via });
-						return Promise.resolve(undefined);
-					}
-				})
-			};
-		}
-
-		const baseExecutor = makeExecutor({ name: 'db' });
-		const db = {
-			...baseExecutor,
-			transaction: (cb: (tx: object) => Promise<unknown>) => {
-				const tx = makeExecutor({ name: 'tx' });
-				lastTxHandle.current = tx;
-				return cb(tx);
-			}
-		};
-
+	function makeExecutor(via: object) {
 		return {
-			selectQueue,
-			inserts,
-			updates,
-			deletes,
-			updateReturningQueue,
-			makeDb: () => db,
-			lastTxHandle
+			select: () => selectChain(),
+			insert: (table: unknown) => ({
+				values(values: Record<string, unknown>) {
+					inserts.push({ table: tableName(table), values, via });
+					return Promise.resolve(undefined);
+				}
+			}),
+			update: (table: unknown) => {
+				const chain: Record<string, unknown> = {};
+				chain.set = (values: Record<string, unknown>) => {
+					updates.push({ table: tableName(table), values, via });
+					return chain;
+				};
+				chain.where = () => chain;
+				// `.returning()` resolves to the rows-affected set (softDelete/restore read
+				// its length to gate the audit write, §16.6). Default: ONE affected row.
+				//
+				// EXCEPT on `groups`, where the only update the service makes is the
+				// rounding-ordinal allocation (ADR-0013) — an atomic increment that reads
+				// its POST-increment value back. Standing in a real counter here (rather
+				// than a generic "one row affected") is what lets every create test keep
+				// working untouched, and lets the rotation tests below observe successive
+				// creates receiving successive ordinals.
+				chain.returning = () => {
+					if (updateReturningQueue.length > 0) {
+						return Promise.resolve(updateReturningQueue.shift() as unknown[]);
+					}
+					if (tableName(table) === 'groups') {
+						groupRoundingSeq.current += 1;
+						return Promise.resolve([{ nextRoundingSeq: groupRoundingSeq.current }]);
+					}
+					return Promise.resolve([{ id: 'affected' }]);
+				};
+				chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
+				return chain;
+			},
+			delete: (table: unknown) => ({
+				where: () => {
+					deletes.push({ table: tableName(table), via });
+					return Promise.resolve(undefined);
+				}
+			})
 		};
-	});
+	}
+
+	const baseExecutor = makeExecutor({ name: 'db' });
+	const db = {
+		...baseExecutor,
+		transaction: (cb: (tx: object) => Promise<unknown>) => {
+			const tx = makeExecutor({ name: 'tx' });
+			lastTxHandle.current = tx;
+			return cb(tx);
+		}
+	};
+
+	return {
+		selectQueue,
+		inserts,
+		updates,
+		deletes,
+		updateReturningQueue,
+		groupRoundingSeq,
+		makeDb: () => db,
+		lastTxHandle
+	};
+});
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
 
@@ -200,6 +224,7 @@ beforeEach(() => {
 	updateReturningQueue.length = 0;
 	selectQueue.length = 0;
 	lastTxHandle.current = null;
+	groupRoundingSeq.current = 0;
 });
 
 function updatesTo(table: string) {
@@ -277,6 +302,77 @@ describe('createTransaction (PLAN §7.1, §7.2, §12.1)', () => {
 			{ memberId: 'm1', amountOwed: 4500 },
 			{ memberId: 'm2', amountOwed: 4500 }
 		]);
+	});
+
+	// ── Rounding rotation (ADR-0013) ─────────────────────────────────────────
+	// The ordinal that decides who absorbs a leftover minor unit is allocated from
+	// `groups.next_rounding_seq` at INSERT and persisted on the transaction row.
+
+	it('allocates the rounding ordinal from the group counter and persists it', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+
+		// The allocation is an atomic increment on `groups` — a read-then-write would
+		// let two concurrent creates in one group share an ordinal.
+		const groupUpdates = updatesTo('groups');
+		expect(groupUpdates).toHaveLength(1);
+		expect(groupUpdates[0].values).toHaveProperty('nextRoundingSeq');
+		// It runs on the SAME open transaction, so a rolled-back create burns nothing.
+		expect((groupUpdates[0].via as { name: string }).name).toBe('tx');
+
+		// First transaction in the group takes ordinal 0 (the PRE-increment value).
+		expect(insertsTo('transactions')[0].values.roundingSeq).toBe(0);
+	});
+
+	it('gives successive transactions successive ordinals', async () => {
+		for (let i = 0; i < 3; i++) {
+			queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+			await createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: equalInput(),
+				settlementCurrency: 'THB'
+			});
+		}
+		expect(insertsTo('transactions').map((i) => i.values.roundingSeq)).toEqual([0, 1, 2]);
+	});
+
+	it('THE REQUIREMENT: three ฿100 three-way splits rotate who pays the extra satang', async () => {
+		// Three identical transactions written back to back into one group. Each takes
+		// the next ordinal, so the member owing ฿33.34 differs every time — the whole
+		// point of ADR-0013. Before it, m1 paid the extra satang on all three.
+		const threeWay = {
+			...equalInput(),
+			amountTotal: 10_000,
+			amountTotalSettlement: 10_000,
+			payers: [{ memberId: 'm1', amountPaid: 10_000 }],
+			beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+		};
+		const threeMembers = [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }];
+
+		const extraSatangTakers: unknown[] = [];
+		for (let i = 0; i < 3; i++) {
+			inserts.length = 0;
+			queueSelects(ACCESS_OK, threeMembers, CATEGORY_ROW);
+			await createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: threeWay,
+				settlementCurrency: 'THB'
+			});
+
+			const shares = insertsTo('transaction_shares');
+			expect(shares.map((s) => s.values.amountOwed).sort()).toEqual([3333, 3333, 3334]);
+			extraSatangTakers.push(shares.find((s) => s.values.amountOwed === 3334)!.values.memberId);
+		}
+
+		// A different member each time — and over the three, everyone pays it once.
+		expect(extraSatangTakers).toEqual(['m1', 'm2', 'm3']);
 	});
 
 	it('re-resolves a SHARE split (weights 1:2 of 9000 → 3000 / 6000)', async () => {
@@ -1396,15 +1492,65 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 	// SELECT order inside the tx (settlementCurrency PASSED, so loadSettlementCurrency
 	// is skipped): access → load txn (title,deletedAt) → activeMembers → category
 	// existence → deleteTransactionChildren item-id lookup.
-	function queueEditSelects(opts: { deletedAt?: Date | null; itemIds?: { id: string }[] } = {}) {
+	function queueEditSelects(
+		opts: { deletedAt?: Date | null; itemIds?: { id: string }[]; roundingSeq?: number } = {}
+	) {
 		queueSelects(
 			ACCESS_OK,
-			[{ title: 'Dinner', deletedAt: opts.deletedAt ?? null }],
+			// The loaded row carries `rounding_seq` (ADR-0013) — the edit re-resolves
+			// with the STORED ordinal rather than allocating a fresh one.
+			[{ title: 'Dinner', deletedAt: opts.deletedAt ?? null, roundingSeq: opts.roundingSeq ?? 0 }],
 			ACTIVE_MEMBERS,
 			CATEGORY_ROW,
 			opts.itemIds ?? [] // existing item ids to delete (none for a non-itemized txn)
 		);
 	}
+
+	it('reuses the STORED rounding ordinal and never allocates a new one', async () => {
+		// An edit must not touch `groups.next_rounding_seq`: allocating a fresh ordinal
+		// would re-roll the tie-break, so correcting a title could silently move a
+		// member's share by a minor unit (ADR-0013).
+		queueEditSelects({ roundingSeq: 4 });
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: { ...equalInput(), title: 'Lunch' },
+			settlementCurrency: 'THB'
+		});
+
+		expect(updatesTo('groups')).toHaveLength(0);
+		// Nor is the ordinal rewritten on the transaction row — it is insert-only.
+		expect('roundingSeq' in updatesTo('transactions')[0].values).toBe(false);
+	});
+
+	it('re-resolves an uneven split at the stored ordinal, not at 0', async () => {
+		// ฿100 three ways at stored ordinal 1 → the extra satang sits on m2, exactly as
+		// it did when the transaction was created. Re-resolving at 0 would move it to m1.
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Dinner', deletedAt: null, roundingSeq: 1 }],
+			[{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }],
+			CATEGORY_ROW,
+			[]
+		);
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: {
+				...equalInput(),
+				amountTotal: 10_000,
+				amountTotalSettlement: 10_000,
+				payers: [{ memberId: 'm1', amountPaid: 10_000 }],
+				beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+			},
+			settlementCurrency: 'THB'
+		});
+
+		const shares = insertsTo('transaction_shares');
+		expect(shares.find((s) => s.values.amountOwed === 3334)!.values.memberId).toBe('m2');
+	});
 
 	it('updates the txn row (occurred_at untouched, updated_at bumped, created_at from input)', async () => {
 		queueEditSelects();
@@ -1588,7 +1734,7 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => {
 	it('soft-delete sets deleted_at + writes a `delete` audit through the SAME tx', async () => {
 		// access → load txn (title,deletedAt).
-		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }]);
 		const when = new Date('2026-06-01T00:00:00.000Z');
 		await softDeleteTransaction({
 			userId: 'u1',
@@ -1632,7 +1778,7 @@ describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => 
 	});
 
 	it('no-op restore (already-live → 0 rows affected) → NO audit row (§16.6)', async () => {
-		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }]);
 		updateReturningQueue.push([]); // 0 rows affected
 		await restoreTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
 		expect(updatesTo('transactions')).toHaveLength(1);
@@ -1664,7 +1810,7 @@ describe('softDeleteTransaction / restoreTransaction (PLAN §9, §12.1)', () => 
 	it('the audit trail is written independent of the soft-delete (append-only, outlives it)', async () => {
 		// A soft-delete followed by a restore both append their own audit rows — neither
 		// removes prior history (§12.1: append-only, outlives the soft-delete).
-		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }]);
 		await softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1' });
 		expect(insertsTo('audit_log')).toHaveLength(1);
 		inserts.length = 0;
@@ -1716,7 +1862,7 @@ describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
 	it('edit: metadata carries the provenance next to before/after, summary gets the suffix', async () => {
 		queueSelects(
 			ACCESS_OK,
-			[{ title: 'Dinner', deletedAt: null }],
+			[{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }],
 			ACTIVE_MEMBERS,
 			CATEGORY_ROW,
 			[]
@@ -1742,7 +1888,7 @@ describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
 	});
 
 	it('delete + restore: both audit rows carry the provenance', async () => {
-		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }]);
 		await softDeleteTransaction({ userId: 'u1', groupId: 'g1', txnId: 't1', via: VIA });
 		let audit = auditRow();
 		expect(audit.action).toBe('delete');
@@ -1764,7 +1910,7 @@ describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
 	});
 
 	it('an UNNAMED key still yields a well-formed suffix; metadata keeps the truthful null', async () => {
-		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null }]);
+		queueSelects(ACCESS_OK, [{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }]);
 		await softDeleteTransaction({
 			userId: 'u1',
 			groupId: 'g1',
