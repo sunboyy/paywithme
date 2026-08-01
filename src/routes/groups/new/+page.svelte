@@ -13,7 +13,6 @@
 	import * as Popover from '$lib/components/ui/popover';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import CheckIcon from '@lucide/svelte/icons/check';
 	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
 	import type { PageData } from './$types';
 
@@ -125,16 +124,17 @@
 											<Command.Empty>No currency found.</Command.Empty>
 											<Command.Group>
 												{#each CURRENCIES as currency (currency.code)}
+													<!-- `data-checked` drives Command.Item's OWN trailing tick. A
+													     hand-rolled leading <CheckIcon class="text-transparent">
+													     leaks: the item's `data-selected:*:[svg]:text-foreground`
+													     repaints child svgs, so the meant-to-be-hidden tick shows on
+													     whichever row is merely highlighted. -->
 													<Command.Item
 														value={currency.code}
 														keywords={[currency.name, currency.symbol]}
+														data-checked={$formData.settlementCurrency === currency.code}
 														onSelect={() => selectCurrency(currency.code)}
 													>
-														<CheckIcon
-															class={cn(
-																$formData.settlementCurrency !== currency.code && 'text-transparent'
-															)}
-														/>
 														{currency.code} — {currency.name} ({currency.symbol})
 													</Command.Item>
 												{/each}

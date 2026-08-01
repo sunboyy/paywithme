@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 import { defaults } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema, type TransactionInput } from '$lib/schemas/transaction';
@@ -143,9 +144,31 @@ describe('TransactionForm a11y', () => {
 		expect(container.querySelector('[aria-label="Category"]')).not.toBeNull();
 	});
 
-	it('gives the currency Select trigger an accessible name when there is a choice', () => {
+	it('gives the currency picker trigger an accessible name when there is a choice', () => {
 		const { container } = renderForm({}, MULTI_CURRENCY);
 		expect(container.querySelector('[aria-label="Currency"]')).not.toBeNull();
+	});
+
+	it('renders the currency picker as a SEARCHABLE COMBOBOX, not a plain dropdown', async () => {
+		// The supported list is ~30 currencies (PLAN §7.5.1) — a plain Select renders
+		// them as one unbounded, unscrollable column that overflows off-screen, so the
+		// entries near the top become unreachable. A combobox filters instead.
+		const { container } = renderForm({}, MULTI_CURRENCY);
+		const trigger = container.querySelector('[aria-label="Currency"]') as HTMLElement;
+		expect(trigger.getAttribute('role')).toBe('combobox');
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+		trigger.click();
+		await tick();
+
+		// The search box is what makes a 30-entry list navigable.
+		expect(document.querySelector('[data-slot="command-input"]')).not.toBeNull();
+		// …and every supported currency is offered, not just the group's.
+		const labels = [...document.querySelectorAll('[data-slot="command-item"]')].map((el) =>
+			el.textContent?.trim()
+		);
+		expect(labels.some((l) => l?.startsWith('THB'))).toBe(true);
+		expect(labels.some((l) => l?.startsWith('JPY'))).toBe(true);
 	});
 
 	it('OMITS the currency picker entirely when only one currency is supported', () => {

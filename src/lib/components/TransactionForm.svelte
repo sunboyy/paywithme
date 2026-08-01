@@ -16,8 +16,8 @@
 	// derived) with a live converted total, and recomputes `amountTotalSettlement`
 	// from the rate. Same-currency stays the no-op seam (rate '1', settlement == txn).
 
+	import type { ChargeInput, TransactionInput } from '$lib/schemas/transaction';
 	import type { SuperForm } from 'sveltekit-superforms';
-	import type { TransactionInput, ChargeInput } from '$lib/schemas/transaction';
 
 	/** A selectable (active) member for the payer / beneficiary pickers. */
 	export interface FormMember {
@@ -66,26 +66,30 @@
 </script>
 
 <script lang="ts">
-	import { formatAmount, parseAmount, sanitizeAmountInput, type CurrencyCode } from '$lib/money';
-	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
 	import { defaultCategoryFor } from '$lib/categories';
-	import * as Tabs from '$lib/components/ui/tabs';
-	import * as Select from '$lib/components/ui/select';
+	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
+	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
 	import { Button } from '$lib/components/ui/button';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import * as Command from '$lib/components/ui/command';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { Checkbox } from '$lib/components/ui/checkbox';
-	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
-	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
-	import Trash2Icon from '@lucide/svelte/icons/trash-2';
-	import MobileActionBar from '$lib/components/MobileActionBar.svelte';
-	import {
-		resolveShares,
-		resolveItemizedWithCharges,
-		distributeToSettlement
-	} from '$lib/transactions/resolve';
-	import { network } from '$lib/pwa/online.svelte';
+	import * as Popover from '$lib/components/ui/popover';
+	import * as Select from '$lib/components/ui/select';
+	import * as Tabs from '$lib/components/ui/tabs';
+	import { formatAmount, parseAmount, sanitizeAmountInput, type CurrencyCode } from '$lib/money';
 	import { writeDisabled } from '$lib/pwa/offline-writes';
+	import { network } from '$lib/pwa/online.svelte';
+	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
+	import {
+		distributeToSettlement,
+		resolveItemizedWithCharges,
+		resolveShares
+	} from '$lib/transactions/resolve';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import { tick } from 'svelte';
 
 	let {
 		form,
@@ -319,6 +323,13 @@
 		}
 	});
 
+	// The currency picker is a searchable combobox (Popover + Command), not a Select:
+	// the supported list is ~30 entries (PLAN §7.5.1), which overflows a plain
+	// dropdown. Mirrors the settlement-currency picker on /groups/new. `currency` is
+	// posted by its own hidden input below, so the combobox needs no form `name`.
+	let currencyOpen = $state(false);
+	let currencyTriggerRef = $state<HTMLButtonElement | null>(null);
+
 	/** Switch the entry currency. Back to settlement → clear the rate to 1 (§7.6). */
 	function onCurrencyChange(code: string) {
 		entryCode = code as CurrencyCode;
@@ -327,6 +338,9 @@
 			settlementTotalInput = '';
 			fxDriver = 'rate';
 		}
+		// Close and hand focus back to the trigger (keyboard users land where they left).
+		currencyOpen = false;
+		tick().then(() => currencyTriggerRef?.focus());
 	}
 
 	function onRateInput(raw: string) {
@@ -1078,21 +1092,51 @@
 			</summary>
 			<div class="space-y-2 pt-2">
 				<Label>Currency</Label>
-				<Select.Root type="single" value={entryCode} onValueChange={onCurrencyChange}>
-					<Select.Trigger class="w-full" aria-label="Currency">
-						{selectedCurrencyLabel}
-					</Select.Trigger>
-					<Select.Content>
-						{#each currencyOptions as option (option.code)}
-							<Select.Item value={option.code} label={option.code}>
-								{option.code}{option.name ? ` · ${option.name}` : ''}
-								{#if option.code === settlementCode}
-									<span class="text-muted-foreground text-xs">(group)</span>
-								{/if}
-							</Select.Item>
-						{/each}
-					</Select.Content>
-				</Select.Root>
+				<Popover.Root bind:open={currencyOpen}>
+					<Popover.Trigger bind:ref={currencyTriggerRef}>
+						{#snippet child({ props })}
+							<Button
+								{...props}
+								variant="outline"
+								role="combobox"
+								aria-label="Currency"
+								aria-expanded={currencyOpen}
+								class="w-full justify-between font-normal"
+							>
+								{selectedCurrencyLabel}
+								<ChevronsUpDownIcon class="opacity-50" />
+							</Button>
+						{/snippet}
+					</Popover.Trigger>
+					<Popover.Content class="w-(--bits-floating-anchor-width) p-0">
+						<Command.Root>
+							<Command.Input placeholder="Search currency…" />
+							<Command.List>
+								<Command.Empty>No currency found.</Command.Empty>
+								<Command.Group>
+									{#each currencyOptions as option (option.code)}
+										<!-- `data-checked` drives Command.Item's OWN trailing tick. A hand-rolled
+										     leading <CheckIcon class="text-transparent"> leaks: the item's
+										     `data-selected:*:[svg]:text-foreground` repaints child svgs, so the
+										     meant-to-be-hidden tick appears on whichever row is merely
+										     highlighted — pointing at the wrong currency. -->
+										<Command.Item
+											value={option.code}
+											keywords={[option.name ?? '', option.symbol]}
+											data-checked={option.code === entryCode}
+											onSelect={() => onCurrencyChange(option.code)}
+										>
+											{option.code}{option.name ? ` · ${option.name}` : ''}
+											{#if option.code === settlementCode}
+												<span class="text-muted-foreground text-xs">(group)</span>
+											{/if}
+										</Command.Item>
+									{/each}
+								</Command.Group>
+							</Command.List>
+						</Command.Root>
+					</Popover.Content>
+				</Popover.Root>
 			</div>
 		</details>
 	{/if}
