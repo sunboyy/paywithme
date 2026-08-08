@@ -50,7 +50,9 @@
 		<GroupNav groupId={data.group.id} current="overview" />
 	</header>
 
-	<div class="grid gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)] lg:items-start">
+	<div
+		class="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)] lg:items-start"
+	>
 		<div class="space-y-4">
 			<!-- The viewer's OWN position, first thing on the page.
 
@@ -212,8 +214,8 @@
 											<CategoryIcon name={txn.categoryIcon} class="size-4" />
 										</span>
 										<span class="min-w-0 flex-1">
-											<span class="flex items-center gap-2">
-												<span class="truncate text-sm font-medium">{txn.title}</span>
+											<span class="flex min-w-0 items-center gap-2">
+												<span class="min-w-0 flex-1 truncate text-sm font-medium">{txn.title}</span>
 												<!-- Only TRANSFERS are badged. A "spending" badge on every row said
 										     nothing (the category icon already encodes it) while eating the
 										     width that truncated titles to "Museum t…" on a phone. -->
