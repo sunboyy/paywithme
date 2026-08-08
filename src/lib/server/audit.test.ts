@@ -176,14 +176,29 @@ describe('constrained value sets (PLAN §12.1)', () => {
 	it('exposes the documented entity-type set', () => {
 		// `api_key` (PLAN §16.8) is the one ACCOUNT-LEVEL kind — it is the reason
 		// `groupId` is nullable on an entry.
-		expect(AUDIT_ENTITY_TYPES).toEqual(['transaction', 'member', 'invite', 'group', 'api_key']);
+		// `currency` is a GROUP-DEFINED custom currency (PLAN §7.5.2; ADR-0014) — the
+		// seeded 29 are immutable and can never produce an entry.
+		expect(AUDIT_ENTITY_TYPES).toEqual([
+			'transaction',
+			'member',
+			'invite',
+			'group',
+			'currency',
+			'api_key'
+		]);
 	});
 
 	it('exposes the GROUP-scoped subset separately (no api_key)', () => {
 		// The group activity feed's entity filter offers only these: an `api_key` row
 		// carries `groupId: null`, so filtering a group feed by it could only ever
 		// return an empty list.
-		expect(GROUP_AUDIT_ENTITY_TYPES).toEqual(['transaction', 'member', 'invite', 'group']);
+		expect(GROUP_AUDIT_ENTITY_TYPES).toEqual([
+			'transaction',
+			'member',
+			'invite',
+			'group',
+			'currency'
+		]);
 	});
 
 	it('accepts an account-level entry with a null group (PLAN §16.8)', async () => {

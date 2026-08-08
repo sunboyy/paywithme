@@ -71,11 +71,24 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
  * The entity kinds an audit entry can be attached to (PLAN §12.1). Stored as
  * `text` in `audit_log.entity_type`; validated here at the write layer.
  *
+ * `currency` is a GROUP-DEFINED custom currency (PLAN §7.5.2; ADR-0014). Its
+ * `entityId` is the row's opaque `code` — never the display code, which is
+ * member-authored and editable; the durable `summary` carries that label instead.
+ * The seeded 29 are not an entity at all: nobody can mutate them, so they can
+ * never produce an entry.
+ *
  * `api_key` (PLAN §16.8) is the one ACCOUNT-LEVEL kind: an API key belongs to a
  * user, not to a group, so those rows carry `groupId: null` (see `AuditEntry.
  * groupId`). Every other kind is group-scoped.
  */
-export const AUDIT_ENTITY_TYPES = ['transaction', 'member', 'invite', 'group', 'api_key'] as const;
+export const AUDIT_ENTITY_TYPES = [
+	'transaction',
+	'member',
+	'invite',
+	'group',
+	'currency',
+	'api_key'
+] as const;
 
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];
 
