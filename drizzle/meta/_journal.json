@@ -120,6 +120,13 @@
       "when": 1785331786590,
       "tag": "0016_rounding_rotation",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786191846968,
+      "tag": "0017_custom_currencies",
+      "breakpoints": true
     }
   ]
 }

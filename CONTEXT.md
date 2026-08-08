@@ -64,6 +64,16 @@ user-visible code, name and symbol are Member-authored text.
 
 _Avoid_: custom unit, user currency, fake currency, virtual currency.
 
+## Display code
+
+The short code a currency is **shown by** — `THB`, or `BEER` for a Custom currency.
+For a seeded currency it is the ISO code and there is nothing else; a Custom
+currency additionally carries an internal identifier that is never shown, never
+typed and never spoken about to a user. "Display code" is the only currency code
+that appears in an interface, a message, or an API response.
+
+_Avoid_: currency code (ambiguous — say which one), symbol (that's `฿`, not `THB`).
+
 ## Member-authored text
 
 Free text in a group written by **someone other than the person reading it** —
