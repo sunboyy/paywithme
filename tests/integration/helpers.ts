@@ -79,6 +79,24 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 				reason: `schema not migrated (missing tables: ${missing.join(', ')}). Run \`pnpm db:migrate\`.`
 			};
 		}
+		// The group-scoped `currencies` widening (issue #59; PLAN §7.5.2 / ADR-0014) adds
+		// COLUMNS rather than a table, so `to_regclass` above can't see it. The custom-
+		// currency suite would otherwise fail with a cryptic missing-column error on a
+		// DB stopped at migration 0016; treat it as "not ready" and skip cleanly.
+		const widened = await db.execute(sql`
+			select to_regclass('public.currencies') is not null
+			   and exists (
+			     select 1 from information_schema.columns
+			     where table_schema = 'public' and table_name = 'currencies'
+			       and column_name = 'display_code'
+			   ) as ok
+		`);
+		if (!(widened.rows?.[0] as { ok?: boolean } | undefined)?.ok) {
+			return {
+				ok: false,
+				reason: 'currencies.display_code missing. Run `pnpm db:migrate` (the #59 widening).'
+			};
+		}
 		// `categories` must also be SEEDED (task 4.3) — `createTransaction` asserts the
 		// chosen category id physically exists, so an empty table would fail the audit
 		// suite's transaction tests. Treat un-seeded as "not ready" (skip, don't error).

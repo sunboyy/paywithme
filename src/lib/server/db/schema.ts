@@ -23,10 +23,15 @@
 //     hand-authored domain tables (PLAN §6, §9): groups (+ soft-delete), member
 //     slots (+ soft-deactivate, partial-unique one-member-per-user-per-group),
 //     and reusable 7-day invite links (+ revoke).
-//   - currencies (task 3.2) → re-exported from `currencies-schema.ts`,
-//     hand-authored (PLAN §7.5.1): the 29 supported fiat currencies (code PK,
-//     name, exponent, symbol). The table DDL + the 29-row idempotent seed live
-//     in the migration; the canonical data is `src/lib/money/currencies.ts`.
+//   - currencies (task 3.2, widened by issue #59) → re-exported from
+//     `currencies-schema.ts`, hand-authored (PLAN §7.5.1, §7.5.2): the 29 supported
+//     fiat currencies (code PK, name, exponent, symbol) PLUS group-defined custom
+//     rows (`display_code`, nullable `group_id`/`created_by`/`created_at`, UNIQUE
+//     (group_id, display_code)). `group_id IS NULL` marks a seeded row; a custom
+//     row's `code` is an OPAQUE generated id, so `transactions.currency`'s FK to
+//     `currencies.code` is unchanged (ADR-0014). The table DDL + the 29-row
+//     idempotent seed live in the migration; the canonical data for the SEEDED
+//     rows is `src/lib/money/currencies.ts`.
 //   - categories / transactions / transaction_payers / transaction_shares /
 //     transaction_items / transaction_item_shares / transaction_charges
 //     (task 4.2) → re-exported from `transactions-schema.ts`, hand-authored
