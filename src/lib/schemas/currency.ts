@@ -24,7 +24,7 @@ const currencyCodeTuple = CURRENCY_CODES as unknown as [string, ...string[]];
 /**
  * Accepts exactly the 29 supported uppercase ISO 4217 codes (PLAN §7.5.1);
  * rejects anything else with a single shared message. The parsed value is the
- * matched `CurrencyCode` literal union.
+ * matched `SeededCurrencyCode` literal union.
  */
 export const currencyCodeSchema = z.enum(currencyCodeTuple, {
 	message: 'Select a supported currency'

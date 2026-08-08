@@ -17,7 +17,7 @@
 // `/api/v1`'s `Money` DTO is not touched — it cannot be, it is a published
 // contract with an OpenAPI spec. The two shapes coexist by design.
 
-import { formatAmount, type CurrencyCode } from '$lib/money';
+import { formatAmount, type EntryCurrencyCode } from '$lib/money';
 
 /** One monetary value as an agent sees it (ADR-0004). Three renderings, no integers. */
 export interface McpMoney {
@@ -28,8 +28,14 @@ export interface McpMoney {
 	 * verbatim.
 	 */
 	readonly amount: string;
-	/** The ISO-4217 code `amount` is denominated in. */
-	readonly currency: CurrencyCode;
+	/**
+	 * The code `amount` is denominated in. Always an ISO-4217 code today: an
+	 * ENTRY currency may in principle be a group-defined custom one, whose
+	 * user-visible `display_code` these read surfaces must resolve rather than
+	 * emit the opaque row key (ADR-0014 decision 7) — that mapping is a separate
+	 * task, and nothing can create a custom currency yet.
+	 */
+	readonly currency: EntryCurrencyCode;
 	/** A ready-to-quote human rendering, e.g. `"THB ฿1,200.00"` — symbol + grouping. */
 	readonly display: string;
 }
@@ -44,7 +50,7 @@ export interface McpMoney {
  * signed (§8.1), and hiding that sign would be the single most dangerous thing this
  * module could do.
  */
-export function toMcpMoney(minor: number, currency: CurrencyCode): McpMoney {
+export function toMcpMoney(minor: number, currency: EntryCurrencyCode): McpMoney {
 	return {
 		amount: formatAmount(minor, currency, { symbol: false, grouped: false }),
 		currency,

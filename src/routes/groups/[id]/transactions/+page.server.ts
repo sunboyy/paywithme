@@ -17,7 +17,7 @@ import { GroupAccessError } from '$lib/server/groups';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
 import { listMembers } from '$lib/server/members';
 import { categoriesFor } from '$lib/categories';
-import { getCurrency, type CurrencyCode } from '$lib/money';
+import { getCurrency, type SeededCurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
 
 /** Parse the `type` filter from the query string (ignoring anything unrecognized). */
@@ -53,7 +53,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		redirectTo: pathAndQuery(url)
 	});
 
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
 
 	// Filter state from the URL (server-first: links carry the filter so it works

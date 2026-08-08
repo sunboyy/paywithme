@@ -31,7 +31,7 @@
 // in `TransactionDetailDto` — wrapping a percentage in `{ amount, currency }`
 // would be a lie.
 
-import type { CurrencyCode } from '$lib/money';
+import type { EntryCurrencyCode } from '$lib/money';
 
 /**
  * A single monetary value on the `/api/v1` wire (PLAN §16.4): an integer
@@ -41,8 +41,14 @@ import type { CurrencyCode } from '$lib/money';
 export interface Money {
 	/** The value in `currency`'s integer minor units (no floats). */
 	readonly amount: number;
-	/** The ISO-4217 code `amount` is denominated in. */
-	readonly currency: CurrencyCode;
+	/**
+	 * The code `amount` is denominated in. Always an ISO-4217 code today: an
+	 * ENTRY currency may in principle be a group-defined custom one, whose
+	 * user-visible `display_code` these read surfaces must resolve rather than
+	 * emit the opaque row key (ADR-0014 decision 7) — that mapping is a separate
+	 * task, and nothing can create a custom currency yet.
+	 */
+	readonly currency: EntryCurrencyCode;
 }
 
 /**
@@ -50,6 +56,6 @@ export interface Money {
  * A tiny pure helper so mappers read declaratively and never hand-assemble the
  * object shape inconsistently.
  */
-export function money(amount: number, currency: CurrencyCode): Money {
+export function money(amount: number, currency: EntryCurrencyCode): Money {
 	return { amount, currency };
 }

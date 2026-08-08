@@ -8,7 +8,7 @@
 // `settlementCurrency` is a currency CODE (not a monetary amount), so it stays a
 // scalar — the money-on-wire `{ amount, currency }` shape is for AMOUNTS only.
 
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 import type { Group } from '$lib/server/groups';
 
 /** A group as served by `/api/v1` (PLAN §16.4). Internal `deletedAt` is dropped. */
@@ -16,7 +16,7 @@ export interface GroupDto {
 	readonly id: string;
 	readonly name: string;
 	/** The group's settlement currency (ISO code) — every settlement amount is in this. */
-	readonly settlementCurrency: CurrencyCode;
+	readonly settlementCurrency: SeededCurrencyCode;
 	/** better-auth user id of the group's author. */
 	readonly createdBy: string;
 	/** Creation time, ISO-8601 string (serialized from the internal `Date`). */
@@ -31,8 +31,8 @@ export function toGroupDto(group: Group): GroupDto {
 	return {
 		id: group.id,
 		name: group.name,
-		// DB stores a validated ISO code as `text`; it IS a CurrencyCode on the wire.
-		settlementCurrency: group.settlementCurrency as CurrencyCode,
+		// DB stores a validated ISO code as `text`; it IS a SeededCurrencyCode on the wire.
+		settlementCurrency: group.settlementCurrency as SeededCurrencyCode,
 		createdBy: group.createdBy,
 		createdAt: group.createdAt.toISOString()
 	};

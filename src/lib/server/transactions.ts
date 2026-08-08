@@ -84,7 +84,12 @@ import {
 	type ResolvedShare
 } from '$lib/transactions/resolve';
 import { getCategory } from '$lib/categories';
-import { formatAmount, type CurrencyCode } from '$lib/money';
+import {
+	asEntryCurrencyCode,
+	formatAmount,
+	type EntryCurrencyCode,
+	type SeededCurrencyCode
+} from '$lib/money';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
@@ -189,7 +194,7 @@ export async function createTransaction({
 	 * passes it (group context — NEVER trusted from the payload). Optional only so
 	 * tests can omit it; production callers always pass it.
 	 */
-	settlementCurrency?: CurrencyCode;
+	settlementCurrency?: SeededCurrencyCode;
 	/**
 	 * API-key provenance (PLAN §16.2) — passed ONLY by the `/api/v1` handlers. The
 	 * audit row then gains the "(via API key '<name>')" summary suffix +
@@ -248,7 +253,7 @@ export async function createTransaction({
 		// `lib/money` `formatAmount` in the ENTRY currency (e.g. "Added spending
 		// 'Dinner' — ฿90.00"); for a foreign transaction the settlement equivalent
 		// is appended (e.g. "CN¥90.00 (฿436.50)", §7.6).
-		const entryCurrency = data.currency as CurrencyCode;
+		const entryCurrency = asEntryCurrencyCode(data.currency);
 		const isForeign = entryCurrency !== currency;
 		const amountSummary = isForeign
 			? `${formatAmount(data.amountTotal, entryCurrency)} (${formatAmount(amountTotalSettlement, currency)})`
@@ -313,7 +318,7 @@ async function resolveAndWriteTransaction(
 		transactionId: string;
 		groupId: string;
 		userId: string;
-		settlementCurrency: CurrencyCode;
+		settlementCurrency: SeededCurrencyCode;
 		data: TransactionInput;
 		/**
 		 * The rounding-rotation ordinal (ADR-0013): freshly allocated from the group
@@ -341,7 +346,7 @@ async function resolveAndWriteTransaction(
 	// (defense in depth; the schema already validated the client value equals this).
 	const amountTotalSettlement = convertToSettlement(
 		data.amountTotal,
-		data.currency as CurrencyCode,
+		asEntryCurrencyCode(data.currency),
 		currency,
 		data.exchangeRate
 	);
@@ -555,7 +560,7 @@ async function deleteTransactionChildren(exec: DbExecutor, transactionId: string
 async function loadSettlementCurrency(
 	groupId: string,
 	executor: DbExecutor
-): Promise<CurrencyCode> {
+): Promise<SeededCurrencyCode> {
 	// Import locally to avoid a top-level cycle through groups-schema's re-exports.
 	const { groups } = await import('./db/groups-schema');
 	const [row] = await executor
@@ -566,7 +571,7 @@ async function loadSettlementCurrency(
 	if (!row) {
 		throw new GroupAccessError();
 	}
-	return row.settlementCurrency as CurrencyCode;
+	return row.settlementCurrency as SeededCurrencyCode;
 }
 
 /**
@@ -858,11 +863,11 @@ export interface TransactionListItem {
 	 */
 	amountTotal: number;
 	/** The ENTRY currency the transaction was recorded in — what `amountTotal` is in. */
-	currency: CurrencyCode;
+	currency: EntryCurrencyCode;
 	/** Settlement-currency minor units (the canonical total §8 reads). */
 	amountTotalSettlement: number;
 	/** Group settlement currency code — what `amountTotalSettlement` is denominated in. */
-	settlementCurrency: CurrencyCode;
+	settlementCurrency: SeededCurrencyCode;
 	/** Whether the entry currency differs from the group's settlement currency (§7.6). */
 	isForeign: boolean;
 	/** The real-world date (PLAN §7.1 `created_at`), ISO string — the display/sort date. */
@@ -974,7 +979,7 @@ export async function listTransactions({
 	// always denominated in. The list surfaces BOTH so the UI can show the original
 	// amount + currency with the settlement equivalent as secondary text (§7.6 display).
 	return rows.map((r) => {
-		const entryCurrency = r.currency as CurrencyCode;
+		const entryCurrency = asEntryCurrencyCode(r.currency);
 		return {
 			id: r.id,
 			type: r.type as 'spending' | 'transfer',
@@ -1059,11 +1064,11 @@ export interface TransactionDetail {
 	/** The ORIGINAL total, ENTRY-currency minor units (§7.6 display). */
 	readonly amountTotal: number;
 	/** The ENTRY currency the txn was recorded in. */
-	readonly currency: CurrencyCode;
+	readonly currency: EntryCurrencyCode;
 	/** Settlement-currency minor units (the canonical total §8 reads). */
 	readonly amountTotalSettlement: number;
 	/** Group settlement currency — what `amountTotalSettlement` / shares are in. */
-	readonly settlementCurrency: CurrencyCode;
+	readonly settlementCurrency: SeededCurrencyCode;
 	/** Whether the entry currency differs from settlement (§7.6). */
 	readonly isForeign: boolean;
 	readonly splitMode: 'equal' | 'amount' | 'share' | 'itemized';
@@ -1207,7 +1212,7 @@ export async function getTransactionDetail({
 		.where(eq(transactionCharges.transactionId, txnId))
 		.orderBy(asc(transactionCharges.sortOrder));
 
-	const entryCurrency = txn.currency as CurrencyCode;
+	const entryCurrency = asEntryCurrencyCode(txn.currency);
 	const splitMode = txn.splitMode as TransactionDetail['splitMode'];
 	const isItemized = splitMode === 'itemized';
 
@@ -1386,7 +1391,7 @@ export async function updateTransaction({
 	/** The user performing the edit (durable audit authorship). Defaults to `userId`. */
 	actorUserId?: string;
 	/** Group settlement currency (trusted group context, NEVER the payload). */
-	settlementCurrency?: CurrencyCode;
+	settlementCurrency?: SeededCurrencyCode;
 	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
 	via?: AuditVia;
 	/** Injectable clock (tests). */
@@ -1433,7 +1438,7 @@ export async function updateTransaction({
 
 		// `edit` audit row — IN THE SAME TRANSACTION (PLAN §12.1). Summary + before→after
 		// of key fields (title / amount), in the entry currency (settlement appended when foreign).
-		const entryCurrency = data.currency as CurrencyCode;
+		const entryCurrency = asEntryCurrencyCode(data.currency);
 		const isForeign = entryCurrency !== currency;
 		const amountSummary = isForeign
 			? `${formatAmount(data.amountTotal, entryCurrency)} (${formatAmount(amountTotalSettlement, currency)})`

@@ -77,7 +77,14 @@
 	import * as Popover from '$lib/components/ui/popover';
 	import * as Select from '$lib/components/ui/select';
 	import * as Tabs from '$lib/components/ui/tabs';
-	import { formatAmount, parseAmount, sanitizeAmountInput, type CurrencyCode } from '$lib/money';
+	import {
+		asEntryCurrencyCode,
+		formatAmount,
+		parseAmount,
+		sanitizeAmountInput,
+		type EntryCurrencyCode,
+		type SeededCurrencyCode
+	} from '$lib/money';
 	import { writeDisabled } from '$lib/pwa/offline-writes';
 	import { network } from '$lib/pwa/online.svelte';
 	import { applyCharges, convertToSettlement } from '$lib/schemas/transaction';
@@ -114,7 +121,7 @@
 	// The group's SETTLEMENT currency — the default entry currency and what balances
 	// are denominated in. Fixed for this form's lifetime; capturing once is intentional.
 	// svelte-ignore state_referenced_locally
-	const settlementCode = currency.code as CurrencyCode;
+	const settlementCode = currency.code as SeededCurrencyCode;
 
 	// The supported-currency list for the FX picker (§7.6). Falls back to just the
 	// settlement currency so a single-currency caller (no `currencies` prop) still works.
@@ -126,7 +133,9 @@
 	// ── FX state (PLAN §7.6) ──────────────────────────────────────────────────────
 	// The chosen ENTRY currency (the txn currency). Defaults to the group settlement
 	// currency; choosing a DIFFERENT one reveals the rate / settlement-total entry.
-	let entryCode = $state(($formData.currency as CurrencyCode) || settlementCode);
+	let entryCode: EntryCurrencyCode = $state(
+		$formData.currency ? asEntryCurrencyCode($formData.currency) : settlementCode
+	);
 
 	// Whether the chosen entry currency is FOREIGN (≠ settlement) — drives the FX UI.
 	const isForeign = $derived(entryCode !== settlementCode);
@@ -332,7 +341,7 @@
 
 	/** Switch the entry currency. Back to settlement → clear the rate to 1 (§7.6). */
 	function onCurrencyChange(code: string) {
-		entryCode = code as CurrencyCode;
+		entryCode = asEntryCurrencyCode(code);
 		if (code === settlementCode) {
 			rateInput = '';
 			settlementTotalInput = '';

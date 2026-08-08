@@ -10,7 +10,7 @@
 // (§16.4). Any valid key suffices (an `R` endpoint).
 
 import { json } from '@sveltejs/kit';
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 import { getGroupForUser } from '$lib/server/groups';
 import { getGroupBalances } from '$lib/server/balances';
 import { toBalanceDto } from '$lib/server/api/v1';
@@ -35,6 +35,6 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 	if (!group) return notFound();
 
 	const balances = await getGroupBalances({ userId: principal.userId, groupId: gid });
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	return json(balances.map((b) => toBalanceDto(b, settlementCurrency)));
 });

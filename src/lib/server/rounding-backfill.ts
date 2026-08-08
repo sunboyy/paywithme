@@ -48,7 +48,7 @@ import {
 	resolveItemizedWithCharges,
 	distributeToSettlement
 } from '$lib/transactions/resolve';
-import type { CurrencyCode } from '$lib/money';
+import { asEntryCurrencyCode, type SeededCurrencyCode } from '$lib/money';
 
 /** What one transaction's re-resolution changed, in settlement minor units. */
 export interface TransactionDelta {
@@ -152,7 +152,7 @@ async function backfillGroup({
 		const delta = await recalculateTransaction({
 			txn,
 			roundingSeq: ordinal,
-			settlementCurrency: group.settlementCurrency as CurrencyCode,
+			settlementCurrency: group.settlementCurrency as SeededCurrencyCode,
 			groupId: group.id,
 			actorUserId,
 			apply
@@ -204,7 +204,7 @@ async function recalculateTransaction({
 		roundingSeq: number;
 	};
 	roundingSeq: number;
-	settlementCurrency: CurrencyCode;
+	settlementCurrency: SeededCurrencyCode;
 	groupId: string;
 	actorUserId: string;
 	apply: boolean;
@@ -314,7 +314,7 @@ async function recalculateTransaction({
 	// transaction this is the identity.
 	const amountTotalSettlement = convertToSettlement(
 		txn.amountTotal,
-		txn.currency as CurrencyCode,
+		asEntryCurrencyCode(txn.currency),
 		settlementCurrency,
 		txn.exchangeRate
 	);

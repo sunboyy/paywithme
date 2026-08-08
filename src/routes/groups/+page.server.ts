@@ -15,7 +15,7 @@ import type { Group } from '$lib/server/groups';
 import { getUserNetBalanceByGroup } from '$lib/server/balances';
 import { requireUser } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
-import { formatAmount, type CurrencyCode } from '$lib/money';
+import { formatAmount, type SeededCurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ locals, url }) => {
@@ -50,7 +50,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 
 	return {
 		groups: groups.map((group) => {
-			const settlementCurrency = group.settlementCurrency as CurrencyCode;
+			const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 			const net = netByGroup.get(group.id);
 			return {
 				...group,

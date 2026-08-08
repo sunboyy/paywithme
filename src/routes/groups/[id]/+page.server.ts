@@ -19,7 +19,7 @@ import { listMembers } from '$lib/server/members';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
 import { listGroupActivity, type ActivityEntry } from '$lib/server/activity';
 import { orderByWhoShouldPay, type MemberBalance } from '$lib/transactions/balances';
-import { formatAmount, getCurrency, type CurrencyCode } from '$lib/money';
+import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
 
 const RECENT_LIMIT = 5;
@@ -33,7 +33,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		redirectTo: pathAndQuery(url)
 	});
 
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
 
 	// Fetch balances + member roster and the two recent lists in parallel.

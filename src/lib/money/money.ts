@@ -13,8 +13,16 @@
 //                (ADR-0013), so shares sum EXACTLY to the total AND the member who
 //                absorbs the leftover unit changes from transaction to transaction.
 //
-// All per-currency precision is read from `getCurrency(code).exponent`
-// (`currencies.ts`, the single source of truth) — NEVER hardcoded "×100" / "2 dp".
+// All per-currency precision is read from the currency's `exponent` — resolved
+// from `currencies.ts` (the single source of truth for the SEEDED 29) when the
+// caller passes a code, or taken straight off a `CurrencyDescriptor` when it
+// passes a resolved row. NEVER hardcoded "×100" / "2 dp".
+//
+// That descriptor overload is what lets a GROUP-DEFINED custom currency (PLAN
+// §7.5.2 / ADR-0014) parse and format here: it exists only as a `currencies` row,
+// so the synchronous `getCurrency()` lookup over the compiled-in constant cannot
+// find it. No arithmetic changes for it — the core below was always exponent-
+// driven; this is purely an adapter above it.
 // A currency's scale factor is `10 ** exponent`: JPY/KRW/VND = 1 (0 dp),
 // THB/USD/EUR = 100 (2 dp), and a future 3-decimal currency (KWD) = 1000 (3 dp)
 // works with no code change here.
@@ -29,7 +37,14 @@
 // friction). We guard the boundary: parsing rejects anything that would exceed
 // the safe-integer range, so an unrepresentable amount can never silently appear.
 
-import { CURRENCIES, getCurrency, type CurrencyCode } from './currencies';
+import {
+	CURRENCIES,
+	getCurrency,
+	isCustomCurrency,
+	type CurrencyDescriptor,
+	type EntryCurrencyCode,
+	type SeededCurrencyCode
+} from './currencies';
 
 /**
  * The largest minor-unit magnitude we accept. Equal to `Number.MAX_SAFE_INTEGER`
@@ -39,23 +54,83 @@ import { CURRENCIES, getCurrency, type CurrencyCode } from './currencies';
 export const MAX_SAFE_MINOR = Number.MAX_SAFE_INTEGER;
 
 /**
- * `10 ** exponent` for `code` — the factor between one major unit and its minor
- * units (1 for 0-dp currencies, 100 for 2-dp, 1000 for 3-dp). Reads the stored
- * exponent so precision is always per-currency.
+ * What every public money helper accepts to say "which currency": either a
+ * **code** (resolved here against the seeded {@link CURRENCIES} constant) or an
+ * already-**resolved** {@link CurrencyDescriptor}.
  *
- * @throws if `code` is not a supported currency.
+ * The descriptor form is the one that works for a group-defined custom currency
+ * (PLAN §7.5.2 / ADR-0014 decision 4): its code exists only as a `currencies`
+ * row, so `getCurrency()` — a synchronous lookup over a compiled-in constant —
+ * cannot find it and throws. Callers that have loaded the row pass the row.
+ *
+ * The code form is unchanged for the seeded 29 and stays the ergonomic default
+ * everywhere the currency IS one of them.
  */
-export function scaleFactor(code: CurrencyCode): number {
-	return 10 ** exponentOf(code);
+export type CurrencyRef = EntryCurrencyCode | CurrencyDescriptor;
+
+/**
+ * Normalise a {@link CurrencyRef} to a descriptor.
+ *
+ * A code is looked up in the seeded constant and widened to a descriptor whose
+ * `displayCode` equals its `code` — which is precisely the seeded-row invariant
+ * (`code == display_code`), so a seeded currency behaves identically whether it
+ * arrives as a code or as a row.
+ *
+ * @throws if the code is not a seeded currency, or the descriptor is malformed.
+ */
+function resolveCurrency(currency: CurrencyRef): CurrencyDescriptor {
+	if (typeof currency !== 'string') {
+		return assertDescriptor(currency);
+	}
+	const seeded = getCurrency(currency);
+	if (seeded === undefined) {
+		// Includes the "custom currency passed as a bare code" case: the caller must
+		// resolve the row and pass the descriptor. Failing loudly here is deliberate —
+		// the alternative is formatting an amount at the wrong precision.
+		throw new Error(`Unknown currency code: ${String(currency)}`);
+	}
+	return {
+		code: seeded.code,
+		displayCode: seeded.code,
+		exponent: seeded.exponent,
+		symbol: seeded.symbol
+	};
 }
 
-/** Resolve a currency's minor-unit exponent, throwing on an unknown code. */
-function exponentOf(code: CurrencyCode): number {
-	const currency = getCurrency(code);
-	if (currency === undefined) {
-		throw new Error(`Unknown currency code: ${String(code)}`);
+/**
+ * Guard a caller-supplied descriptor. It carries the exponent that decides how
+ * every amount against it is interpreted, so a malformed one is a data bug worth
+ * failing on rather than rendering nonsense at "exponent NaN".
+ */
+function assertDescriptor(currency: CurrencyDescriptor): CurrencyDescriptor {
+	const { code, displayCode, exponent } = currency;
+	if (typeof code !== 'string' || code.trim() === '') {
+		throw new Error('Currency descriptor has an empty code');
 	}
-	return currency.exponent;
+	if (typeof displayCode !== 'string' || displayCode.trim() === '') {
+		// Without a display code there is nothing safe to prefix — the opaque `code`
+		// must never reach a screen (CONTEXT.md "Display code").
+		throw new Error(`Currency descriptor has an empty display code: ${code}`);
+	}
+	if (!Number.isSafeInteger(exponent) || exponent < 0) {
+		throw new Error(
+			`Currency descriptor has an invalid exponent: ${displayCode} has ${String(exponent)}`
+		);
+	}
+	return currency;
+}
+
+/**
+ * `10 ** exponent` for `currency` — the factor between one major unit and its
+ * minor units (1 for 0-dp currencies, 100 for 2-dp, 1000 for 3-dp). Reads the
+ * resolved exponent so precision is always per-currency.
+ *
+ * @throws if a code is passed that is not a seeded currency.
+ */
+export function scaleFactor(currency: CurrencyDescriptor): number;
+export function scaleFactor(code: EntryCurrencyCode): number;
+export function scaleFactor(currency: CurrencyRef): number {
+	return 10 ** resolveCurrency(currency).exponent;
 }
 
 /** Options for {@link parseAmount}. */
@@ -70,7 +145,7 @@ export interface ParseAmountOptions {
 
 /**
  * Parse a user-entered **major-unit** string into integer **minor units** for
- * `code`, using that currency's own exponent (no hardcoded dp).
+ * `currency`, using that currency's own exponent (no hardcoded dp).
  *
  * Accepts an optional sign, ASCII thousands separators (`,`), and a decimal
  * point with AT MOST `exponent` fractional digits. Surrounding whitespace is
@@ -85,17 +160,38 @@ export interface ParseAmountOptions {
  *   - a negative value when `allowNegative` is not set;
  *   - a magnitude that would exceed {@link MAX_SAFE_MINOR}.
  *
+ * Takes either a seeded code or a resolved {@link CurrencyDescriptor}, so a
+ * group-defined custom currency parses through the identical path at its own
+ * exponent (PLAN §7.5.2).
+ *
  * @example parseAmount('12.50', 'USD') // → 1250
  * @example parseAmount('1,000', 'JPY') // → 1000
- * @example parseAmount('1.234', 'KWD') // → 1234 (3-dp currency)
+ * @example parseAmount('1.234', beerDescriptor) // → 1234 (3-dp custom currency)
  */
-export function parseAmount(input: string, code: CurrencyCode, opts?: ParseAmountOptions): number {
-	return parseMinor(input, exponentOf(code), { ...opts, code });
+export function parseAmount(
+	input: string,
+	currency: CurrencyDescriptor,
+	opts?: ParseAmountOptions
+): number;
+export function parseAmount(
+	input: string,
+	code: EntryCurrencyCode,
+	opts?: ParseAmountOptions
+): number;
+export function parseAmount(
+	input: string,
+	currency: CurrencyRef,
+	opts?: ParseAmountOptions
+): number {
+	const { exponent, displayCode } = resolveCurrency(currency);
+	// The error label is the DISPLAY code — an opaque custom `code` must never
+	// surface in a message a user reads.
+	return parseMinor(input, exponent, { ...opts, code: displayCode });
 }
 
 /**
  * Constrain a **partially typed** major-unit string to something `parseAmount`
- * can accept for `code` — the entry-side counterpart to {@link parseAmount}.
+ * can accept for `currency` — the entry-side counterpart to {@link parseAmount}.
  *
  * `parseAmount` is all-or-nothing: it throws on junk, which is right for a value
  * being committed but useless for a field being typed into, where the input is
@@ -119,11 +215,17 @@ export function parseAmount(input: string, code: CurrencyCode, opts?: ParseAmoun
  *
  * Signs are dropped: every field this backs is non-negative entry.
  *
+ * Takes either a seeded code or a resolved {@link CurrencyDescriptor} (PLAN
+ * §7.5.2), so an amount field denominated in a custom currency caps its decimals
+ * at that currency's own exponent.
+ *
  * @example sanitizeAmountInput('12.345', 'THB') // → '12.34'
  * @example sanitizeAmountInput('12.5', 'JPY')   // → '12'
  */
-export function sanitizeAmountInput(input: string, code: CurrencyCode): string {
-	const exponent = exponentOf(code);
+export function sanitizeAmountInput(input: string, currency: CurrencyDescriptor): string;
+export function sanitizeAmountInput(input: string, code: EntryCurrencyCode): string;
+export function sanitizeAmountInput(input: string, currency: CurrencyRef): string {
+	const { exponent } = resolveCurrency(currency);
 	const cleaned = input.replace(/[^\d.]/g, '');
 	const dot = cleaned.indexOf('.');
 	if (dot === -1) return cleaned;
@@ -136,13 +238,13 @@ export function sanitizeAmountInput(input: string, code: CurrencyCode): string {
 
 /** Options for {@link parseMinor} — {@link ParseAmountOptions} plus a label for errors. */
 interface ParseMinorOptions extends ParseAmountOptions {
-	/** A label (typically the ISO code) for the "too many decimal places" message. */
+	/** A label (the currency's DISPLAY code) for the "too many decimal places" message. */
 	readonly code?: string;
 }
 
 /**
  * Exponent-driven core of {@link parseAmount}, package-private so the public
- * function (which resolves the exponent from a {@link CurrencyCode}) and the unit
+ * function (which resolves the exponent from a {@link CurrencyRef}) and the unit
  * tests can both drive ANY exponent — including values not present in the
  * currency data, e.g. a 3-decimal currency — through the identical production
  * code path. `parseAmount` delegates here; behaviour is unchanged.
@@ -207,8 +309,8 @@ export interface FormatAmountOptions {
 	 */
 	readonly grouped?: boolean;
 	/**
-	 * Prefix the ISO code when the symbol is ambiguous on its own (default
-	 * `true` — the globally-safe disambiguation documented on
+	 * Prefix the currency's DISPLAY code when the symbol is ambiguous on its own
+	 * (default `true` — the globally-safe disambiguation documented on
 	 * {@link formatAmount}).
 	 *
 	 * Set `false` on surfaces where the currency is already established by
@@ -221,13 +323,24 @@ export interface FormatAmountOptions {
 	 * Leave it at the default wherever two currencies can appear together (the
 	 * groups list, the foreign-currency secondary line) or on machine-readable
 	 * surfaces (MCP / API views), where self-identifying amounts are the point.
+	 *
+	 * **Ignored for a group-defined custom currency**, which always disambiguates
+	 * (PLAN §7.5.2). The opt-out exists because "inside one group, every amount is
+	 * in the settlement currency" — an assumption a custom currency contradicts by
+	 * construction: it is entry-only and therefore ALWAYS foreign (ADR-0014
+	 * decision 6), so it only ever renders beside settlement amounts. Honouring
+	 * `false` there would let a member-authored `$` sit next to a real USD `$`.
 	 */
 	readonly code?: boolean;
 }
 
 /**
- * Format integer **minor units** into a display string at `code`'s own decimal
- * precision, with a disambiguated symbol.
+ * Format integer **minor units** into a display string at the currency's own
+ * decimal precision, with a disambiguated symbol.
+ *
+ * Takes either a seeded code or a resolved {@link CurrencyDescriptor} — the
+ * descriptor form is how a group-defined custom currency is formatted, since its
+ * code is not in the compiled-in constant (PLAN §7.5.2).
  *
  * ── Symbol composition rule (PLAN §7.5.1 symbol disambiguation) ──
  * Many world currencies share a glyph (`kr` for SEK & NOK, `¥` for JPY & CNY,
@@ -240,10 +353,18 @@ export interface FormatAmountOptions {
  *     as-is.
  *   - Otherwise — the symbol collides with another currency's symbol (e.g. SEK vs
  *     NOK both `kr`) OR it is a bare non-letter glyph (`¥`, `$`, `£`, `€`, `฿`,
- *     `₩`, …) — we PREFIX the ISO code: `SEK kr`, `NOK kr`, `USD $`, `JP¥`/`JPY`.
+ *     `₩`, …) — we PREFIX the DISPLAY code: `SEK kr`, `NOK kr`, `USD $`.
+ *   - A **custom** currency skips the test and is ALWAYS code-prefixed. The
+ *     "unique" half of the test is answered by `SYMBOL_IS_UNIQUE`, a map computed
+ *     over the CLOSED seeded set; a member-authored symbol was never in that set,
+ *     so it can be assumed neither unique nor free of `$` (PLAN §7.5.2 / ADR-0014
+ *     decision 4). `BEER kr3.00`, never a bare `kr3.00` that reads as NOK.
  *
- * In practice the existing data pre-disambiguates most collisions (CNY=`CN¥`,
- * HK$, NT$, CA$, MX$, S$), leaving SEK/NOK (`kr`) which this rule splits into
+ * The prefixed code is always the **display** code (`THB`, `BEER`) — the opaque
+ * `code` of a custom row is never emitted (CONTEXT.md "Display code").
+ *
+ * In practice the seeded data pre-disambiguates most collisions (CNY=`CN¥`, HK$,
+ * NT$, CA$, MX$, S$), leaving SEK/NOK (`kr`) which this rule splits into
  * `SEK kr` / `NOK kr`. The bare-glyph branch additionally code-prefixes pure
  * symbols like `¥` (JPY) so JPY can never collide with a future bare-`¥` row, and
  * makes every formatted amount self-identifying.
@@ -261,20 +382,30 @@ export interface FormatAmountOptions {
  */
 export function formatAmount(
 	minor: number,
-	code: CurrencyCode,
+	currency: CurrencyDescriptor,
+	opts?: FormatAmountOptions
+): string;
+export function formatAmount(
+	minor: number,
+	code: EntryCurrencyCode,
+	opts?: FormatAmountOptions
+): string;
+export function formatAmount(
+	minor: number,
+	currency: CurrencyRef,
 	opts?: FormatAmountOptions
 ): string {
 	if (!Number.isSafeInteger(minor)) {
 		throw new Error(`Minor amount must be a safe integer: ${minor}`);
 	}
-	const currency = getCurrency(code);
-	if (currency === undefined) {
-		throw new Error(`Unknown currency code: ${String(code)}`);
-	}
-	const { exponent, symbol } = currency;
+	const resolved = resolveCurrency(currency);
+	const { exponent, symbol } = resolved;
+	const custom = isCustomCurrency(resolved);
 	const withSymbol = opts?.symbol ?? true;
 	const grouped = opts?.grouped ?? true;
-	const withCode = opts?.code ?? true;
+	// A custom currency always disambiguates, so `code: false` cannot suppress the
+	// prefix there — see {@link FormatAmountOptions.code}.
+	const withCode = custom || (opts?.code ?? true);
 
 	const numeric = formatMinor(minor, exponent, grouped);
 
@@ -287,7 +418,7 @@ export function formatAmount(
 		const negative = numeric.startsWith('-');
 		return `${negative ? '-' : ''}${symbol}${negative ? numeric.slice(1) : numeric}`;
 	}
-	return `${symbolPrefix(code, symbol)}${numeric}`;
+	return `${composeSymbolPrefix(resolved.displayCode, symbol, custom)}${numeric}`;
 }
 
 /**
@@ -316,27 +447,57 @@ export function formatMinor(minor: number, exponent: number, grouped = true): st
 }
 
 /**
- * Compose the display prefix for `code` given its stored `symbol`, applying the
- * disambiguation rule documented on {@link formatAmount}. Exported for tests and
- * any UI that needs the prefix on its own.
+ * Compose the display prefix for a currency, applying the disambiguation rule
+ * documented on {@link formatAmount}. Exported for tests and any UI that needs
+ * the prefix on its own.
  *
  * A symbol is used bare only when it (a) begins with an ASCII letter — i.e. it is
  * already a code-like token such as `CN¥`, `HK$`, `CHF`, `kr` — AND (b) is unique
- * across all currencies. Bare glyphs and colliding symbols get `"<CODE> "`
- * prefixed.
+ * across the seeded currencies. Bare glyphs and colliding symbols get
+ * `"<DISPLAY CODE> "` prefixed, and a **custom** currency always does (its symbol
+ * is member-authored, so neither test can vouch for it).
+ *
+ * The two-argument form is deliberately restricted to a {@link SeededCurrencyCode}
+ * — for a custom currency the code you have is the opaque one, which must never
+ * be displayed, so pass the descriptor instead.
  */
-export function symbolPrefix(code: CurrencyCode, symbol: string): string {
+export function symbolPrefix(currency: CurrencyDescriptor): string;
+export function symbolPrefix(code: SeededCurrencyCode, symbol: string): string;
+export function symbolPrefix(
+	currency: SeededCurrencyCode | CurrencyDescriptor,
+	symbol?: string
+): string {
+	if (typeof currency !== 'string') {
+		const resolved = assertDescriptor(currency);
+		return composeSymbolPrefix(resolved.displayCode, resolved.symbol, isCustomCurrency(resolved));
+	}
+	return composeSymbolPrefix(currency, symbol ?? '', false);
+}
+
+/**
+ * The shared prefix rule. `alwaysDisambiguate` is set for a custom currency,
+ * whose symbol cannot be checked against {@link SYMBOL_IS_UNIQUE} because that
+ * map is computed over the closed seeded set (PLAN §7.5.2).
+ */
+function composeSymbolPrefix(
+	displayCode: string,
+	symbol: string,
+	alwaysDisambiguate: boolean
+): string {
 	const startsWithLetter = /^[A-Za-z]/.test(symbol);
 	const unique = SYMBOL_IS_UNIQUE.get(symbol) ?? false;
-	if (startsWithLetter && unique) {
+	if (!alwaysDisambiguate && startsWithLetter && unique) {
 		return symbol;
 	}
-	return `${code} ${symbol}`;
+	return `${displayCode} ${symbol}`;
 }
 
 /**
  * Map of stored symbol → whether exactly one currency uses it. Built once so the
  * disambiguation rule can detect collisions (SEK/NOK `kr`) at O(1).
+ *
+ * Computed over the SEEDED set only, which is why a custom currency's symbol can
+ * never be looked up here and is always disambiguated instead.
  */
 const SYMBOL_IS_UNIQUE: ReadonlyMap<string, boolean> = (() => {
 	const counts = new Map<string, number>();

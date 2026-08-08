@@ -12,6 +12,15 @@
 //   - money math in 4.1 reads `getCurrency(code).exponent` for O(1) per-currency
 //     minor-unit scaling.
 //
+// ── What this file is NOT (ADR-0014 / PLAN §7.5.2) ──
+// It is the source of truth for the **seeded** currencies only. A group may also
+// define a **custom** currency, which exists solely as a `currencies` row and can
+// never appear here or in `SeededCurrencyCode`. Code that must serve both kinds
+// takes a resolved {@link CurrencyDescriptor} instead of a code (that is the whole
+// point of the descriptor); `CURRENCY_CODES` / `currencyCodeSchema` keep meaning
+// "the seeded 29" and keep guarding `groups.settlement_currency`, which a custom
+// currency may never be.
+//
 // The list is the **top 30 fiat currencies by market cap from fiatmarketcap.net,
 // minus BTC** — BTC is excluded because it is non-fiat and its 8-decimal,
 // non-ISO-4217 minor units don't fit the integer-exponent model (PLAN §7.5.1).
@@ -40,7 +49,7 @@ export interface Currency {
 /**
  * The canonical, ordered list of all 29 supported currencies (PLAN §7.5.1).
  * Order matches the PLAN table (rank by market cap). `as const` makes every
- * field a literal so `CurrencyCode` can be derived from it with no hand-typed
+ * field a literal so `SeededCurrencyCode` can be derived from it with no hand-typed
  * duplicate union.
  */
 export const CURRENCIES = [
@@ -76,18 +85,115 @@ export const CURRENCIES = [
 ] as const satisfies readonly Currency[];
 
 /**
- * Union of every supported ISO code, e.g. `'USD' | 'THB' | …`. Derived from
+ * Union of every **seeded** ISO code, e.g. `'USD' | 'THB' | …`. Derived from
  * `CURRENCIES` so adding a row automatically widens the type — used by the Zod
  * enum and any code that wants a compile-time-checked currency code.
+ *
+ * This union is exactly "the 29 §7.5.1 currencies", which is exactly the value
+ * space of a group's **settlement currency** (`groups.settlement_currency`) — a
+ * custom currency may never be one (ADR-0014 decision 1). It is deliberately NOT
+ * the type of a transaction's **entry** currency; that is
+ * {@link EntryCurrencyCode}. It was called `CurrencyCode` until ADR-0014 forced
+ * the split; the name now says which of the two it is.
  */
-export type CurrencyCode = (typeof CURRENCIES)[number]['code'];
+export type SeededCurrencyCode = (typeof CURRENCIES)[number]['code'];
+
+declare const ENTRY_CURRENCY_BRAND: unique symbol;
+
+/**
+ * A code that may appear as a transaction's **entry** currency (PLAN §7.5.2 /
+ * ADR-0014): either one of the seeded 29, or the opaque, generated `code` of a
+ * group-defined custom currency row (`cur_…`, see
+ * `lib/server/db/currencies-schema.ts`).
+ *
+ * The custom half cannot be a literal union — those codes are runtime data, not
+ * compile-time knowledge — so this is a **branded** string. The brand is what
+ * keeps the split honest in both directions:
+ *
+ *   - a seeded code is assignable to it (every settlement currency is a valid
+ *     entry currency), so `entry === settlement` comparisons and "pass the
+ *     settlement code where an entry code is wanted" keep working; but
+ *   - an arbitrary `string` is NOT, so a bare typo (`formatAmount(1, 'USDD')`)
+ *     is still a compile error, exactly as it was before the split. Widening the
+ *     type to plain `string` would have silently thrown that check away.
+ *
+ * Produce one from a raw string with {@link asEntryCurrencyCode} — the single
+ * documented chokepoint that replaces the old `as CurrencyCode` casts on
+ * entry-currency values (which asserted membership of the 29 and were, for a
+ * custom currency, simply false).
+ */
+export type EntryCurrencyCode =
+	SeededCurrencyCode | (string & { readonly [ENTRY_CURRENCY_BRAND]: true });
+
+/**
+ * Tag a raw string (a DB `transactions.currency` value, a validated form field,
+ * an MCP argument) as an {@link EntryCurrencyCode}.
+ *
+ * The only runtime check possible here is structural — whether the code names a
+ * currency the *group* may use is a DB question, answered by the
+ * `transactions.currency → currencies.code` foreign key and (task #63) the
+ * group-scoped entry-currency schema. So this rejects the one thing that is
+ * always wrong (an empty / blank code) and otherwise records the provenance in
+ * the type.
+ *
+ * @throws if `code` is empty or whitespace-only.
+ */
+export function asEntryCurrencyCode(code: string): EntryCurrencyCode {
+	if (code.trim() === '') {
+		throw new Error('Entry currency code is empty');
+	}
+	return code as EntryCurrencyCode;
+}
+
+/**
+ * A **resolved currency descriptor** — everything `lib/money` needs to parse and
+ * format an amount, with nothing left to look up (PLAN §7.5.2 "Display and
+ * formatting"; ADR-0014 decision 4).
+ *
+ * This is the shape that lets the money helpers serve a currency that is NOT in
+ * the compiled-in {@link CURRENCIES} constant: a group-defined custom currency
+ * lives only in the `currencies` table, so its caller resolves the row and hands
+ * the descriptor over rather than a code the helper would fail to look up. A
+ * `currencies` row is structurally assignable to it as-is.
+ *
+ * `code` is the opaque primary key and is **never displayed**; `displayCode` is
+ * the user-visible one (`THB`, `BEER`) and is the only code the formatter emits
+ * (CONTEXT.md "Display code").
+ */
+export interface CurrencyDescriptor {
+	/** Primary key. The ISO code for a seeded row, an opaque `cur_…` id for a custom one. Never displayed. */
+	readonly code: string;
+	/** The user-visible code — `code` for a seeded row, what the member typed for a custom one. */
+	readonly displayCode: string;
+	/** Minor-unit exponent; drives all per-currency precision (PLAN §7.5). */
+	readonly exponent: number;
+	/** Display symbol, e.g. `'$'`, `'฿'`, `'CN¥'`. Member-authored on a custom row. */
+	readonly symbol: string;
+}
+
+/**
+ * Is this descriptor a **group-defined custom** currency rather than one of the
+ * seeded 29?
+ *
+ * Read straight off the invariant the schema guarantees: a seeded row has
+ * `code == display_code`, and a custom row's `code` is a generated `cur_<uuid>`
+ * (lowercase-prefixed, so it can never equal an uppercase ISO-shaped display
+ * code — `CUSTOM_CURRENCY_CODE_PREFIX`). No extra field, no DB round-trip.
+ *
+ * The distinction is load-bearing for display: a custom currency's symbol is
+ * member-authored, so it can be assumed neither unique nor free of `$`, and must
+ * therefore ALWAYS be disambiguated (PLAN §7.5.2; ADR-0014 decision 4).
+ */
+export function isCustomCurrency(currency: CurrencyDescriptor): boolean {
+	return currency.code !== currency.displayCode;
+}
 
 /**
  * All 29 codes as a readonly tuple, in PLAN order. Derived from `CURRENCIES`;
  * `lib/schemas/currency.ts` builds its `z.enum` from this so the validation set
  * can never drift from the data.
  */
-export const CURRENCY_CODES = CURRENCIES.map((c) => c.code) as readonly CurrencyCode[];
+export const CURRENCY_CODES = CURRENCIES.map((c) => c.code) as readonly SeededCurrencyCode[];
 
 /**
  * O(1) lookup map (code → Currency). Built once at module load; backs

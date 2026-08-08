@@ -11,7 +11,14 @@ import {
 	distributeEqually,
 	MAX_SAFE_MINOR
 } from './money';
-import { getCurrency, CURRENCY_CODES, type CurrencyCode } from './currencies';
+import {
+	asEntryCurrencyCode,
+	getCurrency,
+	isCustomCurrency,
+	CURRENCY_CODES,
+	type CurrencyDescriptor,
+	type SeededCurrencyCode
+} from './currencies';
 
 // Unit tests for the currency-aware money helper (PLAN §7.5 / §7.2 / §7.6).
 // They prove: per-currency precision is read from the exponent (never hardcoded),
@@ -30,7 +37,7 @@ describe('scaleFactor', () => {
 	});
 
 	it('throws on an unknown currency', () => {
-		expect(() => scaleFactor('XXX' as CurrencyCode)).toThrow();
+		expect(() => scaleFactor('XXX' as SeededCurrencyCode)).toThrow();
 	});
 });
 
@@ -51,7 +58,7 @@ describe('parseAmount', () => {
 	});
 
 	it('honours an arbitrary exponent-3 currency through the real code path', () => {
-		// No CurrencyCode in the data has exponent 3, so `parseAmount` can't reach a
+		// No SeededCurrencyCode in the data has exponent 3, so `parseAmount` can't reach a
 		// 3-dp path. Drive the exponent-driven core (`parseMinor`, which `parseAmount`
 		// delegates to) directly at exponent 3 — the SAME production code, just with
 		// the exponent injected rather than resolved from a code. This proves the
@@ -284,6 +291,223 @@ describe('symbol disambiguation (PLAN §7.5.1)', () => {
 		// across the whole set, guarding against any future colliding-prefix regression.
 		const prefixes = CURRENCY_CODES.map((c) => symbolPrefix(c, getCurrency(c)!.symbol));
 		expect(new Set(prefixes).size).toBe(CURRENCY_CODES.length);
+	});
+
+	// The whole point of the descriptor overload is that it must not have moved the
+	// seeded output by a single byte. This pins the rendering of ALL 29 currencies —
+	// the ones whose symbol survives bare (`CN¥`, `HK$`, `CHF`, `zł`, `Kč`, `R`), the
+	// ones that get code-prefixed (`USD $`, `JPY ¥`), and the `kr` collision — as
+	// literal expected strings, captured from the implementation as it was BEFORE
+	// this change. Anything that shifts the prefix rule breaks this list.
+	it('renders every seeded currency byte-identically (regression)', () => {
+		expect(CURRENCY_CODES.map((c) => `${c}\t${formatAmount(123456789, c)}`)).toEqual([
+			'CNY\tCN¥1,234,567.89',
+			'USD\tUSD $1,234,567.89',
+			'EUR\tEUR €1,234,567.89',
+			'JPY\tJPY ¥123,456,789',
+			'GBP\tGBP £1,234,567.89',
+			'KRW\tKRW ₩123,456,789',
+			'HKD\tHK$1,234,567.89',
+			'TWD\tNT$1,234,567.89',
+			'CAD\tCA$1,234,567.89',
+			'RUB\tRUB ₽1,234,567.89',
+			'BRL\tR$1,234,567.89',
+			'CHF\tCHF1,234,567.89',
+			'MXN\tMX$1,234,567.89',
+			'INR\tINR ₹1,234,567.89',
+			'SAR\tSAR1,234,567.89',
+			'AED\tAED1,234,567.89',
+			'PLN\tzł1,234,567.89',
+			'THB\tTHB ฿1,234,567.89',
+			'SGD\tS$1,234,567.89',
+			'VND\tVND ₫123,456,789',
+			'MYR\tRM1,234,567.89',
+			'TRY\tTRY ₺1,234,567.89',
+			'IDR\tRp1,234,567.89',
+			'SEK\tSEK kr1,234,567.89',
+			'ILS\tILS ₪1,234,567.89',
+			'NOK\tNOK kr1,234,567.89',
+			'CZK\tKč1,234,567.89',
+			'PHP\tPHP ₱1,234,567.89',
+			'ZAR\tR1,234,567.89'
+		]);
+	});
+});
+
+// ── Resolved currency descriptors (PLAN §7.5.2 / ADR-0014 decision 4) ─────────
+// The adapter that lets a GROUP-DEFINED custom currency — a `currencies` row that
+// is NOT in the compiled-in constant, so `getCurrency()` can never find it — parse
+// and format through the same exponent-driven core. No arithmetic changed; these
+// tests police the seam.
+describe('currency descriptors', () => {
+	/** A custom row as `lib/server` will hand it over: opaque `code`, typed `displayCode`. */
+	const custom = (over: Partial<CurrencyDescriptor> = {}): CurrencyDescriptor => ({
+		code: 'cur_9f0c2a1e-0000-4000-8000-000000000001',
+		displayCode: 'BEER',
+		exponent: 2,
+		symbol: '🍺',
+		...over
+	});
+
+	describe('a descriptor behaves exactly like a code at the same exponent', () => {
+		it('exponent 0 matches the seeded 0-dp currency (JPY)', () => {
+			// Same shape a seeded row has in the DB: `code == display_code`.
+			const jpy: CurrencyDescriptor = {
+				code: 'JPY',
+				displayCode: 'JPY',
+				exponent: 0,
+				symbol: '¥'
+			};
+			expect(scaleFactor(jpy)).toBe(scaleFactor('JPY'));
+			expect(parseAmount('1,000', jpy)).toBe(parseAmount('1,000', 'JPY'));
+			expect(() => parseAmount('1000.5', jpy)).toThrow(/decimal/i);
+			expect(sanitizeAmountInput('12.5', jpy)).toBe(sanitizeAmountInput('12.5', 'JPY'));
+			expect(formatAmount(1000, jpy)).toBe(formatAmount(1000, 'JPY'));
+			expect(formatAmount(-2156000, jpy, { code: false })).toBe(
+				formatAmount(-2156000, 'JPY', { code: false })
+			);
+			// Round-trip: string → minor → string, at the descriptor's own exponent.
+			expect(formatAmount(parseAmount('1,000', jpy), jpy, { symbol: false })).toBe('1,000');
+		});
+
+		it('exponent 3 works even though no seeded currency has one', () => {
+			// The seeded set is all 0-dp or 2-dp, so a 3-dp currency can ONLY arrive as a
+			// descriptor (or a future seeded row). It must behave as the exponent-driven
+			// core does — `parseMinor`/`formatMinor` at exponent 3 are the reference.
+			const kwd = custom({ displayCode: 'KWD', exponent: 3, symbol: 'د.ك' });
+			expect(scaleFactor(kwd)).toBe(1000);
+			expect(parseAmount('1.234', kwd)).toBe(parseMinor('1.234', 3));
+			expect(parseAmount('1.234', kwd)).toBe(1234);
+			expect(() => parseAmount('1.2345', kwd)).toThrow(/decimal/i);
+			expect(sanitizeAmountInput('1.2345', kwd)).toBe('1.234');
+			expect(formatAmount(1234, kwd, { symbol: false })).toBe(formatMinor(1234, 3));
+			expect(formatAmount(parseAmount('1.234', kwd), kwd, { symbol: false })).toBe('1.234');
+		});
+
+		it('carries the whole parse contract over unchanged', () => {
+			const beer = custom();
+			expect(() => parseAmount('', beer)).toThrow(/empty/i);
+			expect(() => parseAmount('abc', beer)).toThrow(/invalid/i);
+			expect(() => parseAmount('-5.00', beer)).toThrow(/negative/i);
+			expect(parseAmount('-5.00', beer, { allowNegative: true })).toBe(-500);
+			expect(parseAmount(' 1,000.50 ', beer)).toBe(100050);
+		});
+
+		it('names the DISPLAY code, never the opaque code, in a parse error', () => {
+			expect(() => parseAmount('1.234', custom())).toThrow(/BEER/);
+			expect(() => parseAmount('1.234', custom())).not.toThrow(/cur_/);
+		});
+	});
+
+	describe('a custom currency ALWAYS disambiguates its symbol', () => {
+		// `SYMBOL_IS_UNIQUE` is computed over the CLOSED seeded set, so it can say
+		// nothing about a member-authored symbol: it may collide with a seeded one, or
+		// be a letter-led token that the seeded rule would have passed through bare.
+		it('code-prefixes a `$` symbol so it cannot read as USD', () => {
+			expect(formatAmount(1250, custom({ displayCode: 'PESO', symbol: '$' }))).toBe('PESO $12.50');
+			expect(formatAmount(1250, custom({ displayCode: 'PESO', symbol: '$' }))).not.toBe(
+				formatAmount(1250, 'USD')
+			);
+		});
+
+		it('code-prefixes `kr` even though the seeded rule would pass a letter-led symbol bare', () => {
+			// The letter-led-AND-unique branch: `kr` is letter-led but collides (SEK/NOK),
+			// and a custom row must not join that collision either.
+			expect(formatAmount(50000, custom({ displayCode: 'BREW', symbol: 'kr' }))).toBe(
+				'BREW kr500.00'
+			);
+			expect(symbolPrefix(custom({ displayCode: 'BREW', symbol: 'kr' }))).toBe('BREW kr');
+		});
+
+		it('code-prefixes a letter-initial symbol that renders BARE for a seeded row', () => {
+			// `CHF` is letter-led and unique in the seeded set, so the seeded rule passes
+			// it through bare. The identical symbol on a CUSTOM row is still prefixed —
+			// custom-ness, not the symbol's shape, is what decides.
+			expect(symbolPrefix('CHF', 'CHF')).toBe('CHF');
+			expect(symbolPrefix({ code: 'CHF', displayCode: 'CHF', exponent: 2, symbol: 'CHF' })).toBe(
+				'CHF'
+			);
+			expect(symbolPrefix(custom({ displayCode: 'CHIP', symbol: 'CHF' }))).toBe('CHIP CHF');
+			expect(formatAmount(1250, custom({ displayCode: 'CHIP', symbol: 'CHF' }))).toBe(
+				'CHIP CHF12.50'
+			);
+			// A plain letter-led symbol no seeded row uses is prefixed too: absent from
+			// the closed set means "not known to be unique", never "unique".
+			expect(formatAmount(1250, custom({ symbol: 'B' }))).toBe('BEER B12.50');
+		});
+
+		it('cannot be silenced by `{ code: false }` — it is always foreign', () => {
+			// The opt-out means "the surrounding UI already fixes the currency", which is
+			// never true of an entry-only custom currency (ADR-0014 decision 6).
+			expect(formatAmount(1250, custom({ symbol: '$' }), { code: false })).toBe('BEER $12.50');
+			expect(formatAmount(-1250, custom({ symbol: '$' }), { code: false })).toBe('BEER $-12.50');
+			// `symbol: false` still drops everything but the digits, as for any currency.
+			expect(formatAmount(1250, custom(), { code: false, symbol: false })).toBe('12.50');
+		});
+	});
+
+	describe('the opaque code never reaches a rendered string', () => {
+		it('is absent from every option combination', () => {
+			const beer = custom();
+			for (const opts of [
+				undefined,
+				{ code: false },
+				{ code: true },
+				{ symbol: false },
+				{ grouped: false },
+				{ code: false, grouped: false }
+			]) {
+				expect(formatAmount(-123456789, beer, opts)).not.toContain('cur_');
+			}
+			expect(symbolPrefix(beer)).not.toContain('cur_');
+		});
+
+		it('refuses to format a custom currency passed as a BARE code', () => {
+			// The only way to render one is with its resolved row — a bare opaque code
+			// has no exponent and no symbol here, so guessing would be worse than failing.
+			expect(() => formatAmount(1250, asEntryCurrencyCode('cur_abc'))).toThrow(/unknown/i);
+			expect(() => parseAmount('12.50', asEntryCurrencyCode('cur_abc'))).toThrow(/unknown/i);
+		});
+
+		it('rejects a descriptor with no display code to prefix', () => {
+			expect(() => formatAmount(1250, custom({ displayCode: '' }))).toThrow(/display code/i);
+			expect(() => formatAmount(1250, custom({ displayCode: '   ' }))).toThrow(/display code/i);
+		});
+	});
+
+	describe('descriptor validation', () => {
+		it('rejects a malformed exponent rather than rendering nonsense', () => {
+			expect(() => formatAmount(1250, custom({ exponent: -1 }))).toThrow(/exponent/i);
+			expect(() => formatAmount(1250, custom({ exponent: 1.5 }))).toThrow(/exponent/i);
+			expect(() => parseAmount('1', custom({ exponent: Number.NaN }))).toThrow(/exponent/i);
+			expect(() => scaleFactor(custom({ exponent: -1 }))).toThrow(/exponent/i);
+		});
+
+		it('rejects an empty primary code', () => {
+			expect(() => formatAmount(1250, custom({ code: '' }))).toThrow(/empty code/i);
+		});
+	});
+
+	describe('asEntryCurrencyCode', () => {
+		it('passes a code through and rejects a blank one', () => {
+			expect(asEntryCurrencyCode('THB')).toBe('THB');
+			expect(asEntryCurrencyCode('cur_abc')).toBe('cur_abc');
+			expect(() => asEntryCurrencyCode('')).toThrow(/empty/i);
+			expect(() => asEntryCurrencyCode('  ')).toThrow(/empty/i);
+		});
+
+		it('keeps a seeded code usable everywhere an entry code is', () => {
+			expect(formatAmount(1250, asEntryCurrencyCode('USD'))).toBe(formatAmount(1250, 'USD'));
+		});
+	});
+
+	describe('isCustomCurrency', () => {
+		it('reads the seeded invariant `code == display_code`', () => {
+			expect(isCustomCurrency(custom())).toBe(true);
+			expect(isCustomCurrency({ code: 'THB', displayCode: 'THB', exponent: 2, symbol: '฿' })).toBe(
+				false
+			);
+		});
 	});
 });
 
