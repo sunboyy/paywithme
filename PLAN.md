@@ -729,7 +729,11 @@ unchanged.
 
 **Fields.** `display_code` (short, uppercased, unique within the group), `name`,
 `symbol`, `exponent` (0–3, per §7.5 — the money helper already handles any of
-them).
+them). A `display_code` must also **not shadow one of the §7.5.1 seeded codes**:
+the `(group_id, display_code)` index can't express that (seeded rows have
+`group_id IS NULL`, which Postgres treats as distinct), so the service enforces it
+— the entry-currency picker lists the seeded 29 and the group's own rows together,
+and two entries both reading `USD` would be unresolvable.
 
 **Immutability.** Once any transaction references the row, `exponent` and
 `display_code` are **frozen** — changing the exponent would silently reinterpret
