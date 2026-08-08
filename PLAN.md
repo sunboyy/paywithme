@@ -27,7 +27,8 @@
 - **Multi-currency with manual FX:** a group has one **settlement currency**;
   each transaction may be recorded in a different currency with a **manual
   exchange rate** entered per transaction (no FX API). Debt math is in the
-  settlement currency. (See §7.6.)
+  settlement currency. (See §7.6.) A group may also define its own **custom
+  currency** for transaction entry — never for settlement. (See §7.5.2.)
 - **Captures:** a few-seconds "this exists, details later" note per group, kept
   out of the ledger, resolved into a real transaction when there's time. (§7.7,
   ADR-0012.)
@@ -52,7 +53,9 @@
 
 - **Automatic FX rates** (live rate API). Rates are **manual, per transaction**.
 - Multi-currency _settlement_ (a group settles in exactly one currency; only the
-  per-transaction entry currency may differ).
+  per-transaction entry currency may differ). A **custom currency** is likewise
+  entry-only and can never be a settlement currency — so balances are never shown
+  in one (§7.5.2, ADR-0014).
 - Reporting / charts / analytics.
 
 ---
@@ -109,7 +112,9 @@
     transactions); shown per group, newest first. (See §12.1.)
 19. **Supported currencies.** Fixed seeded **29 fiat currencies** (top 30 by
     market cap from fiatmarketcap.net, **minus BTC** — non-fiat, non-ISO minor
-    units); both settlement and entry currency must be from this list. (See §7.5.1.)
+    units). A group's **settlement currency must be from this list**; a
+    transaction's **entry currency** may additionally be a **custom currency**
+    the group defined itself (**ADR-0014**). (See §7.5.1, §7.5.2.)
 20. **Auth method (revised).** **Email magic link** is the baseline: registration
     collects **display name + email**, logs in via an emailed single-use link that
     **verifies the email**; a **passkey** enrolled after first login is the primary
@@ -376,7 +381,10 @@ Rules:
   invalidate every stored settlement-currency total and per-transaction rate
   (historical rates can't be re-derived). Surface this in the edit UI. (Per-
   transaction _entry_ currency is always free; only the group's settlement
-  currency locks.)
+  currency locks.) The settlement currency is always one of the §7.5.1 seeded
+  currencies — a group-defined custom currency (§7.5.2) can never be it.
+- A **custom currency** (§7.5.2) locks narrowly rather than group-wide: its
+  `exponent` and `display_code` freeze once any transaction references it.
 - **Group rename** is always allowed.
 - **Deletion is a soft-delete** (`groups.deleted_at`): the group is hidden from
   every member's list and its routes return not-found, but data is retained and
@@ -649,9 +657,10 @@ sum(amount_owed [settlement]) == amount_total_settlement`.
 
 **Fixed, seeded list of 29 fiat currencies** (top 30 by market cap from
 fiatmarketcap.net, **excluding BTC** — non-fiat, and its 8-decimal non-ISO-4217
-minor units don't fit the exponent model). Both the group **settlement currency**
-and a transaction's **entry currency** must be one of these. Seeded via migration;
-the `exponent` column drives all minor-unit math (§7.5).
+minor units don't fit the exponent model). A group's **settlement currency** must
+be one of these. A transaction's **entry currency** may be one of these _or_ a
+**custom currency** the group defined (§7.5.2). Seeded via migration; the
+`exponent` column drives all minor-unit math (§7.5).
 
 | #   | Code | Currency           | Exponent | Symbol |
 | --- | ---- | ------------------ | -------- | ------ |
@@ -691,6 +700,58 @@ the `exponent` column drives all minor-unit math (§7.5).
 - All 29 use exponent 0 or 2; no 3-decimal currency is in this set. The money
   helper still supports arbitrary exponents (§7.5) so 3-decimal currencies remain
   addable later without code changes.
+
+#### 7.5.2 Custom currencies (group-defined)
+
+The seeded list can't cover the long tail of national currencies, and by
+construction can never cover a non-monetary unit ("beers", "rounds"). A group may
+therefore define its own currency. Decision record: **ADR-0014**.
+
+**Entry-only, never settlement.** A custom currency may be a transaction's **entry
+currency** and nothing else. `groups.settlement_currency` stays restricted to the
+§7.5.1 list, so every amount §8 reads — `transaction_shares.amount_owed`,
+`transaction_payers.amount_paid_settlement`, `amount_total_settlement` — stays
+denominated in a seeded currency. Balance math, settle-up and the §6.4 lock are
+unaffected. **Balances are never displayed in a custom currency**; say so in the UI
+where one is created.
+
+**Group-scoped.** A custom currency is defined inside one group by one of its
+members and is usable only in that group. Group membership is the authorization
+boundary (§12) — no new permission concept.
+
+**Stored in the `currencies` table, keyed by an opaque code.** The table gains
+`group_id` (nullable; `NULL` = a seeded row), `display_code`, `created_by`,
+`created_at`, and a unique index on `(group_id, display_code)`. Seeded rows have
+`code == display_code`. A custom row's `code` is **generated, globally unique and
+opaque**; `display_code` is what the user typed (`BEER`). `code` stays the primary
+key, so `transactions.currency → currencies.code` and every existing join are
+unchanged.
+
+**Fields.** `display_code` (short, uppercased, unique within the group), `name`,
+`symbol`, `exponent` (0–3, per §7.5 — the money helper already handles any of
+them).
+
+**Immutability.** Once any transaction references the row, `exponent` and
+`display_code` are **frozen** — changing the exponent would silently reinterpret
+every stored amount recorded against it (the §6.4 hazard, same remedy). `name` and
+`symbol` stay editable.
+
+**Always foreign, so a rate is always required.** A custom currency can never equal
+the settlement currency, so §7.6's rate-1 same-currency seam never applies and the
+FX field is always shown. A unit with no meaningful rate therefore can't be
+recorded — an accepted limit.
+
+**Display and formatting.** The money helper is given the resolved currency
+descriptor rather than a bare code, and prefixes `display_code` (never the opaque
+`code`). A custom currency **always** disambiguates its symbol: a user-chosen
+symbol can't be assumed unique, or assumed not to collide with `$`.
+
+**Agent / API surface.** Writes are unchanged — assistant writes are already
+settlement-currency-only, so no write path accepts a custom code and
+`GET /currencies` / `list_currencies` stay the global seeded table. **Reads** must
+resolve `display_code` instead of emitting the opaque `code`, and `display_code` /
+`name` / `symbol` are **member-authored text** — wrapped wherever they reach an
+agent (ADR-0003, ADR-0004).
 
 ### 7.6 Multi-currency & manual FX
 
@@ -751,7 +812,8 @@ user may still record the actual transfer in another currency with its own rate
 **Edge cases.** Rate `> 0` required for foreign transactions; a 0 or missing rate
 is invalid (§7.4). Re-editing a transaction can change the rate; the settlement
 amounts re-resolve. Changing the transaction currency to match the settlement
-currency clears the rate to 1.
+currency clears the rate to 1. A **custom entry currency** (§7.5.2) is always
+foreign, so it always requires a rate and never reaches the rate-1 seam.
 
 ### 7.7 Captures — record-later placeholders
 
@@ -876,6 +938,12 @@ invites          (id, group_id, token,                   -- member-agnostic link
                   -- expiry; invitee picks link-existing vs create-new at accept (§6.2)
 
 categories       (id, name, icon, applies_to)         -- spending|transfer (seeded, fixed)
+currencies       (code PK, name, exponent, symbol,   -- 29 seeded rows (§7.5.1) +
+                  display_code, group_id?,            -- group-defined custom rows (§7.5.2);
+                  created_by?, created_at?)           -- group_id NULL = seeded, code ==
+                  -- display_code; custom rows get an OPAQUE unique code so the
+                  -- transactions.currency FK is unchanged. UNIQUE (group_id, display_code).
+                  -- exponent + display_code freeze once referenced (ADR-0014)
 
 transactions     (id, group_id, type, title, category_id,
                   amount_total,          -- minor units of THIS txn's currency
@@ -925,7 +993,9 @@ Notes:
 - `created_by` references better-auth `user.id`.
 - `transactions.currency` is the entry currency (defaults to
   `groups.settlement_currency`); `amount_total` is in that currency's minor units,
-  and `amount_total_settlement` is its conversion at `exchange_rate` (§7.6).
+  and `amount_total_settlement` is its conversion at `exchange_rate` (§7.6). It may
+  reference a group-defined custom currency (§7.5.2);
+  `groups.settlement_currency` may not.
 - `transaction_shares.amount_owed` and `transaction_payers.amount_paid_settlement`
   are always in the **settlement** currency — the only amounts §8 reads.
 - `transaction_shares` always holds the **resolved, aggregated** per-member owed
@@ -1154,6 +1224,13 @@ the change.
   `amount_total_settlement`; cross-exponent pairs (CNY→THB, JPY→USD, USD→KWD);
   rate-vs-settlement-total entry derive each other; rate-1 no-op; balances still
   sum to 0 across mixed-currency transactions.
+- **Custom currencies (§7.5.2):** a custom currency is rejected as a settlement
+  currency and accepted as an entry currency; `display_code` is unique per group
+  but may repeat across groups; `exponent`/`display_code` edits are refused once a
+  transaction references the row and permitted before; a custom-currency
+  transaction still converts to seeded-currency shares that sum to
+  `amount_total_settlement`; the formatter prefixes `display_code` and never the
+  opaque `code`, including when the symbol collides with a seeded one.
 - **Integration:** transaction create/edit with payer/share invariants, incl.
   itemized with charges + discounts (round-trip edit fidelity). **Audit log:**
   each create/edit/delete/restore writes exactly one entry in the same DB
@@ -1379,7 +1456,7 @@ key. **R** = any valid key; **W** = requires `write` scope. `{gid}` = group id,
 
 | Method | Path                                        | Scope | Maps to (`lib/server`)         | Success | Response DTO                                                |
 | ------ | ------------------------------------------- | ----- | ------------------------------ | ------- | ----------------------------------------------------------- |
-| GET    | `/currencies`                               | R     | §7.5.1 table                   | 200     | `Currency[]` `{code,exponent,symbol}`                       |
+| GET    | `/currencies`                               | R     | §7.5.1 table (seeded only)     | 200     | `Currency[]` `{code,exponent,symbol}`                       |
 | GET    | `/groups`                                   | R     | `listGroupsForUser`            | 200     | `Group[]`                                                   |
 | GET    | `/groups/{gid}`                             | R     | `getGroupForUser`              | 200     | `Group`                                                     |
 | GET    | `/groups/{gid}/members`                     | R     | `listMembers`                  | 200     | `Member[]`                                                  |

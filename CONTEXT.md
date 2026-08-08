@@ -53,6 +53,17 @@ can also read). It is the user's own, deliberate choice of exposure, made when t
 key is minted — and for a Connector it is the _only_ thing that decides whether an
 agent can move money in the ledger. A Read key that attempts a write is refused.
 
+## Custom currency
+
+A unit of account **a group defined itself**, because the seeded list doesn't have
+it — an unlisted national currency, or something that was never money ("beers").
+It is an **entry currency only**: a transaction can be recorded in one, but a
+group can never _settle_ in one, so no balance is ever displayed in a custom
+currency (ADR-0014). It belongs to the one group that defined it, and its
+user-visible code, name and symbol are Member-authored text.
+
+_Avoid_: custom unit, user currency, fake currency, virtual currency.
+
 ## Member-authored text
 
 Free text in a group written by **someone other than the person reading it** —
