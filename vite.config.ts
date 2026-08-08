@@ -35,15 +35,7 @@ export default defineConfig({
 			// no-Origin case, so we disable the blunt global check and re-add a
 			// targeted one that exempts the better-auth subtree (which does its own
 			// Origin validation) while still protecting the app's own form actions.
-			//
-			// NOTE: `checkOrigin` is deprecated by SvelteKit in favour of
-			// `csrf.trustedOrigins` (expect a build-time deprecation warning). We use
-			// it deliberately because `trustedOrigins` is an Origin ALLOWLIST and
-			// cannot permit the connector's no-Origin token POST; our own `csrfGuard`
-			// is the real protection. If a future Kit upgrade removes `checkOrigin`,
-			// the token endpoint would 403 again — the guard must move earlier or the
-			// check be disabled another way.
-			csrf: { checkOrigin: false }
+			csrf: { trustedOrigins: ['*'] }
 		}),
 		// Installable PWA (PLAN §11). Strategy = `generateSW` (Workbox); see
 		// `src/lib/pwa/workbox.ts` for why and how §11.1 (never cache authed
