@@ -21,9 +21,9 @@
 </svelte:head>
 
 <div class="flex flex-col items-center gap-4 py-12 text-center">
-	<WifiOffIcon class="text-muted-foreground size-10" aria-hidden="true" />
+	<WifiOffIcon class="size-10 text-muted-foreground" aria-hidden="true" />
 	<h1 class="text-2xl font-semibold tracking-tight">You're offline</h1>
-	<p class="text-muted-foreground max-w-sm text-sm">
+	<p class="max-w-sm text-sm text-muted-foreground">
 		Pay with me needs a connection to load and save your groups. Anything already loaded stays
 		readable, but creating or editing isn't available while offline.
 	</p>

@@ -58,7 +58,7 @@
 	<div
 		role="status"
 		aria-live="polite"
-		class="bg-muted text-foreground flex items-center gap-3 border-b px-4 py-2 text-sm"
+		class="flex items-center gap-3 border-b bg-muted px-4 py-2 text-sm text-foreground"
 		data-testid="update-prompt"
 	>
 		<RefreshCwIcon class="size-5 shrink-0" aria-hidden="true" />

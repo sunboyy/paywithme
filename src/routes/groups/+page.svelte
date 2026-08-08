@@ -44,19 +44,19 @@
 					     only earns its place when there is no figure to show. -->
 					<a
 						href={resolve('/groups/[id]', { id: group.id })}
-						class="focus-visible:ring-ring block rounded-xl focus-visible:ring-2 focus-visible:outline-none"
+						class="block rounded-xl focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
 					>
-						<Card.Root class="hover:bg-accent/50 gap-0 py-4 transition-colors">
+						<Card.Root class="gap-0 py-4 transition-colors hover:bg-accent/50">
 							<Card.Header class="px-4">
 								<Card.Title class="text-base wrap-break-word">{group.name}</Card.Title>
 								<Card.Action>
 									{#if group.net === null}
 										<Badge variant="secondary">{currencyLabel(group.settlementCurrency)}</Badge>
 									{:else if group.net === 0}
-										<span class="text-muted-foreground text-sm">settled up</span>
+										<span class="text-sm text-muted-foreground">settled up</span>
 									{:else}
 										<span class="text-right">
-											<span class="text-muted-foreground block text-xs">
+											<span class="block text-xs text-muted-foreground">
 												{group.net > 0 ? 'you are owed' : 'you owe'}
 											</span>
 											<span

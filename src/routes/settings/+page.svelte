@@ -91,7 +91,7 @@
 <div class="space-y-6">
 	<div class="space-y-1">
 		<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-		<p class="text-muted-foreground text-sm">Manage how you sign in to Pay with me.</p>
+		<p class="text-sm text-muted-foreground">Manage how you sign in to Pay with me.</p>
 	</div>
 
 	<Card.Root>
@@ -107,7 +107,7 @@
 			<!-- Action status (delete success/error), shared across the row forms. -->
 			{#if $deleteMessage}
 				<p
-					class={$deleteMessage.type === 'error' ? 'text-destructive text-sm' : 'text-sm'}
+					class={$deleteMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
 					role={$deleteMessage.type === 'error' ? 'alert' : 'status'}
 				>
 					{$deleteMessage.text}
@@ -116,7 +116,7 @@
 
 			<!-- Client enrolment error. -->
 			{#if enrolError}
-				<p class="text-destructive text-sm" role="alert">{enrolError}</p>
+				<p class="text-sm text-destructive" role="alert">{enrolError}</p>
 			{/if}
 
 			{#if data.passkeys.length === 0}
@@ -125,17 +125,17 @@
 				     below the Separator), so it's an inline centred nudge rather than a
 				     nested EmptyState card — same look, real text, decorative icon. -->
 				<div
-					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
 					data-testid="passkeys-empty"
 				>
 					<span
-						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						class="flex size-12 items-center justify-center rounded-full bg-muted"
 						aria-hidden="true"
 					>
 						<KeyRoundIcon class="size-6" />
 					</span>
 					<div class="space-y-1">
-						<p class="text-foreground text-base font-medium">No passkeys yet</p>
+						<p class="text-base font-medium text-foreground">No passkeys yet</p>
 						<p class="mx-auto max-w-prose text-sm text-pretty">
 							Add a passkey to sign in faster next time — with Face ID, a fingerprint, or your
 							screen lock instead of an email link.
@@ -143,14 +143,14 @@
 					</div>
 				</div>
 			{:else}
-				<ul class="divide-border divide-y" aria-label="Your passkeys">
+				<ul class="divide-y divide-border" aria-label="Your passkeys">
 					{#each data.passkeys as passkey (passkey.id)}
 						<li class="flex items-center justify-between gap-3 py-3">
 							<div class="min-w-0 space-y-0.5">
 								<p class="truncate font-medium">
 									{passkey.name ?? passkey.deviceHint ?? 'Passkey'}
 								</p>
-								<p class="text-muted-foreground text-xs">
+								<p class="text-xs text-muted-foreground">
 									{#if passkey.name && passkey.deviceHint}{passkey.deviceHint} ·
 									{/if}Added {formatCreated(passkey.createdAt)}
 								</p>
@@ -199,7 +199,7 @@
 			<!-- Revoke success/error, shared across the per-row forms. -->
 			{#if $revokeMessage}
 				<p
-					class={$revokeMessage.type === 'error' ? 'text-destructive text-sm' : 'text-sm'}
+					class={$revokeMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
 					role={$revokeMessage.type === 'error' ? 'alert' : 'status'}
 				>
 					{$revokeMessage.text}
@@ -224,7 +224,7 @@
 			{:else}
 				<!-- Mobile: every field stays visible (PLAN §16.8 "no collapsing") — the
 				     row simply stacks instead of hiding anything. -->
-				<ul class="divide-border divide-y" aria-label="Your API keys">
+				<ul class="divide-y divide-border" aria-label="Your API keys">
 					{#each data.apiKeys as apiKey (apiKey.id)}
 						<li
 							class="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
@@ -243,11 +243,11 @@
 								{#if apiKey.start}
 									<!-- The `start` prefix is safe to show (PLAN §16.1) — it's how you
 									     tell two keys apart without ever revealing a secret. -->
-									<p class="text-muted-foreground font-mono text-xs break-all">
+									<p class="font-mono text-xs break-all text-muted-foreground">
 										{apiKey.start}…
 									</p>
 								{/if}
-								<p class="text-muted-foreground text-xs">
+								<p class="text-xs text-muted-foreground">
 									Created {formatCreated(apiKey.createdAt)} · {formatLastUsed(apiKey.lastRequest)} ·
 									{formatExpiry(apiKey.expiresAt, apiKey.expired)}
 								</p>

@@ -145,7 +145,7 @@
 
 	{#if statusMessage}
 		<p
-			class={statusMessage.type === 'error' ? 'text-destructive text-sm' : 'text-sm'}
+			class={statusMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
 			role={statusMessage.type === 'error' ? 'alert' : 'status'}
 		>
 			{statusMessage.text}
@@ -166,17 +166,17 @@
 				<!-- Nothing-yet nudge (task 8.1): inline centred (the add-member form is
 				     the CTA just below the Separator), so it's not a nested card. -->
 				<div
-					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
 					data-testid="members-empty"
 				>
 					<span
-						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						class="flex size-12 items-center justify-center rounded-full bg-muted"
 						aria-hidden="true"
 					>
 						<UsersIcon class="size-6" />
 					</span>
 					<div class="space-y-1">
-						<p class="text-foreground text-base font-medium">No members yet</p>
+						<p class="text-base font-medium text-foreground">No members yet</p>
 						<p class="mx-auto max-w-prose text-sm text-pretty">
 							Add a participant for anyone splitting costs — they don't need an account. Start with
 							the form below.
@@ -195,17 +195,17 @@
 				     `<details>` rather than a JS popover on purpose: the whole page is
 				     progressively enhanced, and this keeps rename/remove reachable with
 				     JS disabled (the forms inside are unchanged real form actions). -->
-				<ul class="divide-border divide-y" aria-label="Group members">
+				<ul class="divide-y divide-border" aria-label="Group members">
 					{#each data.members as member (member.id)}
 						{@const isYou = member.isLinked && member.userId === data.viewerUserId}
 						{@const isInactive = member.deactivatedAt != null}
 						<li class="py-1">
 							<details class="group/member">
 								<summary
-									class="hover:bg-accent/50 focus-visible:ring-ring flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-md px-1 py-2 focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+									class="flex min-h-11 cursor-pointer list-none items-center gap-3 rounded-md px-1 py-2 hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
 								>
 									<span
-										class="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-medium"
+										class="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground"
 										aria-hidden="true"
 									>
 										{member.displayName.trim().charAt(0).toUpperCase()}
@@ -228,7 +228,7 @@
 									     this row's controls belong to. -->
 									<span class="sr-only">Manage {member.displayName}</span>
 									<ChevronDownIcon
-										class="text-muted-foreground size-4 shrink-0 transition-transform group-open/member:rotate-180"
+										class="size-4 shrink-0 text-muted-foreground transition-transform group-open/member:rotate-180"
 										aria-hidden="true"
 									/>
 								</summary>
@@ -350,17 +350,17 @@
 				<!-- Nothing-yet nudge (task 8.1): inline centred (the create-invite form
 				     is the CTA just below the Separator), so it's not a nested card. -->
 				<div
-					class="text-muted-foreground flex flex-col items-center gap-3 py-6 text-center"
+					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
 					data-testid="invites-empty"
 				>
 					<span
-						class="bg-muted flex size-12 items-center justify-center rounded-full"
+						class="flex size-12 items-center justify-center rounded-full bg-muted"
 						aria-hidden="true"
 					>
 						<LinkIcon class="size-6" />
 					</span>
 					<div class="space-y-1">
-						<p class="text-foreground text-base font-medium">No active invite links</p>
+						<p class="text-base font-medium text-foreground">No active invite links</p>
 						<p class="mx-auto max-w-prose text-sm text-pretty">
 							Create a link to share so people can join this group. Links are reusable and expire
 							after 7 days.
@@ -368,19 +368,19 @@
 					</div>
 				</div>
 			{:else}
-				<ul class="divide-border divide-y" aria-label="Active invite links">
+				<ul class="divide-y divide-border" aria-label="Active invite links">
 					{#each data.invites as invite (invite.id)}
 						{@const expiry = expiryLabel(invite.expiresAt)}
 						<li class="space-y-2 py-3">
 							<div class="flex flex-wrap items-center gap-2">
-								<span class="text-muted-foreground text-xs" title={expiry.absolute}>
+								<span class="text-xs text-muted-foreground" title={expiry.absolute}>
 									Expires {expiry.relative}
 								</span>
 							</div>
 
 							<!-- The absolute URL as selectable text: the no-JS copy fallback. -->
 							<code
-								class="bg-muted block w-full overflow-x-auto rounded px-2 py-1 text-xs break-all select-all"
+								class="block w-full overflow-x-auto rounded bg-muted px-2 py-1 text-xs break-all select-all"
 							>
 								{inviteUrl(invite.token)}
 							</code>

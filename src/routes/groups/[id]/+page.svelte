@@ -67,7 +67,7 @@
 				<Card.Root class="gap-0 py-5">
 					<Card.Content class="flex items-center justify-between gap-4 px-5">
 						<div class="min-w-0">
-							<p class="text-muted-foreground text-sm">
+							<p class="text-sm text-muted-foreground">
 								{settled ? "You're all square" : owed ? 'You are owed' : 'You owe'}
 							</p>
 							{#if !settled}
@@ -79,14 +79,14 @@
 									{data.summary.amountFormatted}
 								</p>
 								{#if data.summary.counterparties > 0}
-									<p class="text-muted-foreground text-xs">
+									<p class="text-xs text-muted-foreground">
 										{owed ? 'from' : 'to'}
 										{data.summary.counterparties}
 										{data.summary.counterparties === 1 ? 'person' : 'people'}
 									</p>
 								{/if}
 							{:else}
-								<p class="text-muted-foreground text-sm">Nothing to settle right now.</p>
+								<p class="text-sm text-muted-foreground">Nothing to settle right now.</p>
 							{/if}
 						</div>
 						{#if !settled}
@@ -116,7 +116,7 @@
 					<Card.Action>
 						<a
 							href={resolve('/groups/[id]/settle', { id: data.group.id })}
-							class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+							class="text-sm text-muted-foreground hover:text-foreground hover:underline"
 						>
 							Settle up →
 						</a>
@@ -124,9 +124,9 @@
 				</Card.Header>
 				<Card.Content>
 					{#if data.balances.length === 0}
-						<p class="text-muted-foreground text-sm">No members yet.</p>
+						<p class="text-sm text-muted-foreground">No members yet.</p>
 					{:else}
-						<ul class="divide-border divide-y" aria-label="Member balances">
+						<ul class="divide-y divide-border" aria-label="Member balances">
 							{#each data.balances as row (row.memberId)}
 								<li class="flex items-center justify-between gap-2 py-2">
 									<span class="flex items-center gap-2">
@@ -174,7 +174,7 @@
 					<Card.Action>
 						<a
 							href={resolve('/groups/[id]/transactions', { id: data.group.id })}
-							class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+							class="text-sm text-muted-foreground hover:text-foreground hover:underline"
 						>
 							See all →
 						</a>
@@ -205,10 +205,10 @@
 											id: data.group.id,
 											txid: txn.id
 										})}
-										class="bg-card hover:bg-accent flex items-center gap-3 rounded-lg p-2 transition-colors"
+										class="flex items-center gap-3 rounded-lg bg-card p-2 transition-colors hover:bg-accent"
 									>
 										<span
-											class="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full"
+											class="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
 											aria-hidden="true"
 										>
 											<CategoryIcon name={txn.categoryIcon} class="size-4" />
@@ -228,7 +228,7 @@
 									     label. A fine-grained relative time reads as nonsense here ("in 17
 									     minutes") for anything dated today. The audit rows below use
 									     `occurred_at`, which IS a true timestamp, and keep relativeTime. -->
-											<span class="text-muted-foreground block text-xs">
+											<span class="block text-xs text-muted-foreground">
 												{dayLabel(txn.createdAt)}
 											</span>
 										</span>
@@ -239,7 +239,7 @@
 												{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
 											</span>
 											{#if txn.isForeign}
-												<span class="text-muted-foreground block text-xs tabular-nums">
+												<span class="block text-xs text-muted-foreground tabular-nums">
 													{formatAmount(txn.amountTotalSettlement, settlementCurrency, {
 														code: false
 													})}
@@ -261,7 +261,7 @@
 					<Card.Action>
 						<a
 							href={resolve('/groups/[id]/activity', { id: data.group.id })}
-							class="text-muted-foreground hover:text-foreground text-sm hover:underline"
+							class="text-sm text-muted-foreground hover:text-foreground hover:underline"
 						>
 							See all →
 						</a>
@@ -282,11 +282,11 @@
 						     what happened, so the actor + relative time ride above it and the
 						     entity-type badge is dropped (it read "Transaction" on every row).
 						     The full feed at /activity keeps the verbose form. -->
-						<ul class="divide-border divide-y" aria-label="Recent activity">
+						<ul class="divide-y divide-border" aria-label="Recent activity">
 							{#each data.recentActivity as entry (entry.id)}
 								<li class="flex flex-col gap-0.5 py-2">
 									<p class="text-sm">{entry.summary}</p>
-									<p class="text-muted-foreground text-xs">
+									<p class="text-xs text-muted-foreground">
 										<span class="font-medium">{entry.actorName}</span>
 										{actionLabel(entry.action)} ·
 										<time datetime={entry.occurredAt} title={absoluteTime(entry.occurredAt)}>

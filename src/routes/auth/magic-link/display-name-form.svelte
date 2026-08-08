@@ -38,7 +38,7 @@
 
 	<Card.Content>
 		{#if $message?.type === 'error'}
-			<p class="text-destructive mb-4 text-sm" role="alert">{$message.text}</p>
+			<p class="mb-4 text-sm text-destructive" role="alert">{$message.text}</p>
 		{/if}
 
 		<form method="POST" use:enhance class="space-y-4">

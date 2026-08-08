@@ -29,7 +29,7 @@
 </script>
 
 {#if $message}
-	<p class="text-destructive text-sm" role="alert">{$message.text}</p>
+	<p class="text-sm text-destructive" role="alert">{$message.text}</p>
 {/if}
 
 <!-- Real form action — works without JS; `enhance` upgrades it. -->
@@ -42,7 +42,7 @@
 			<input type="radio" name="mode" value="new" bind:group={$formData.mode} class="mt-1" />
 			<span class="text-sm">
 				Join as a new member
-				<span class="text-muted-foreground block text-xs">(as {userName})</span>
+				<span class="block text-xs text-muted-foreground">(as {userName})</span>
 			</span>
 		</label>
 
@@ -59,7 +59,7 @@
 					id="member-select"
 					name="memberId"
 					bind:value={$formData.memberId}
-					class="border-input bg-background mt-1 block w-full rounded-md border px-3 py-2 text-sm"
+					class="mt-1 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
 				>
 					<option value="" disabled selected>Select a member…</option>
 					{#each claimableMembers as member (member.id)}

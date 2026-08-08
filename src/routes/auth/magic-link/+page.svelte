@@ -18,14 +18,14 @@
 			<Card.Title role="heading" aria-level={1} class="text-2xl">Sign-in link problem</Card.Title>
 		</Card.Header>
 		<Card.Content>
-			<p class="text-destructive text-sm" role="alert">{data.error}</p>
+			<p class="text-sm text-destructive" role="alert">{data.error}</p>
 		</Card.Content>
 		<Card.Footer>
-			<p class="text-muted-foreground text-sm">
+			<p class="text-sm text-muted-foreground">
 				<!-- `/register` is the resolvable retry route; `/login` arrives in task 2.7. -->
 				<a
 					href={resolve('/register')}
-					class="text-foreground font-medium underline underline-offset-4"
+					class="font-medium text-foreground underline underline-offset-4"
 				>
 					Request a new sign-in link
 				</a>

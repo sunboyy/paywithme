@@ -12,10 +12,12 @@ const USER = { id: 'user_1', name: 'Ann' };
 
 function makeEvent(user: typeof USER | null = USER) {
 	const cookies = { get: vi.fn(), set: vi.fn(), delete: vi.fn() };
-	return { locals: { user }, cookies } as unknown as Parameters<typeof load>[0];
+	const setHeaders = vi.fn();
+	return { locals: { user }, cookies, setHeaders } as unknown as Parameters<typeof load>[0];
 }
 
 const reveal = {
+	userId: USER.id,
 	id: 'key_1',
 	name: 'My agent',
 	scope: 'write' as const,
@@ -31,8 +33,9 @@ beforeEach(() => {
 describe('/settings/api-keys/created load', () => {
 	it('renders the secret ONCE, alongside a server-computed masked form', async () => {
 		takeApiKeyReveal.mockReturnValue(reveal);
+		const event = makeEvent();
 
-		const data = (await load(makeEvent())) as {
+		const data = (await load(event)) as {
 			key: string;
 			masked: string;
 			scope: string;
@@ -42,6 +45,11 @@ describe('/settings/api-keys/created load', () => {
 		expect(data.key).toBe(reveal.key);
 		expect(data.scope).toBe('write');
 		expect(data.name).toBe('My agent');
+		expect(takeApiKeyReveal).toHaveBeenCalledWith(expect.anything(), USER.id);
+		expect(event.setHeaders).toHaveBeenCalledWith({
+			'cache-control': 'no-store, max-age=0',
+			pragma: 'no-cache'
+		});
 		// The masked value is what a no-JS visitor sees by default — it must be a
 		// real mask, not the secret with a different name.
 		expect(data.masked).not.toBe(reveal.key);

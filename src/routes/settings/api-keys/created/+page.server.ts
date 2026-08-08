@@ -15,18 +15,26 @@ import { takeApiKeyReveal } from '$lib/server/api-key-reveal';
 import { maskApiKeySecret } from '$lib/server/api-keys';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals, cookies }) => {
+export const load: PageServerLoad = async ({ locals, cookies, setHeaders }) => {
 	// `redirect()` throws — keep both redirects out of any try/catch.
 	if (!locals.user) {
 		redirect(303, '/login');
 	}
 
-	const reveal = takeApiKeyReveal(cookies);
+	const reveal = takeApiKeyReveal(cookies, locals.user.id);
 	if (!reveal) {
 		// No key in flight: a refresh, a bookmark, or an expired flash. Nothing to
 		// show — and by design nothing CAN be shown again.
 		redirect(303, '/settings');
 	}
+
+	// The response contains a plaintext credential. Do not let browsers, shared
+	// proxies, or platform caches retain it; "shown once" must also hold when the
+	// user navigates back or another person later uses the same browser profile.
+	setHeaders({
+		'cache-control': 'no-store, max-age=0',
+		pragma: 'no-cache'
+	});
 
 	return {
 		key: reveal.key,

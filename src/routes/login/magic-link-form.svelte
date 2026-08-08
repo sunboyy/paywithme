@@ -33,17 +33,17 @@
 	<!-- Success confirmation (same UX whether or not the account existed — §12). -->
 	<div class="space-y-3" role="status" aria-live="polite">
 		<p class="font-medium">Check your email for a sign-in link</p>
-		<p class="text-muted-foreground text-sm">
+		<p class="text-sm text-muted-foreground">
 			We sent a single-use sign-in link to <strong class="break-all">{$message?.text}</strong>. Open
 			it on this device to finish signing in. The link expires soon.
 		</p>
-		<p class="text-muted-foreground text-xs">
+		<p class="text-xs text-muted-foreground">
 			In local development, the link is logged to the server console instead of being emailed.
 		</p>
 	</div>
 {:else}
 	{#if $message?.type === 'error'}
-		<p class="text-destructive mb-4 text-sm" role="alert">{$message.text}</p>
+		<p class="mb-4 text-sm text-destructive" role="alert">{$message.text}</p>
 	{/if}
 
 	<form method="POST" use:enhance class="space-y-4">

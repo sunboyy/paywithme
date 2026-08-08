@@ -73,7 +73,7 @@
 		<!-- Primary: passkey (PLAN §5.5). On success we resume the OAuth authorization. -->
 		<div class="space-y-3">
 			{#if passkeyError}
-				<p class="text-destructive text-sm" role="alert">{passkeyError}</p>
+				<p class="text-sm text-destructive" role="alert">{passkeyError}</p>
 			{/if}
 			<Button type="button" class="w-full" disabled={signingIn} onclick={signInWithPasskey}>
 				{signingIn ? 'Signing in…' : 'Sign in with a passkey'}
@@ -82,9 +82,9 @@
 
 		<!-- Divider. -->
 		<div class="flex items-center gap-3" aria-hidden="true">
-			<span class="bg-border h-px flex-1"></span>
-			<span class="text-muted-foreground text-xs uppercase">or</span>
-			<span class="bg-border h-px flex-1"></span>
+			<span class="h-px flex-1 bg-border"></span>
+			<span class="text-xs text-muted-foreground uppercase">or</span>
+			<span class="h-px flex-1 bg-border"></span>
 		</div>
 
 		<!-- Fallback: email magic link. `oauthResume` rides the hidden `redirectTo` so

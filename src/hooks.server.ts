@@ -106,6 +106,25 @@ const csrfGuard: Handle = async ({ event, resolve }) => {
 };
 
 /**
+ * Browser hardening headers applied to every response, including redirects and
+ * errors produced by downstream hooks. These do not rely on application code
+ * being perfect: framing is denied to prevent clickjacking, MIME sniffing is
+ * disabled, referrer data is minimized cross-origin, and unused powerful browser
+ * features are switched off.
+ */
+const securityHeaders: Handle = async ({ event, resolve }) => {
+	const response = await resolve(event);
+	response.headers.set('X-Content-Type-Options', 'nosniff');
+	response.headers.set('X-Frame-Options', 'DENY');
+	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+	response.headers.set(
+		'Permissions-Policy',
+		'camera=(), geolocation=(), microphone=(), payment=(), usb=()'
+	);
+	return response;
+};
+
+/**
  * The single generic 401 envelope for the `/api/v1` auth gate (PLAN §16.5).
  *
  * EVERY authentication failure — missing header, malformed header, and ALL
@@ -224,11 +243,10 @@ const apiV1Guard: Handle = async ({ event, resolve }) => {
 	return resolve(event);
 };
 
-// Composition seam (PLAN §16.3): the same-origin CSRF guard runs FIRST (it can
-// reject before any session/DB work), then cookie session resolution, then the
-// `/api/v1` auth gate. `sequence` runs them in order — each hook's `resolve` is
-// the next — so a non-api, same-origin request is byte-for-byte unaffected.
-export const handle: Handle = sequence(csrfGuard, resolveSession, apiV1Guard);
+// Composition seam (PLAN §16.3): the response-header wrapper runs outermost so
+// it also hardens errors/redirects, then the same-origin CSRF guard can reject
+// before any session/DB work, followed by cookie resolution and the API auth gate.
+export const handle: Handle = sequence(securityHeaders, csrfGuard, resolveSession, apiV1Guard);
 
 /**
  * Uncaught-error normalizer (PLAN §16.3, §16.5).
@@ -266,4 +284,4 @@ export const handleError: HandleServerError = ({ error, event, message }) => {
 // Exported for focused unit coverage of the guard in isolation. `extractBearerKey`
 // now lives in `$lib/server/api/verify` (shared with the `/mcp` Connector) and is
 // re-exported here so the hook's public surface is unchanged.
-export { csrfGuard, resolveSession, apiV1Guard, extractBearerKey };
+export { securityHeaders, csrfGuard, resolveSession, apiV1Guard, extractBearerKey };

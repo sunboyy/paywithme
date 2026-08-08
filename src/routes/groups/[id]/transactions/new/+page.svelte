@@ -57,7 +57,7 @@
 		</Card.Header>
 		<Card.Content>
 			{#if data.members.length === 0}
-				<p class="text-muted-foreground text-sm">
+				<p class="text-sm text-muted-foreground">
 					Add members to this group before recording a transaction.
 				</p>
 			{:else}

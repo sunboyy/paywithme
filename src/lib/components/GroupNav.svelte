@@ -17,12 +17,7 @@
 	import SettingsIcon from '@lucide/svelte/icons/settings';
 
 	export type GroupSection =
-		| 'overview'
-		| 'transactions'
-		| 'settle'
-		| 'members'
-		| 'activity'
-		| 'settings';
+		'overview' | 'transactions' | 'settle' | 'members' | 'activity' | 'settings';
 
 	let { groupId, current }: { groupId: string; current: GroupSection } = $props();
 
@@ -77,7 +72,7 @@
 -->
 <div class="relative border-b">
 	<div
-		class="from-background pointer-events-none absolute inset-y-0 right-0 w-8 bg-linear-to-l to-transparent sm:hidden"
+		class="pointer-events-none absolute inset-y-0 right-0 w-8 bg-linear-to-l from-background to-transparent sm:hidden"
 		aria-hidden="true"
 	></div>
 	<nav aria-label="Group sections" class="snap-x snap-mandatory overflow-x-auto">

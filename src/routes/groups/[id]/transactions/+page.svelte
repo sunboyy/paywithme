@@ -185,7 +185,7 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<!-- Name then bare verbs, rather than a sentence — "Ada · Paid" reads the
 			     same whoever is selected, so the copy needs no pronoun. -->
-			<span class="text-muted-foreground text-xs">
+			<span class="text-xs text-muted-foreground">
 				{selectedMember.isSelf ? 'Me' : selectedMember.displayName}
 			</span>
 			<div class="flex gap-1">
@@ -240,7 +240,7 @@
 		{#each dayGroups as group (group.key)}
 			<section class="space-y-2">
 				<h2
-					class="bg-background/95 supports-backdrop-filter:bg-background/80 text-muted-foreground sticky top-14 z-5 py-1.5 text-xs font-medium tracking-wide uppercase backdrop-blur"
+					class="sticky top-14 z-5 bg-background/95 py-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase backdrop-blur supports-backdrop-filter:bg-background/80"
 				>
 					{group.label}
 				</h2>
@@ -253,10 +253,10 @@
 									id: data.group.id,
 									txid: txn.id
 								})}
-								class="bg-card hover:bg-accent flex items-center gap-3 rounded-lg border p-3 transition-colors"
+								class="flex items-center gap-3 rounded-lg border bg-card p-3 transition-colors hover:bg-accent"
 							>
 								<span
-									class="bg-muted text-muted-foreground flex size-10 shrink-0 items-center justify-center rounded-full"
+									class="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
 									aria-hidden="true"
 								>
 									<CategoryIcon name={txn.categoryIcon} class="size-5" />
@@ -271,7 +271,7 @@
 											<Badge variant="secondary" class="shrink-0">transfer</Badge>
 										{/if}
 									</span>
-									<span class="text-muted-foreground block text-xs">
+									<span class="block text-xs text-muted-foreground">
 										{txn.categoryName}
 									</span>
 								</span>
@@ -284,7 +284,7 @@
 										{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
 									</span>
 									{#if txn.isForeign}
-										<span class="text-muted-foreground block text-xs tabular-nums">
+										<span class="block text-xs text-muted-foreground tabular-nums">
 											{formatAmount(txn.amountTotalSettlement, settlementCurrency, {
 												code: false
 											})}

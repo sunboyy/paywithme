@@ -18,7 +18,7 @@
 	<div
 		role="status"
 		aria-live="polite"
-		class="bg-muted text-muted-foreground flex items-center justify-center gap-2 border-b px-4 py-2 text-sm"
+		class="flex items-center justify-center gap-2 border-b bg-muted px-4 py-2 text-sm text-muted-foreground"
 		data-testid="offline-notice"
 	>
 		<WifiOffIcon class="size-4 shrink-0" aria-hidden="true" />

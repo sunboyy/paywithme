@@ -62,6 +62,7 @@ export const actions: Actions = {
 		// redirect (rather than rendering here) is what keeps the secret out of a
 		// re-POSTable page and gives the no-JS path a clean GET to land on.
 		setApiKeyReveal(cookies, {
+			userId,
 			id: created.id,
 			name: created.name,
 			scope: created.scope,

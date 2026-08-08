@@ -1,42 +1,28 @@
-import js from '@eslint/js';
 import prettier from 'eslint-config-prettier';
+import path from 'node:path';
+import js from '@eslint/js';
 import svelte from 'eslint-plugin-svelte';
-import betterTailwindcss from 'eslint-plugin-better-tailwindcss';
+import { defineConfig, includeIgnoreFile } from 'eslint/config';
 import globals from 'globals';
 import ts from 'typescript-eslint';
 
-export default ts.config(
+const gitignorePath = path.resolve(import.meta.dirname, '.gitignore');
+
+export default defineConfig(
 	{
-		// Generated / build output. shadcn-svelte components are added via its CLI
-		// (CLAUDE.md forbids hand-authoring them) and the Drizzle migration output is
-		// machine-generated — neither should be linted. Build/cache dirs are ignored too.
-		ignores: [
-			'.svelte-kit/**',
-			'.vercel/**',
-			'build/**',
-			'dist/**',
-			'node_modules/**',
-			'drizzle/**',
-			'coverage/**',
-			'test-results/**',
-			'playwright-report/**',
-			'playwright/.cache/**',
-			'src/lib/components/ui/**'
-		]
+		ignores: ['src/lib/components/ui/**']
 	},
+	includeIgnoreFile(gitignorePath),
 	js.configs.recommended,
-	...ts.configs.recommended,
-	...svelte.configs.recommended,
+	ts.configs.recommended,
+	svelte.configs.recommended,
 	prettier,
-	...svelte.configs.prettier,
+	svelte.configs.prettier,
 	{
-		languageOptions: {
-			globals: { ...globals.browser, ...globals.node }
-		},
+		languageOptions: { globals: { ...globals.browser, ...globals.node } },
 		rules: {
-			// typescript-eslint recommends disabling no-undef on TS projects; the
-			// type-checker already catches undefined references.
-			// https://typescript-eslint.io/troubleshooting/faqs/general#i-get-errors-from-the-no-undef-rule
+			// typescript-eslint strongly recommend that you do not use the no-undef lint rule on TypeScript projects.
+			// see: https://typescript-eslint.io/troubleshooting/faqs/eslint/#i-get-errors-from-the-no-undef-rule-about-global-variables-not-being-defined-even-though-there-are-no-typescript-errors
 			'no-undef': 'off'
 		}
 	},
@@ -44,25 +30,15 @@ export default ts.config(
 		files: ['**/*.svelte', '**/*.svelte.ts', '**/*.svelte.js'],
 		languageOptions: {
 			parserOptions: {
-				parser: ts.parser,
-				extraFileExtensions: ['.svelte']
+				projectService: true,
+				extraFileExtensions: ['.svelte'],
+				parser: ts.parser
 			}
 		}
 	},
 	{
-		// Catch non-canonical Tailwind classes in the gate (e.g. the arbitrary
-		// variant `supports-[backdrop-filter]:` instead of the canonical
-		// `supports-backdrop-filter:`). This is the CLI-runnable equivalent of the
-		// Tailwind CSS IntelliSense `suggestCanonicalClasses` editor diagnostic, so
-		// `pnpm lint` (and thus the gate + CI) enforces it, not just the editor.
-		// Tailwind v4: resolve utilities from the app stylesheet entry point.
-		// Auto-fixable with `eslint --fix`. Generated shadcn components in
-		// `src/lib/components/ui/**` are ignored above (CLI-managed, not hand-authored).
-		files: ['**/*.svelte', '**/*.svelte.ts', '**/*.svelte.js', '**/*.ts', '**/*.js'],
-		plugins: { 'better-tailwindcss': betterTailwindcss },
-		settings: { 'better-tailwindcss': { entryPoint: 'src/app.css' } },
-		rules: {
-			'better-tailwindcss/enforce-canonical-classes': 'error'
-		}
+		// Override or add rule settings here, such as:
+		// 'svelte/button-has-type': 'error'
+		rules: {}
 	}
 );

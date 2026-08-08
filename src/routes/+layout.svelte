@@ -66,13 +66,13 @@
      at all, not even the OS setting. Mounting it here activates both. -->
 <ModeWatcher />
 
-<div class="bg-background text-foreground flex min-h-dvh flex-col">
+<div class="flex min-h-dvh flex-col bg-background text-foreground">
 	<!-- Skip-to-content link (a11y, task 8.3): the first focusable element, visually
 	     hidden until focused, so keyboard / screen-reader users can jump past the
 	     header chrome straight to the page's <main> region. -->
 	<a
 		href="#main-content"
-		class="bg-background text-foreground focus:ring-ring sr-only z-50 rounded-md px-3 py-2 text-sm font-medium focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:ring-2 focus:outline-none"
+		class="sr-only z-50 rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:ring-2 focus:ring-ring focus:outline-none"
 	>
 		Skip to content
 	</a>
@@ -87,7 +87,7 @@
 	     because a smaller inner max-width does apply. -->
 	<div class="mx-auto flex w-full max-w-4xl flex-1 flex-col">
 		<header
-			class="bg-background/95 supports-backdrop-filter:bg-background/80 sticky top-0 z-10 border-b backdrop-blur"
+			class="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-backdrop-filter:bg-background/80"
 			style="padding-top: env(safe-area-inset-top);"
 		>
 			<div class="flex h-14 items-center justify-between px-4">
@@ -113,7 +113,7 @@
 					{#if data.user}
 						<a
 							href={resolve('/settings')}
-							class="text-muted-foreground max-w-[40vw] truncate text-sm hover:underline"
+							class="max-w-[40vw] truncate text-sm text-muted-foreground hover:underline"
 							title="Account settings"
 						>
 							{data.user.name || data.user.email}
@@ -122,7 +122,7 @@
 							<Button type="submit" variant="ghost" size="sm">Log out</Button>
 						</form>
 					{:else}
-						<a href={resolve('/login')} class="text-muted-foreground text-sm hover:underline">
+						<a href={resolve('/login')} class="text-sm text-muted-foreground hover:underline">
 							Sign in
 						</a>
 					{/if}

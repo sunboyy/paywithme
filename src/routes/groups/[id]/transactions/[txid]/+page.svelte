@@ -113,8 +113,8 @@
 		<Card.Root class="border-destructive/40">
 			<Card.Content class="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
 				<div>
-					<p class="text-destructive text-sm font-medium">This transaction was deleted.</p>
-					<p class="text-muted-foreground text-xs">
+					<p class="text-sm font-medium text-destructive">This transaction was deleted.</p>
+					<p class="text-xs text-muted-foreground">
 						Deleted {formatDate(detail.deletedAt!)}. Restore it to edit again.
 					</p>
 				</div>
@@ -162,7 +162,7 @@
 			<Card.Header>
 				<div class="flex items-start gap-3">
 					<span
-						class="bg-muted text-muted-foreground flex size-11 shrink-0 items-center justify-center rounded-full"
+						class="flex size-11 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
 						aria-hidden="true"
 					>
 						<CategoryIcon name={detail.categoryIcon} class="size-5" />
@@ -187,7 +187,7 @@
 						{entry(detail.amountTotal)}
 					</p>
 					{#if detail.isForeign}
-						<p class="text-muted-foreground text-sm tabular-nums">
+						<p class="text-sm text-muted-foreground tabular-nums">
 							{settlement(detail.amountTotalSettlement)} · rate via {detail.currency}
 							→ {settlementCurrency}
 						</p>
@@ -198,7 +198,7 @@
 
 				<!-- Payers (entry currency). -->
 				<div class="space-y-1">
-					<p class="text-muted-foreground text-xs font-medium uppercase">Paid by</p>
+					<p class="text-xs font-medium text-muted-foreground uppercase">Paid by</p>
 					<ul class="space-y-1">
 						{#each detail.payers as payer (payer.memberId)}
 							<li class="flex items-center justify-between text-sm">
@@ -213,7 +213,7 @@
 					<Separator />
 					<!-- Itemized breakdown (§7.2.1): each item + its per-member owed (txn currency). -->
 					<div class="space-y-2">
-						<p class="text-muted-foreground text-xs font-medium uppercase">Items</p>
+						<p class="text-xs font-medium text-muted-foreground uppercase">Items</p>
 						<ul class="space-y-2">
 							{#each detail.items as item, i (i)}
 								<li class="rounded-md border p-2">
@@ -221,7 +221,7 @@
 										<span>{item.label}</span>
 										<span class="tabular-nums">{entry(item.amount)}</span>
 									</div>
-									<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
+									<ul class="mt-1 space-y-0.5 text-xs text-muted-foreground">
 										{#each item.shares as share (share.memberId)}
 											<li class="flex items-center justify-between">
 												<span>{memberName(share.memberId)}</span>
@@ -237,14 +237,14 @@
 					{#if detail.charges.length > 0}
 						<!-- Charges/discounts breakdown (§7.2.2), each signed effect in sort order. -->
 						<div class="space-y-1">
-							<p class="text-muted-foreground text-xs font-medium uppercase">Charges</p>
+							<p class="text-xs font-medium text-muted-foreground uppercase">Charges</p>
 							<ul class="space-y-1 text-sm">
 								{#each chargeEffects as effect, i (i)}
 									<li class="flex items-center justify-between">
 										<span>
 											{chargeLabel(effect.charge.kind)}
 											{#if effect.charge.mode === 'percent'}
-												<span class="text-muted-foreground text-xs">
+												<span class="text-xs text-muted-foreground">
 													({(effect.charge.value / 100).toFixed(2)}%)
 												</span>
 											{/if}
@@ -263,7 +263,7 @@
 
 				<!-- Per-member resolved SETTLEMENT shares (the §8 source of truth). -->
 				<div class="space-y-1">
-					<p class="text-muted-foreground text-xs font-medium uppercase">
+					<p class="text-xs font-medium text-muted-foreground uppercase">
 						Owed ({settlementCurrency})
 					</p>
 					<ul class="space-y-1">
@@ -351,10 +351,10 @@
 		</Card.Header>
 		{#if data.history.length === 0}
 			<Card.Content class="py-6 text-center">
-				<p class="text-muted-foreground text-sm">No history yet.</p>
+				<p class="text-sm text-muted-foreground">No history yet.</p>
 			</Card.Content>
 		{:else}
-			<Card.Content class="divide-border divide-y p-0">
+			<Card.Content class="divide-y divide-border p-0">
 				{#each data.history as entry (entry.id)}
 					<div class="flex flex-col gap-1 px-6 py-3">
 						<div class="flex items-start justify-between gap-2">
@@ -365,13 +365,13 @@
 							<time
 								datetime={entry.occurredAt}
 								title={absoluteTime(entry.occurredAt)}
-								class="text-muted-foreground shrink-0 text-xs whitespace-nowrap"
+								class="shrink-0 text-xs whitespace-nowrap text-muted-foreground"
 							>
 								{relativeTime(entry.occurredAt)}
 							</time>
 						</div>
 						<p class="text-sm">{entry.summary}</p>
-						<p class="text-muted-foreground text-xs">{absoluteTime(entry.occurredAt)}</p>
+						<p class="text-xs text-muted-foreground">{absoluteTime(entry.occurredAt)}</p>
 					</div>
 				{/each}
 			</Card.Content>

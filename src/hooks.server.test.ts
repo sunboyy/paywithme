@@ -16,11 +16,27 @@ vi.mock('$lib/server/auth', () => ({
 import {
 	handle,
 	handleError,
+	securityHeaders,
 	csrfGuard,
 	resolveSession,
 	apiV1Guard,
 	extractBearerKey
 } from './hooks.server';
+
+describe('securityHeaders (browser hardening)', () => {
+	it('denies framing and applies safe browser defaults to downstream responses', async () => {
+		const event = makeEvent('/');
+		const response = await securityHeaders({
+			event,
+			resolve: vi.fn().mockResolvedValue(new Response('ok'))
+		});
+
+		expect(response.headers.get('x-frame-options')).toBe('DENY');
+		expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+		expect(response.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
+		expect(response.headers.get('permissions-policy')).toContain('camera=()');
+	});
+});
 
 /**
  * Minimal fake RequestEvent: only the bits the hooks touch (`request`, `url`,

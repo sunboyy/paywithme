@@ -174,9 +174,10 @@ describe('deriveIdempotencyKey — sha256( keyId | groupId | toolName | args | w
 describe('withDerivedIdempotency — the retry an agent actually makes', () => {
 	it('a first create RUNS, is not flagged as a replay, and is stored for the window', async () => {
 		const store = makeStore();
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 200, body: { id: 't1' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
 
 		const out = await callAt(store, T0, LUNCH, fn);
 
@@ -188,9 +189,10 @@ describe('withDerivedIdempotency — the retry an agent actually makes', () => {
 
 	it('a content-identical retry INSIDE the window replays: ONE transaction, fn runs once', async () => {
 		const store = makeStore();
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 200, body: { id: 't1' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
 
 		await callAt(store, T0, LUNCH, fn);
 		// "That didn't seem to go through, let me try again." — 3 seconds later.
@@ -205,9 +207,10 @@ describe('withDerivedIdempotency — the retry an agent actually makes', () => {
 
 	it('replays regardless of argument ORDER — the model need not be textually stable', async () => {
 		const store = makeStore();
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 200, body: { id: 't1' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
 
 		await callAt(store, T0, LUNCH, fn);
 		const retry = await callAt(
@@ -224,12 +227,10 @@ describe('withDerivedIdempotency — the retry an agent actually makes', () => {
 	it('the SAME EXPENSE after the window is a NEW transaction — the second coffee is recorded', async () => {
 		const store = makeStore();
 		let n = 0;
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({
-				status: 200,
-				body: { id: `t${++n}` }
-			})
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: `t${++n}` }
+		}));
 
 		await callAt(store, T0, LUNCH, fn);
 		// An hour later, the user buys the same lunch again. This is NOT a retry.
@@ -265,9 +266,10 @@ describe('withDerivedIdempotency — the SLIDING window', () => {
 	 */
 	it('a retry STRADDLING a bucket boundary (t=59s → t=61s) still de-duplicates', async () => {
 		const store = makeStore();
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 200, body: { id: 't1' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
 
 		// A minute boundary: `floor(t / 60_000)` ticks over at :00.
 		const boundary = new Date('2026-07-16T12:01:00.000Z').getTime();

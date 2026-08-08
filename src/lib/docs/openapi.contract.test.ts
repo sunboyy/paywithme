@@ -335,8 +335,7 @@ describe("the spec's inline examples match its schemas", () => {
 		for (const item of Object.values(paths)) {
 			for (const op of Object.values(item)) {
 				const body = (op as Record<string, unknown>)?.requestBody as
-					| Record<string, Record<string, Record<string, Record<string, unknown>>>>
-					| undefined;
+					Record<string, Record<string, Record<string, Record<string, unknown>>>> | undefined;
 				const media = body?.content?.['application/json'];
 				if (!media) continue;
 

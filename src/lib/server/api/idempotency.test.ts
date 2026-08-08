@@ -118,9 +118,10 @@ describe('fingerprintRequestBody', () => {
 describe('withIdempotency — winner runs the create ONCE', () => {
 	it('inserts pending, runs fn, stores the response, and returns it', async () => {
 		const store = makeStore({ won: true });
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 201, body: { id: 't1' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 201,
+			body: { id: 't1' }
+		}));
 		const now = new Date('2026-07-12T00:00:00.000Z');
 
 		const res = await withIdempotency({
@@ -162,9 +163,10 @@ describe('withIdempotency — loser (row already exists)', () => {
 				createdAt: RECORDED_AT
 			}
 		});
-		const fn = vi.fn(
-			async (): Promise<IdempotentResponse> => ({ status: 201, body: { id: 'DUP' } })
-		);
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 201,
+			body: { id: 'DUP' }
+		}));
 
 		const res = await withIdempotency({
 			keyId: 'key_1',

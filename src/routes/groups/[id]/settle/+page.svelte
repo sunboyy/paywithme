@@ -79,7 +79,7 @@
 			</Card.Description>
 		</Card.Header>
 		<Card.Content>
-			<ul class="divide-border divide-y" aria-label="Member balances">
+			<ul class="divide-y divide-border" aria-label="Member balances">
 				{#each data.balances as row (row.memberId)}
 					<li class="flex items-center justify-between gap-2 py-3">
 						<span class="flex items-center gap-2">
@@ -140,20 +140,20 @@
 						     and each row cost three lines instead of one. `outline` because
 						     these are peers, not the page's single primary action; the 44px
 						     touch target is unchanged. -->
-						<li class="bg-card flex items-center justify-between gap-3 rounded-lg border p-3">
+						<li class="flex items-center justify-between gap-3 rounded-lg border bg-card p-3">
 							<span class="flex min-w-0 flex-1 items-center gap-2">
-								<HandshakeIcon class="text-muted-foreground size-5 shrink-0" aria-hidden="true" />
+								<HandshakeIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
 								<span class="min-w-0">
 									<span class="flex flex-wrap items-center gap-1.5 font-medium">
 										<span class="truncate">{s.fromDisplayName}</span>
 										<ArrowRightIcon
-											class="text-muted-foreground size-4 shrink-0"
+											class="size-4 shrink-0 text-muted-foreground"
 											aria-hidden="true"
 										/>
 										<span class="sr-only">pays</span>
 										<span class="truncate">{s.toDisplayName}</span>
 									</span>
-									<span class="text-muted-foreground block text-sm tabular-nums">
+									<span class="block text-sm text-muted-foreground tabular-nums">
 										{s.amountFormatted}
 									</span>
 								</span>

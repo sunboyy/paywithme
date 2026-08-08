@@ -84,14 +84,14 @@
 <div class="mx-auto w-full max-w-2xl space-y-6">
 	<div class="space-y-1">
 		<h1 class="text-2xl font-semibold tracking-tight">Create an API key</h1>
-		<p class="text-muted-foreground text-sm">
+		<p class="text-sm text-muted-foreground">
 			An API key lets a script or an AI agent act on your behalf — it sees exactly the groups you
 			see. You'll see the key once, right after you create it.
 		</p>
 	</div>
 
 	{#if $message?.type === 'error'}
-		<p class="text-destructive text-sm" role="alert">{$message.text}</p>
+		<p class="text-sm text-destructive" role="alert">{$message.text}</p>
 	{/if}
 
 	<form method="POST" use:enhance class="space-y-6">
@@ -137,21 +137,21 @@
 						{#each scopeOptions as option (option.value)}
 							{@const Icon = option.icon}
 							<label
-								class="border-input has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-ring flex cursor-pointer gap-3 rounded-lg border p-4 transition-colors has-focus-visible:ring-2"
+								class="flex cursor-pointer gap-3 rounded-lg border border-input p-4 transition-colors has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-2 has-focus-visible:ring-ring"
 							>
 								<input
 									type="radio"
 									name="scope"
 									value={option.value}
 									bind:group={$formData.scope}
-									class="accent-primary mt-1 size-4 shrink-0"
+									class="mt-1 size-4 shrink-0 accent-primary"
 								/>
 								<span class="min-w-0 space-y-1">
 									<span class="flex items-center gap-2 font-medium">
 										<Icon class="size-4 shrink-0" aria-hidden="true" />
 										{option.label}
 									</span>
-									<span class="text-muted-foreground block text-sm">{option.summary}</span>
+									<span class="block text-sm text-muted-foreground">{option.summary}</span>
 									<span
 										class="block text-sm font-medium {option.value === 'write'
 											? 'text-destructive'
@@ -185,19 +185,19 @@
 						<div class="grid gap-2 sm:grid-cols-2">
 							{#each expiryOptions as option (option.value)}
 								<label
-									class="border-input has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-ring flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors has-focus-visible:ring-2"
+									class="flex cursor-pointer items-start gap-3 rounded-lg border border-input p-3 transition-colors has-checked:border-primary has-checked:bg-primary/5 has-focus-visible:ring-2 has-focus-visible:ring-ring"
 								>
 									<input
 										type="radio"
 										name="expiry"
 										value={option.value}
 										bind:group={$formData.expiry}
-										class="accent-primary mt-0.5 size-4 shrink-0"
+										class="mt-0.5 size-4 shrink-0 accent-primary"
 									/>
 									<span class="min-w-0">
 										<span class="block font-medium">{option.label}</span>
 										{#if option.hint}
-											<span class="text-muted-foreground block text-xs">{option.hint}</span>
+											<span class="block text-xs text-muted-foreground">{option.hint}</span>
 										{/if}
 									</span>
 								</label>

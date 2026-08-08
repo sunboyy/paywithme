@@ -122,8 +122,7 @@ export type GroupAuditEntityType = (typeof GROUP_AUDIT_ENTITY_TYPES)[number];
  * can serve per-credential lookups later without touching the append-only table.)
  */
 export type AuditVia =
-	| { kind?: 'key'; keyId: string; keyName: string | null }
-	| { kind: 'oauth'; clientId: string };
+	{ kind?: 'key'; keyId: string; keyName: string | null } | { kind: 'oauth'; clientId: string };
 
 /**
  * The label used in the summary suffix when a key carries no name (the plugin's

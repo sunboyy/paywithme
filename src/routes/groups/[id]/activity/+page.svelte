@@ -132,7 +132,7 @@
 		/>
 	{:else}
 		<Card.Root>
-			<Card.Content class="divide-border divide-y p-0">
+			<Card.Content class="divide-y divide-border p-0">
 				{#each data.entries as entry (entry.id)}
 					<div class="flex flex-col gap-1 p-3">
 						<div class="flex items-start justify-between gap-2">
@@ -147,13 +147,13 @@
 							<time
 								datetime={entry.occurredAt}
 								title={absoluteTime(entry.occurredAt)}
-								class="text-muted-foreground shrink-0 text-xs whitespace-nowrap"
+								class="shrink-0 text-xs whitespace-nowrap text-muted-foreground"
 							>
 								{relativeTime(entry.occurredAt)}
 							</time>
 						</div>
 						<p class="text-sm">{entry.summary}</p>
-						<p class="text-muted-foreground text-xs">{absoluteTime(entry.occurredAt)}</p>
+						<p class="text-xs text-muted-foreground">{absoluteTime(entry.occurredAt)}</p>
 					</div>
 				{/each}
 			</Card.Content>

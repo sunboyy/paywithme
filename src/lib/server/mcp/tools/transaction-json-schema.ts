@@ -26,16 +26,12 @@ export const SHARE_BENEFICIARY_PROPERTY = {
 } as const;
 const beneficiaryArray = (
 	items:
-		| typeof equalBeneficiary
-		| typeof AMOUNT_BENEFICIARY_PROPERTY
-		| typeof SHARE_BENEFICIARY_PROPERTY
+		typeof equalBeneficiary | typeof AMOUNT_BENEFICIARY_PROPERTY | typeof SHARE_BENEFICIARY_PROPERTY
 ) => ({ type: 'array', minItems: 1, items }) as const;
 const item = (
 	splitMode: 'equal' | 'amount' | 'share',
 	beneficiaries:
-		| typeof equalBeneficiary
-		| typeof AMOUNT_BENEFICIARY_PROPERTY
-		| typeof SHARE_BENEFICIARY_PROPERTY
+		typeof equalBeneficiary | typeof AMOUNT_BENEFICIARY_PROPERTY | typeof SHARE_BENEFICIARY_PROPERTY
 ) =>
 	({
 		type: 'object',

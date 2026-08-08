@@ -47,7 +47,7 @@
 <div class="mx-auto w-full max-w-xl space-y-6 py-8">
 	<div class="space-y-1">
 		<h1 class="text-2xl font-semibold tracking-tight">Authorize a connection</h1>
-		<p class="text-muted-foreground text-sm">
+		<p class="text-sm text-muted-foreground">
 			An app wants to connect to your Pay with me account and act on your behalf — it will see
 			exactly the groups you see.
 		</p>
@@ -66,7 +66,7 @@
 		</Card.Root>
 	{:else}
 		{#if form?.error}
-			<p class="text-destructive text-sm" role="alert">{form.error}</p>
+			<p class="text-sm text-destructive" role="alert">{form.error}</p>
 		{/if}
 
 		<Card.Root>
@@ -90,32 +90,32 @@
 						: 'border-input'}"
 				>
 					{#if data.canMoveMoney}
-						<PencilIcon class="text-destructive mt-0.5 size-5 shrink-0" aria-hidden="true" />
+						<PencilIcon class="mt-0.5 size-5 shrink-0 text-destructive" aria-hidden="true" />
 						<div class="min-w-0 space-y-1">
 							<p class="font-medium">Read &amp; write access</p>
-							<p class="text-muted-foreground text-sm">
+							<p class="text-sm text-muted-foreground">
 								View your groups, transactions, members, and balances — plus record and settle
 								transactions.
 							</p>
-							<p class="text-destructive text-sm font-medium">{WRITE_SAFETY}</p>
+							<p class="text-sm font-medium text-destructive">{WRITE_SAFETY}</p>
 						</div>
 					{:else}
 						<EyeIcon class="mt-0.5 size-5 shrink-0" aria-hidden="true" />
 						<div class="min-w-0 space-y-1">
 							<p class="font-medium">Read-only access</p>
-							<p class="text-muted-foreground text-sm">
+							<p class="text-sm text-muted-foreground">
 								View your groups, transactions, members, and balances.
 							</p>
-							<p class="text-foreground text-sm font-medium">{READ_SAFETY}</p>
+							<p class="text-sm font-medium text-foreground">{READ_SAFETY}</p>
 						</div>
 					{/if}
 				</div>
 
-				<details class="text-muted-foreground text-sm">
+				<details class="text-sm text-muted-foreground">
 					<summary class="cursor-pointer">Requested scopes</summary>
 					<ul class="mt-2 flex flex-wrap gap-1.5">
 						{#each data.scopes as scope (scope)}
-							<li class="bg-muted rounded px-2 py-0.5 font-mono text-xs">{scope}</li>
+							<li class="rounded bg-muted px-2 py-0.5 font-mono text-xs">{scope}</li>
 						{/each}
 					</ul>
 				</details>

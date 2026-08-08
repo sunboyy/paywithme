@@ -41,7 +41,7 @@
 -->
 <div
 	data-testid="mobile-action-bar"
-	class="bg-background/95 supports-backdrop-filter:bg-background/80 sticky bottom-0 z-10 -mx-4 mt-6 border-t px-4 pt-3 backdrop-blur sm:static sm:mx-0 sm:mt-6 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-0 sm:backdrop-blur-none"
+	class="sticky bottom-0 z-10 -mx-4 mt-6 border-t bg-background/95 px-4 pt-3 backdrop-blur supports-backdrop-filter:bg-background/80 sm:static sm:mx-0 sm:mt-6 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-0 sm:backdrop-blur-none"
 	style="padding-bottom: max(0.75rem, env(safe-area-inset-bottom));"
 >
 	<div class={className}>

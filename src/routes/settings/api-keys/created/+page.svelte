@@ -57,7 +57,7 @@
 <div class="mx-auto w-full max-w-2xl space-y-6">
 	<div class="space-y-1">
 		<h1 class="text-2xl font-semibold tracking-tight">Your new API key</h1>
-		<p class="text-muted-foreground text-sm">
+		<p class="text-sm text-muted-foreground">
 			{data.name ?? 'API key'} was created.
 		</p>
 	</div>
@@ -65,7 +65,7 @@
 	<Card.Root data-testid="api-key-reveal">
 		<Card.Header>
 			<Card.Title class="flex items-center gap-2">
-				<TriangleAlertIcon class="text-destructive size-5 shrink-0" aria-hidden="true" />
+				<TriangleAlertIcon class="size-5 shrink-0 text-destructive" aria-hidden="true" />
 				Copy your key now
 			</Card.Title>
 			<Card.Description>
@@ -84,9 +84,9 @@
 			</div>
 
 			<!-- Masked by default; the full value lives behind a JS-free disclosure. -->
-			<div class="bg-muted/50 space-y-3 rounded-lg border p-3">
+			<div class="space-y-3 rounded-lg border bg-muted/50 p-3">
 				<p
-					class="text-muted-foreground font-mono text-sm break-all"
+					class="font-mono text-sm break-all text-muted-foreground"
 					data-testid="api-key-masked"
 					aria-hidden="true"
 				>
@@ -95,14 +95,14 @@
 
 				<details class="group">
 					<summary
-						class="text-primary focus-visible:ring-ring w-fit cursor-pointer rounded-sm text-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:outline-none"
+						class="w-fit cursor-pointer rounded-sm text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
 					>
 						<span class="group-open:hidden">Show key</span>
 						<span class="hidden group-open:inline">Hide key</span>
 					</summary>
 					<div class="mt-3 space-y-3">
 						<code
-							class="bg-background block w-full rounded-md border p-3 font-mono text-sm break-all select-all"
+							class="block w-full rounded-md border bg-background p-3 font-mono text-sm break-all select-all"
 							data-testid="api-key-secret">{data.key}</code
 						>
 						{#if mounted}
@@ -117,7 +117,7 @@
 							</Button>
 							<span class="sr-only" role="status">{copied ? 'API key copied' : ''}</span>
 							{#if copyFailed}
-								<p class="text-destructive text-sm" role="alert">
+								<p class="text-sm text-destructive" role="alert">
 									Couldn't copy automatically — select the key above and copy it manually.
 								</p>
 							{/if}
@@ -126,8 +126,8 @@
 				</details>
 			</div>
 
-			<p class="text-muted-foreground text-sm">
-				Send it as <code class="bg-muted rounded px-1 py-0.5 text-xs"
+			<p class="text-sm text-muted-foreground">
+				Send it as <code class="rounded bg-muted px-1 py-0.5 text-xs"
 					>Authorization: Bearer &lt;key&gt;</code
 				> on requests to the API.
 			</p>

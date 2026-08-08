@@ -306,8 +306,7 @@ async function resolveValidInvite(
 
 /** The safe, auth-free landing preview (PLAN §6.2 step 2). */
 export type InvitePreview =
-	| { status: 'valid'; groupName: string }
-	| { status: 'invalid'; groupName?: undefined };
+	{ status: 'valid'; groupName: string } | { status: 'invalid'; groupName?: undefined };
 
 /**
  * A SAFE preview of an invite for the `/invite/[token]` landing page, usable

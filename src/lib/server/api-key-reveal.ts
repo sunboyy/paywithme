@@ -40,6 +40,8 @@ export const API_KEY_REVEAL_MAX_AGE_SECONDS = 5 * 60;
 
 /** What the reveal screen needs. `key` is THE SECRET — it exists only in-flight. */
 export interface ApiKeyReveal {
+	/** The account that minted the key; prevents a later session seeing another user's secret. */
+	userId: string;
 	id: string;
 	name: string | null;
 	scope: ApiScope;
@@ -72,7 +74,7 @@ export function setApiKeyReveal(cookies: Cookies, reveal: ApiKeyReveal): void {
  * truncated value is treated as absent, never trusted) — the caller then bounces
  * back to Settings.
  */
-export function takeApiKeyReveal(cookies: Cookies): ApiKeyReveal | null {
+export function takeApiKeyReveal(cookies: Cookies, expectedUserId: string): ApiKeyReveal | null {
 	const raw = cookies.get(API_KEY_REVEAL_COOKIE);
 	// Always clear, even on a malformed value — a cookie we won't use must not
 	// linger in the browser holding a secret.
@@ -83,11 +85,19 @@ export function takeApiKeyReveal(cookies: Cookies): ApiKeyReveal | null {
 		const parsed: unknown = JSON.parse(raw);
 		if (!parsed || typeof parsed !== 'object') return null;
 		const candidate = parsed as Partial<ApiKeyReveal>;
-		// The secret and its id are the only load-bearing fields; without them there
-		// is nothing to reveal.
-		if (typeof candidate.id !== 'string' || typeof candidate.key !== 'string') return null;
+		// The owner binding, secret and id are load-bearing. In particular, never let
+		// a flash left by one account be revealed after another account signs in on
+		// the same browser.
+		if (
+			typeof candidate.userId !== 'string' ||
+			candidate.userId !== expectedUserId ||
+			typeof candidate.id !== 'string' ||
+			typeof candidate.key !== 'string'
+		)
+			return null;
 		if (candidate.scope !== 'read' && candidate.scope !== 'write') return null;
 		return {
+			userId: candidate.userId,
 			id: candidate.id,
 			name: typeof candidate.name === 'string' ? candidate.name : null,
 			scope: candidate.scope,

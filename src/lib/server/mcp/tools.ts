@@ -121,8 +121,7 @@ export function findTool(
 
 /** The dispatcher's outcome: a tool result, or a JSON-RPC protocol error. */
 export type ToolCallOutcome =
-	| { kind: 'result'; result: McpToolResult }
-	| { kind: 'protocol_error'; error: JsonRpcErrorObject };
+	{ kind: 'result'; result: McpToolResult } | { kind: 'protocol_error'; error: JsonRpcErrorObject };
 
 /**
  * Run one `tools/call`, guarded in the same ORDER the REST routes guard themselves:

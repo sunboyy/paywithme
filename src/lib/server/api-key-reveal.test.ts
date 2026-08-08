@@ -38,6 +38,7 @@ function makeCookies(initial?: string) {
 }
 
 const reveal: ApiKeyReveal = {
+	userId: 'user_1',
 	id: 'key_1',
 	name: 'My agent',
 	scope: 'write',
@@ -74,16 +75,16 @@ describe('setApiKeyReveal', () => {
 describe('takeApiKeyReveal', () => {
 	it('round-trips the reveal payload', () => {
 		setApiKeyReveal(harness.cookies, reveal);
-		expect(takeApiKeyReveal(harness.cookies)).toEqual(reveal);
+		expect(takeApiKeyReveal(harness.cookies, 'user_1')).toEqual(reveal);
 	});
 
 	it('CONSUMES the cookie: a second read returns null (shown exactly once)', () => {
 		setApiKeyReveal(harness.cookies, reveal);
 
-		expect(takeApiKeyReveal(harness.cookies)).not.toBeNull();
+		expect(takeApiKeyReveal(harness.cookies, 'user_1')).not.toBeNull();
 		// This is the whole "you won't see this again" guarantee — a refresh of the
 		// reveal screen finds nothing.
-		expect(takeApiKeyReveal(harness.cookies)).toBeNull();
+		expect(takeApiKeyReveal(harness.cookies, 'user_1')).toBeNull();
 		expect(harness.delete).toHaveBeenCalledWith(
 			API_KEY_REVEAL_COOKIE,
 			expect.objectContaining({ path: API_KEY_REVEAL_COOKIE_PATH })
@@ -91,19 +92,27 @@ describe('takeApiKeyReveal', () => {
 	});
 
 	it('returns null when no key is in flight', () => {
-		expect(takeApiKeyReveal(harness.cookies)).toBeNull();
+		expect(takeApiKeyReveal(harness.cookies, 'user_1')).toBeNull();
+	});
+
+	it('rejects and consumes a reveal minted by a different account', () => {
+		setApiKeyReveal(harness.cookies, reveal);
+
+		expect(takeApiKeyReveal(harness.cookies, 'user_2')).toBeNull();
+		expect(harness.delete).toHaveBeenCalled();
+		expect(takeApiKeyReveal(harness.cookies, 'user_1')).toBeNull();
 	});
 
 	it('treats a malformed / tampered value as absent AND still clears it', () => {
 		for (const bad of [
 			'not-json',
-			JSON.stringify({ id: 'key_1' }), // no secret
-			JSON.stringify({ key: 'secret' }), // no id
-			JSON.stringify({ id: 'key_1', key: 'secret', scope: 'admin' }), // junk scope
+			JSON.stringify({ userId: 'user_1', id: 'key_1' }), // no secret
+			JSON.stringify({ userId: 'user_1', key: 'secret' }), // no id
+			JSON.stringify({ userId: 'user_1', id: 'key_1', key: 'secret', scope: 'admin' }), // junk scope
 			JSON.stringify(['array'])
 		]) {
 			const h = makeCookies(bad);
-			expect(takeApiKeyReveal(h.cookies), `value: ${bad}`).toBeNull();
+			expect(takeApiKeyReveal(h.cookies, 'user_1'), `value: ${bad}`).toBeNull();
 			// A cookie we refuse to use must not linger in the browser holding a secret.
 			expect(h.delete).toHaveBeenCalled();
 		}

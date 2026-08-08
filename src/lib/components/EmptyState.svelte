@@ -46,7 +46,7 @@
 	<Card.Content class="flex flex-col items-center gap-3 px-6 py-10 text-center">
 		{#if Icon}
 			<span
-				class="bg-muted text-muted-foreground flex size-12 items-center justify-center rounded-full"
+				class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground"
 				aria-hidden="true"
 			>
 				<Icon class="size-6" />
@@ -54,7 +54,7 @@
 		{/if}
 		<div class="space-y-1">
 			<p class="text-base font-medium">{title}</p>
-			<p class="text-muted-foreground mx-auto max-w-prose text-sm text-pretty">{description}</p>
+			<p class="mx-auto max-w-prose text-sm text-pretty text-muted-foreground">{description}</p>
 		</div>
 		{#if action}
 			<div class="pt-1">

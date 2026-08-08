@@ -58,14 +58,14 @@
 	</Card.Header>
 
 	<Card.Content class="space-y-6">
-		<p class="text-muted-foreground text-sm">
+		<p class="text-sm text-muted-foreground">
 			Your device handles the rest with Face ID, a fingerprint, or your screen lock. You can add
 			more passkeys later for your other devices.
 		</p>
 
 		<div class="space-y-3">
 			{#if enrolError}
-				<p class="text-destructive text-sm" role="alert">{enrolError}</p>
+				<p class="text-sm text-destructive" role="alert">{enrolError}</p>
 			{/if}
 			<Button type="button" class="w-full" disabled={enrolling} onclick={addPasskey}>
 				{enrolling ? 'Adding passkey…' : 'Add a passkey'}
@@ -76,7 +76,7 @@
 	<Card.Footer>
 		<a
 			href={resolve('/')}
-			class="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
+			class="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
 		>
 			Skip for now
 		</a>

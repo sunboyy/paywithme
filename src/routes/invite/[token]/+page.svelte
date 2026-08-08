@@ -58,7 +58,7 @@
 				<Card.Title role="heading" aria-level={1} class="text-2xl">Invite unavailable</Card.Title>
 			</Card.Header>
 			<Card.Content>
-				<p class="text-muted-foreground text-sm">This invite link is no longer available.</p>
+				<p class="text-sm text-muted-foreground">This invite link is no longer available.</p>
 			</Card.Content>
 		{/if}
 	{:else if data.state === 'ready'}
@@ -79,7 +79,7 @@
 			<Card.Title role="heading" aria-level={1} class="text-2xl">Invite unavailable</Card.Title>
 		</Card.Header>
 		<Card.Content class="space-y-4">
-			<p class="text-muted-foreground text-sm">This invite link is no longer available.</p>
+			<p class="text-sm text-muted-foreground">This invite link is no longer available.</p>
 			<Button href={resolve('/groups')} variant="outline" class="w-full">Go to your groups</Button>
 		</Card.Content>
 	{/if}

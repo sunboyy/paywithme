@@ -931,7 +931,7 @@
 
 <form method="POST" {action} use:enhance class="space-y-6">
 	{#if $message?.type === 'error'}
-		<p class="text-destructive text-sm" role="alert">{$message.text}</p>
+		<p class="text-sm text-destructive" role="alert">{$message.text}</p>
 	{/if}
 
 	<!-- Hidden mirrors of the schema's single-currency / FX fields (4.10 surfaces
@@ -980,7 +980,7 @@
 			aria-describedby={$errors.title ? 'title-error' : undefined}
 			bind:value={$formData.title}
 		/>
-		{#if $errors.title}<p id="title-error" class="text-destructive text-sm">{$errors.title}</p>{/if}
+		{#if $errors.title}<p id="title-error" class="text-sm text-destructive">{$errors.title}</p>{/if}
 	</div>
 
 	<!-- AMOUNT — the most consequential input on the form, so it now looks it. It sat
@@ -996,13 +996,13 @@
 		{#if $formData.splitMode === 'itemized'}
 			<div class="flex items-baseline justify-between gap-2">
 				<span class="text-3xl font-semibold tabular-nums">{entryDisplay(itemizedTotal)}</span>
-				<span class="text-muted-foreground text-sm">from items + charges</span>
+				<span class="text-sm text-muted-foreground">from items + charges</span>
 			</div>
 		{:else}
 			<div
-				class="border-input focus-within:border-ring focus-within:ring-ring/50 flex items-center rounded-md border px-3 focus-within:ring-[3px]"
+				class="flex items-center rounded-md border border-input px-3 focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50"
 			>
-				<span class="text-muted-foreground shrink-0 text-2xl" aria-hidden="true">
+				<span class="shrink-0 text-2xl text-muted-foreground" aria-hidden="true">
 					{entryCurrency.symbol}
 				</span>
 				<Input
@@ -1016,7 +1016,7 @@
 				/>
 			</div>
 		{/if}
-		{#if $errors.amountTotal}<p id="amountTotal-error" class="text-destructive text-sm">
+		{#if $errors.amountTotal}<p id="amountTotal-error" class="text-sm text-destructive">
 				{$errors.amountTotal}
 			</p>{/if}
 	</div>
@@ -1037,7 +1037,7 @@
 				aria-describedby={$errors.date ? 'date-error' : undefined}
 				bind:value={$formData.date}
 			/>
-			{#if $errors.date}<p id="date-error" class="text-destructive text-sm">{$errors.date}</p>{/if}
+			{#if $errors.date}<p id="date-error" class="text-sm text-destructive">{$errors.date}</p>{/if}
 		</div>
 
 		<!-- Category picker (PLAN §7.3) — shadcn Select filtered by type. The hidden
@@ -1065,7 +1065,7 @@
 					{/each}
 				</Select.Content>
 			</Select.Root>
-			{#if $errors.categoryId}<p class="text-destructive text-sm">{$errors.categoryId}</p>{/if}
+			{#if $errors.categoryId}<p class="text-sm text-destructive">{$errors.categoryId}</p>{/if}
 		</div>
 	</div>
 
@@ -1082,7 +1082,7 @@
 	{#if currencyOptions.length > 1}
 		<details class="group/currency" open={isForeign}>
 			<summary
-				class="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-sm focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+				class="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-sm text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
 			>
 				<ChevronDownIcon
 					class="size-4 transition-transform group-open/currency:rotate-180"
@@ -1128,7 +1128,7 @@
 										>
 											{option.code}{option.name ? ` · ${option.name}` : ''}
 											{#if option.code === settlementCode}
-												<span class="text-muted-foreground text-xs">(group)</span>
+												<span class="text-xs text-muted-foreground">(group)</span>
 											{/if}
 										</Command.Item>
 									{/each}
@@ -1165,7 +1165,7 @@
 				<div class="space-y-1">
 					<Label for="fx-total">Total in {currency.code}</Label>
 					<div class="flex items-center gap-1">
-						<span class="text-muted-foreground text-xs" aria-hidden="true">{currency.symbol}</span>
+						<span class="text-xs text-muted-foreground" aria-hidden="true">{currency.symbol}</span>
 						<Input
 							id="fx-total"
 							inputmode="decimal"
@@ -1178,12 +1178,12 @@
 				</div>
 			</div>
 			{#if settlementPreview}
-				<p class="text-muted-foreground text-sm">
+				<p class="text-sm text-muted-foreground">
 					{settlementPreview.txn} → {settlementPreview.settlement}
 				</p>
 			{/if}
 			{#if $errors.exchangeRate || $errors.amountTotalSettlement}
-				<div id="fx-error" class="text-destructive space-y-1 text-sm">
+				<div id="fx-error" class="space-y-1 text-sm text-destructive">
 					{#if $errors.exchangeRate}<p>{$errors.exchangeRate}</p>{/if}
 					{#if $errors.amountTotalSettlement}<p>{$errors.amountTotalSettlement}</p>{/if}
 				</div>
@@ -1222,7 +1222,7 @@
 					<div class="flex items-center justify-between gap-2">
 						<span class="text-sm">{member.displayName}</span>
 						<div class="flex items-center gap-1">
-							<span class="text-muted-foreground text-xs" aria-hidden="true">
+							<span class="text-xs text-muted-foreground" aria-hidden="true">
 								{entryCurrency.symbol}
 							</span>
 							<Input
@@ -1238,7 +1238,7 @@
 			</div>
 		{/if}
 		{#if $errors.payers?._errors}
-			<p class="text-destructive text-sm">{$errors.payers._errors}</p>
+			<p class="text-sm text-destructive">{$errors.payers._errors}</p>
 		{/if}
 	</fieldset>
 
@@ -1326,7 +1326,7 @@
 							</label>
 							{#if isBeneficiary && $formData.splitMode === 'amount'}
 								<div class="flex items-center gap-1">
-									<span class="text-muted-foreground text-xs" aria-hidden="true"
+									<span class="text-xs text-muted-foreground" aria-hidden="true"
 										>{entryCurrency.symbol}</span
 									>
 									<Input
@@ -1355,7 +1355,7 @@
 				</div>
 			{/if}
 			{#if $errors.beneficiaries?._errors}
-				<p class="text-destructive text-sm">{$errors.beneficiaries._errors}</p>
+				<p class="text-sm text-destructive">{$errors.beneficiaries._errors}</p>
 			{/if}
 		</fieldset>
 	{:else}
@@ -1382,7 +1382,7 @@
 						<div class="w-28 space-y-1">
 							<Label for="item-{index}-amount">Amount</Label>
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs" aria-hidden="true">
+								<span class="text-xs text-muted-foreground" aria-hidden="true">
 									{entryCurrency.symbol}
 								</span>
 								<Input
@@ -1418,7 +1418,7 @@
 					     `<details>` keeps it reachable with JS disabled. -->
 					<details class="group/item">
 						<summary
-							class="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-xs focus-visible:ring-2 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+							class="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
 						>
 							<ChevronDownIcon
 								class="size-4 transition-transform group-open/item:rotate-180"
@@ -1455,7 +1455,7 @@
 										</label>
 										{#if isBeneficiary && item.splitMode === 'amount'}
 											<div class="flex items-center gap-1">
-												<span class="text-muted-foreground text-xs" aria-hidden="true"
+												<span class="text-xs text-muted-foreground" aria-hidden="true"
 													>{entryCurrency.symbol}</span
 												>
 												<Input
@@ -1492,7 +1492,7 @@
 			>
 
 			{#if $errors.items?._errors}
-				<p class="text-destructive text-sm">{$errors.items._errors}</p>
+				<p class="text-sm text-destructive">{$errors.items._errors}</p>
 			{/if}
 		</fieldset>
 
@@ -1555,7 +1555,7 @@
 						<div class="w-28 space-y-1">
 							<Label for="charge-{index}-value">Value</Label>
 							<div class="flex items-center gap-1">
-								<span class="text-muted-foreground text-xs" aria-hidden="true">
+								<span class="text-xs text-muted-foreground" aria-hidden="true">
 									{charge.mode === 'percent' ? '%' : entryCurrency.symbol}
 								</span>
 								<Input
@@ -1594,10 +1594,10 @@
 			</Button>
 
 			{#if $errors.charges?._errors}
-				<p class="text-destructive text-sm">{$errors.charges._errors}</p>
+				<p class="text-sm text-destructive">{$errors.charges._errors}</p>
 			{/if}
 			{#if $errors.amountTotal}
-				<p class="text-destructive text-sm">{$errors.amountTotal}</p>
+				<p class="text-sm text-destructive">{$errors.amountTotal}</p>
 			{/if}
 		</fieldset>
 
@@ -1627,7 +1627,7 @@
 						<span class="text-right">
 							<span class="block">{entryDisplay(itemizedBreakdown.amountTotal)}</span>
 							{#if isForeign && settlementPreview}
-								<span class="text-muted-foreground block text-xs font-normal">
+								<span class="block text-xs font-normal text-muted-foreground">
 									{settlementDisplay($formData.amountTotalSettlement)}
 								</span>
 							{/if}
@@ -1653,24 +1653,24 @@
 	     server has not chosen yet. -->
 	{#if previewFloorShares && previewFloorShares.length > 0}
 		{#if equalEach !== null}
-			<div class="bg-muted/40 space-y-1 rounded-md border p-3 text-sm">
+			<div class="space-y-1 rounded-md border bg-muted/40 p-3 text-sm">
 				<div class="flex items-center justify-between">
 					<span class="text-muted-foreground">Each person owes</span>
 					<span class="text-right">
 						<span class="block font-medium tabular-nums">{entryDisplay(equalEach)}</span>
 						{#if isForeign && settlementShares}
-							<span class="text-muted-foreground block text-xs tabular-nums">
+							<span class="block text-xs text-muted-foreground tabular-nums">
 								{settlementDisplay(settlementShares[previewFloorShares[0].memberId] ?? 0)}
 							</span>
 						{/if}
 					</span>
 				</div>
 				{#if leftoverNote}
-					<p class="text-muted-foreground text-xs">{leftoverNote}</p>
+					<p class="text-xs text-muted-foreground">{leftoverNote}</p>
 				{/if}
 			</div>
 		{:else}
-			<div class="bg-muted/40 space-y-1 rounded-md border p-3 text-sm">
+			<div class="space-y-1 rounded-md border bg-muted/40 p-3 text-sm">
 				<p class="font-medium">Each person owes</p>
 				{#each previewFloorShares as share (share.memberId)}
 					<div class="flex items-center justify-between">
@@ -1678,7 +1678,7 @@
 						<span class="text-right">
 							<span class="block tabular-nums">{entryDisplay(share.amountOwed)}</span>
 							{#if isForeign && settlementShares}
-								<span class="text-muted-foreground block text-xs tabular-nums">
+								<span class="block text-xs text-muted-foreground tabular-nums">
 									{settlementDisplay(settlementShares[share.memberId] ?? 0)}
 								</span>
 							{/if}
@@ -1686,7 +1686,7 @@
 					</div>
 				{/each}
 				{#if leftoverNote}
-					<p class="text-muted-foreground text-xs">{leftoverNote}</p>
+					<p class="text-xs text-muted-foreground">{leftoverNote}</p>
 				{/if}
 			</div>
 		{/if}
@@ -1754,7 +1754,7 @@
 			{$submitting ? 'Saving…' : submitLabel}
 		</Button>
 		{#if network.offline}
-			<p id="offline-write-note" class="text-muted-foreground mt-2 text-sm" role="note">
+			<p id="offline-write-note" class="mt-2 text-sm text-muted-foreground" role="note">
 				{write.reason}
 			</p>
 		{/if}

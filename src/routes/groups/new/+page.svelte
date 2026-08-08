@@ -73,7 +73,7 @@
 
 	<Card.Content>
 		{#if $message?.type === 'error'}
-			<p class="text-destructive mb-4 text-sm" role="alert">{$message.text}</p>
+			<p class="mb-4 text-sm text-destructive" role="alert">{$message.text}</p>
 		{/if}
 
 		<form method="POST" use:enhance class="space-y-4">
@@ -148,7 +148,7 @@
 							<select
 								{...props}
 								bind:value={$formData.settlementCurrency}
-								class="border-input bg-background ring-offset-background focus-visible:ring-ring h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+								class="h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
 							>
 								{#each CURRENCIES as currency (currency.code)}
 									<option value={currency.code}>
@@ -171,7 +171,7 @@
 				{$submitting ? 'Creating…' : 'Create group'}
 			</Form.Button>
 			{#if network.offline}
-				<p id="offline-write-note" class="text-muted-foreground text-sm" role="note">
+				<p id="offline-write-note" class="text-sm text-muted-foreground" role="note">
 					{write.reason}
 				</p>
 			{/if}

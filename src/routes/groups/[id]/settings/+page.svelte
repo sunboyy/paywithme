@@ -38,7 +38,7 @@
 
 	{#if $message}
 		<p
-			class={$message.type === 'error' ? 'text-destructive text-sm' : 'text-sm'}
+			class={$message.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
 			role={$message.type === 'error' ? 'alert' : 'status'}
 		>
 			{$message.text}
@@ -75,7 +75,7 @@
 				</Form.Button>
 
 				{#if network.offline}
-					<p id="offline-write-note" class="text-muted-foreground text-sm" role="note">
+					<p id="offline-write-note" class="text-sm text-muted-foreground" role="note">
 						{write.reason}
 					</p>
 				{/if}

@@ -60,7 +60,7 @@
 
 {#if showNative}
 	<div
-		class="bg-muted text-foreground flex items-center gap-3 border-b px-4 py-2 text-sm"
+		class="flex items-center gap-3 border-b bg-muted px-4 py-2 text-sm text-foreground"
 		data-testid="install-prompt"
 	>
 		<DownloadIcon class="size-5 shrink-0" aria-hidden="true" />
@@ -79,7 +79,7 @@
 	</div>
 {:else if showIos}
 	<div
-		class="bg-muted text-muted-foreground flex items-center gap-2 border-b px-4 py-2 text-sm"
+		class="flex items-center gap-2 border-b bg-muted px-4 py-2 text-sm text-muted-foreground"
 		data-testid="install-prompt-ios"
 	>
 		<ShareIcon class="size-4 shrink-0" aria-hidden="true" />

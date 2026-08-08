@@ -44,7 +44,7 @@
 		<h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
 			Split group spending and settle up, the easy way.
 		</h1>
-		<p class="text-muted-foreground text-base text-pretty">
+		<p class="text-base text-pretty text-muted-foreground">
 			Track what everyone paid on a trip, a flat, or a dinner. Pay with me works out who owes whom
 			and squares it up in the fewest transfers.
 		</p>
@@ -61,12 +61,12 @@
 		{#each points as point (point.title)}
 			{@const Icon = point.icon}
 			<div class="flex gap-3">
-				<span class="text-primary mt-0.5 shrink-0" aria-hidden="true">
+				<span class="mt-0.5 shrink-0 text-primary" aria-hidden="true">
 					<Icon class="size-5" />
 				</span>
 				<div class="space-y-0.5">
 					<h3 class="text-sm font-medium">{point.title}</h3>
-					<p class="text-muted-foreground text-sm text-pretty">{point.body}</p>
+					<p class="text-sm text-pretty text-muted-foreground">{point.body}</p>
 				</div>
 			</div>
 		{/each}
