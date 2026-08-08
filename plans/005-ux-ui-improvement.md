@@ -415,7 +415,7 @@ Plus a manual screenshot pass at 390px and 1440px over: `/`, `/groups`,
   to require touching `src/lib/money/**` beyond the additive `code` option in
   1.2, or `src/lib/server/balances.ts` beyond reuse in 2.2, stop and report.
 - **No hand-authored `src/lib/components/ui/**`.** Those are shadcn CLI output
-(`pnpm dlx shadcn-svelte@latest add <name>`). Fix call sites, not primitives —
+  (`pnpm dlx shadcn-svelte@latest add <name>`). Fix call sites, not primitives —
   item 1.1 in particular is a call-site fix, not a card-header edit.
 - **Progressive enhancement is a hard constraint** (PLAN §10). Every control
   changed here must still work as a plain form POST with JS disabled.
