@@ -6,7 +6,7 @@
 	// row links to the per-transaction page (task 4.11). Empty state when none.
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { formatAmount, type CurrencyCode } from '$lib/money';
+	import { formatAmount, type SeededCurrencyCode } from '$lib/money';
 	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
@@ -22,7 +22,7 @@
 
 	let { data }: { data: PageData } = $props();
 
-	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
+	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
 
 	// Empty-state branching (task 8.1): distinguish "no transactions yet" (offer
 	// the create CTA) from "your filter matched nothing" (offer to clear it).

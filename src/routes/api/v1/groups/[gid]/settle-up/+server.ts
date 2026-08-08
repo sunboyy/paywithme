@@ -25,7 +25,7 @@ import { auditVia } from '$lib/server/api/provenance';
 import { requireRateLimit } from '$lib/server/api/rate-limit';
 import { runCreateWithIdempotency } from '$lib/server/api/create';
 import { notFound, unauthorized, validationError } from '$lib/server/api/errors';
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 
 /** The transfer category every settle-up records under (PLAN §8.4 / §16.4). */
 const DEBT_SETTLEMENT_CATEGORY = 'transfer-debt-settlement';
@@ -79,7 +79,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	// key can't see → 404, conflated). NEVER trusted from the payload.
 	const group = await getGroupForUser(principal.userId, gid);
 	if (!group) return notFound();
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 
 	// Build the single-payer / single-beneficiary Transfer at rate 1 (currency ==
 	// settlement, so `amountTotalSettlement == amountTotal == amount`), category

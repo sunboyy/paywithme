@@ -9,7 +9,7 @@
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { resolve } from '$app/paths';
 	import { buildTransactionSchema } from '$lib/schemas/transaction';
-	import type { CurrencyCode } from '$lib/money';
+	import type { SeededCurrencyCode } from '$lib/money';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
 	import TransactionForm from '$lib/components/TransactionForm.svelte';
@@ -24,7 +24,7 @@
 	// hydration) — capturing the initial `data` here is intentional.
 	// svelte-ignore state_referenced_locally
 	const schema = buildTransactionSchema({
-		settlementCurrency: data.group.settlementCurrency as CurrencyCode,
+		settlementCurrency: data.group.settlementCurrency as SeededCurrencyCode,
 		memberIds: data.members.map((m) => m.id)
 	});
 

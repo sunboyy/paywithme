@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import type { MemberListItem } from '$lib/server/members';
+import type { SeededCurrencyCode } from '$lib/money';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { toTransactionInput } from '../tools/transaction-input';
 import { toMemberView } from './member';
@@ -412,7 +413,11 @@ describe('toTransactionView — identity, deletion, and steering', () => {
 				title: view.title.value,
 				date: view.date,
 				categoryId: view.categoryId,
-				currency: view.currency,
+				// The view echoes the ENTRY currency, which may in general be a custom
+				// code; the MCP WRITE contract is settlement-currency-only (ADR-0014
+				// decision 7) and `mcpTransactionArguments` re-validates it against the
+				// seeded enum. This fixture's entry currency is the seeded 'THB'.
+				currency: view.currency as SeededCurrencyCode,
 				payerId: view.paidBy!,
 				memberIds: ['mem_me', 'mem_mal']
 			}

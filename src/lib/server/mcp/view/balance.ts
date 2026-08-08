@@ -19,7 +19,7 @@
 // comes with a ready-made `summary` sentence — the one figure the user actually
 // asked for, already worded, so the model quotes rather than reasons.
 
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 import type { MemberBalance } from '$lib/transactions/balances';
 import { toMcpMoney, type McpMoney } from './money';
 import type { GroupView } from './group';
@@ -57,7 +57,7 @@ export interface BalancesView {
 	/** UNTRUSTED (ADR-0003). */
 	readonly groupName: UntrustedText;
 	/** Every amount here is in this currency — balances are never currency-mixed (§8). */
-	readonly settlementCurrency: CurrencyCode;
+	readonly settlementCurrency: SeededCurrencyCode;
 	/**
 	 * The caller's own net position, or `null` in the edge case where the key's owner
 	 * has no ACTIVE member row in the group.
@@ -85,7 +85,7 @@ export function balanceDirection(minor: number): BalanceDirection {
 }
 
 /** The sentence the model should quote for the caller's own balance. */
-function summarize(minor: number, currency: CurrencyCode): string {
+function summarize(minor: number, currency: SeededCurrencyCode): string {
 	// Phrase the MAGNITUDE ("you owe THB ฿1,200.00"), never the raw negative — a
 	// model asked "how much do I owe?" must not answer "−1,200".
 	const magnitude = toMcpMoney(Math.abs(minor), currency).display;

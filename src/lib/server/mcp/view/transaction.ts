@@ -21,7 +21,7 @@
 // charges into a discriminated union rather than serving REST's bare `value` scalar,
 // which a model would read as an amount.
 
-import type { CurrencyCode } from '$lib/money';
+import { asEntryCurrencyCode, type EntryCurrencyCode, type SeededCurrencyCode } from '$lib/money';
 import type { TransactionDetail, TransactionListItem } from '$lib/server/transactions';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import { basisPointsToPercentString } from '../percentage';
@@ -127,7 +127,7 @@ export interface EditableTransactionView {
 	/** PLAN §7.1 editable real-world `created_at` day, never `occurred_at`. */
 	readonly date: string;
 	readonly categoryId: string;
-	readonly currency: CurrencyCode;
+	readonly currency: EntryCurrencyCode;
 	/** Omitted for itemized: its final total is derived server-side. */
 	readonly amount?: string;
 	/** The current single payer used by the MCP write contract; null for a multi-payer row. */
@@ -205,8 +205,8 @@ export function toTransactionView({
 	members: MemberView[];
 	principal: ApiKeyPrincipal;
 }): TransactionView {
-	const entry: CurrencyCode = detail.currency;
-	const settlement: CurrencyCode = detail.settlementCurrency;
+	const entry: EntryCurrencyCode = detail.currency;
+	const settlement: SeededCurrencyCode = detail.settlementCurrency;
 	const byId = new Map(members.map((m) => [m.id, m]));
 	// Whoever recorded the transaction wrote its title and its item labels.
 	const author = authorOf(detail.createdBy, principal);
@@ -303,7 +303,7 @@ export function toTransactionView({
 			title: untrusted(input.title ?? detail.title, author),
 			date: input.date ?? detail.createdAt.slice(0, 10),
 			categoryId: input.categoryId ?? detail.categoryId,
-			currency: (input.currency ?? detail.currency) as CurrencyCode,
+			currency: asEntryCurrencyCode(input.currency ?? detail.currency),
 			...(inputSplitMode === 'itemized'
 				? {}
 				: { amount: toMcpMoney(input.amountTotal ?? detail.amountTotal, entry).amount }),
@@ -412,8 +412,8 @@ export function toTransactionListItemView({
 	item: TransactionListItem;
 	principal: ApiKeyPrincipal;
 }): TransactionListItemView {
-	const entry: CurrencyCode = item.currency;
-	const settlement: CurrencyCode = item.settlementCurrency;
+	const entry: EntryCurrencyCode = item.currency;
+	const settlement: SeededCurrencyCode = item.settlementCurrency;
 	// Whoever recorded the transaction wrote its title — the same attribution
 	// `toTransactionView` makes for the detail title.
 	const author = authorOf(item.createdBy, principal);

@@ -7,7 +7,7 @@
 // settlement currency and nests the balance as `{ amount, currency }`. See
 // `money.ts` for why we nest rather than emit a sibling `currency` scalar.
 
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 import type { MemberBalance } from '$lib/transactions/balances';
 import { money, type Money } from './money';
 
@@ -27,7 +27,10 @@ export interface BalanceDto {
  * currency — the code the internal `balance` integer is denominated in — passed
  * in so the emitted amount is self-describing (the internal model omits it).
  */
-export function toBalanceDto(balance: MemberBalance, settlementCurrency: CurrencyCode): BalanceDto {
+export function toBalanceDto(
+	balance: MemberBalance,
+	settlementCurrency: SeededCurrencyCode
+): BalanceDto {
 	return {
 		memberId: balance.memberId,
 		balance: money(balance.balance, settlementCurrency)

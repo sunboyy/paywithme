@@ -16,7 +16,7 @@
 	import { resolve } from '$app/paths';
 	import { buildTransactionSchema } from '$lib/schemas/transaction';
 	import { applyCharges, type ChargeInput } from '$lib/schemas/transaction';
-	import { formatAmount, type CurrencyCode } from '$lib/money';
+	import { formatAmount, type SeededCurrencyCode } from '$lib/money';
 	import * as Card from '$lib/components/ui/card';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { Badge } from '$lib/components/ui/badge';
@@ -36,7 +36,7 @@
 	let { data }: { data: PageData } = $props();
 
 	const detail = $derived(data.detail);
-	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
+	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
 	const isDeleted = $derived(detail.deletedAt !== null);
 
 	/**
@@ -63,7 +63,7 @@
 	// the initial page data (it doesn't change after hydration).
 	// svelte-ignore state_referenced_locally
 	const schema = buildTransactionSchema({
-		settlementCurrency: data.group.settlementCurrency as CurrencyCode,
+		settlementCurrency: data.group.settlementCurrency as SeededCurrencyCode,
 		memberIds: data.members.map((m) => m.id)
 	});
 

@@ -20,7 +20,7 @@ import { setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { categoriesFor, defaultCategoryFor, getCategory } from '$lib/categories';
-import { getCurrency, CURRENCIES, MAX_SAFE_MINOR, type CurrencyCode } from '$lib/money';
+import { getCurrency, CURRENCIES, MAX_SAFE_MINOR, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
@@ -107,7 +107,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		redirectTo: pathAndQuery(url)
 	});
 
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
 
 	const members = await listMembers({ userId: user.id, groupId: params.id });
@@ -221,7 +221,7 @@ export const actions: Actions = {
 		if (!group) {
 			error(404, 'Group not found');
 		}
-		const settlementCurrency = group.settlementCurrency as CurrencyCode;
+		const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 
 		const activeMembers = (await listMembers({ userId: user.id, groupId: params.id })).filter(
 			(m) => m.deactivatedAt === null

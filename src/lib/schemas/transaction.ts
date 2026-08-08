@@ -65,7 +65,12 @@
 // without a DB round-trip; left unused here — full membership is the action's job.)
 
 import { z } from 'zod';
-import { getCurrency, type CurrencyCode } from '$lib/money';
+import {
+	asEntryCurrencyCode,
+	getCurrency,
+	type EntryCurrencyCode,
+	type SeededCurrencyCode
+} from '$lib/money';
 import { getCategory } from '$lib/categories';
 import { currencyCodeSchema } from './currency';
 
@@ -375,8 +380,8 @@ export function applyCharges(
  */
 export function convertToSettlement(
 	amount: number,
-	txnCurrency: CurrencyCode,
-	settlementCurrency: CurrencyCode,
+	txnCurrency: EntryCurrencyCode,
+	settlementCurrency: SeededCurrencyCode,
 	exchangeRate: string
 ): number {
 	const expTxn = currencyExponent(txnCurrency);
@@ -411,7 +416,7 @@ export function convertToSettlement(
 }
 
 /** Resolve a currency's minor-unit exponent, throwing on an unknown code (defensive — validated upstream). */
-function currencyExponent(code: CurrencyCode): number {
+function currencyExponent(code: EntryCurrencyCode): number {
 	const currency = getCurrency(code);
 	if (currency === undefined) {
 		throw new Error(`Unknown currency code: ${String(code)}`);
@@ -552,9 +557,9 @@ export interface BuildTransactionSchemaOptions {
 	/**
 	 * The GROUP's settlement currency (group context — NOT trusted from the
 	 * payload). Drives the FX rate==1-vs->0 rule and the scalar settlement-total
-	 * conversion. Must be a supported `CurrencyCode`.
+	 * conversion. Must be one of the seeded 29 (`SeededCurrencyCode`).
 	 */
-	readonly settlementCurrency: CurrencyCode;
+	readonly settlementCurrency: SeededCurrencyCode;
 	/**
 	 * Optional member-id allow-list. When provided, every payer/beneficiary id must
 	 * be in it (a cheap structural guard a later task may enable). When omitted,
@@ -731,10 +736,10 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 					tx.amountTotalSettlement ===
 					// `currency` is already validated as a supported code by `currencyCodeSchema`;
 					// the inferred type is the broad `string` (the enum tuple is `[string, ...]`),
-					// so narrow it to `CurrencyCode` for the conversion helper.
+					// so tag it as an entry-currency code for the conversion helper.
 					convertToSettlement(
 						tx.amountTotal,
-						tx.currency as CurrencyCode,
+						asEntryCurrencyCode(tx.currency),
 						settlementCurrency,
 						tx.exchangeRate
 					),

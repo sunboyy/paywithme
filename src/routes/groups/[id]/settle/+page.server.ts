@@ -19,7 +19,7 @@
 // transaction, so balances recompute and the suggestion list shrinks"). The
 // audit-log UI (Phase 6) is NOT built here.
 
-import { formatAmount, getCurrency, type CurrencyCode } from '$lib/money';
+import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
 import { getGroupBalances } from '$lib/server/balances';
@@ -41,7 +41,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		redirectTo: pathAndQuery(url)
 	});
 
-	const settlementCurrency = group.settlementCurrency as CurrencyCode;
+	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
 
 	// §8.1 net balances (settlement minor units, sums to 0, excludes soft-deleted

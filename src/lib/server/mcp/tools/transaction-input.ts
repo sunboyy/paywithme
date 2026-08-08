@@ -7,7 +7,7 @@
 // canonical TransactionInput consumed by the transaction service.
 
 import { z } from 'zod';
-import { parseAmount, type CurrencyCode } from '$lib/money';
+import { parseAmount, type SeededCurrencyCode } from '$lib/money';
 import {
 	applyCharges,
 	buildTransactionSchema,
@@ -178,7 +178,7 @@ export interface McpTransactionContext {
 	readonly date: string;
 	readonly categoryId: string;
 	/** v1 MCP writes are settlement-currency-only, at exchange rate 1. */
-	readonly currency: CurrencyCode;
+	readonly currency: SeededCurrencyCode;
 	readonly payerId: string;
 	readonly memberIds?: readonly string[];
 }
@@ -191,7 +191,11 @@ export class McpTransactionArgumentError extends Error {
 	}
 }
 
-function parseMcpAmount(value: string, currency: CurrencyCode, path: (string | number)[]): number {
+function parseMcpAmount(
+	value: string,
+	currency: SeededCurrencyCode,
+	path: (string | number)[]
+): number {
 	try {
 		return parseAmount(value, currency);
 	} catch (error) {

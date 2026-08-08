@@ -17,7 +17,7 @@
 // The view data (payers, shares, items, charges, `deletedAt`) is kept — a
 // soft-deleted txn is still served (marked via `deletedAt`) so it can be shown.
 
-import type { CurrencyCode } from '$lib/money';
+import type { EntryCurrencyCode, SeededCurrencyCode } from '$lib/money';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { money, type Money } from './money';
 
@@ -86,8 +86,8 @@ export interface TransactionDetailDto {
  * as self-describing money in its correct currency (entry vs settlement).
  */
 export function toTransactionDetailDto(detail: TransactionDetail): TransactionDetailDto {
-	const entry: CurrencyCode = detail.currency;
-	const settlement: CurrencyCode = detail.settlementCurrency;
+	const entry: EntryCurrencyCode = detail.currency;
+	const settlement: SeededCurrencyCode = detail.settlementCurrency;
 
 	return {
 		id: detail.id,

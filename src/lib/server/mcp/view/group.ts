@@ -11,7 +11,7 @@
 // `createdBy` is not carried as a separate field: the group name's `author` already
 // says who created the group, in the one place where knowing it MATTERS.
 
-import type { CurrencyCode } from '$lib/money';
+import type { SeededCurrencyCode } from '$lib/money';
 import type { Group } from '$lib/server/groups';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import { authorOf, untrusted, type UntrustedText } from './untrusted';
@@ -22,7 +22,7 @@ export interface GroupView {
 	/** Written by whoever created the group — UNTRUSTED (ADR-0003). */
 	readonly name: UntrustedText;
 	/** The currency every balance and settlement figure in this group is in. */
-	readonly settlementCurrency: CurrencyCode;
+	readonly settlementCurrency: SeededCurrencyCode;
 	/** Creation time, ISO-8601. */
 	readonly createdAt: string;
 }
@@ -32,7 +32,7 @@ export function toGroupView(group: Group, principal: ApiKeyPrincipal): GroupView
 	return {
 		id: group.id,
 		name: untrusted(group.name, authorOf(group.createdBy, principal)),
-		settlementCurrency: group.settlementCurrency as CurrencyCode,
+		settlementCurrency: group.settlementCurrency as SeededCurrencyCode,
 		createdAt: group.createdAt.toISOString()
 	};
 }

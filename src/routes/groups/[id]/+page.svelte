@@ -14,7 +14,7 @@
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
-	import { formatAmount, type CurrencyCode } from '$lib/money';
+	import { formatAmount, type SeededCurrencyCode } from '$lib/money';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import { dayLabel } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -24,7 +24,7 @@
 
 	let { data }: { data: PageData } = $props();
 
-	const settlementCurrency = $derived(data.group.settlementCurrency as CurrencyCode);
+	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
 </script>
 
 <svelte:head>
