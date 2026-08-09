@@ -130,3 +130,47 @@ export const updateCustomCurrencySchema = createCustomCurrencySchema
 
 /** Inferred, normalized edit input — shared by the form and the service. */
 export type UpdateCustomCurrencyInput = z.infer<typeof updateCustomCurrencySchema>;
+
+/**
+ * The opaque row identifier a FORM has to carry to name which currency it acts on
+ * (#62). It is the one place the opaque `code` legitimately appears in a request:
+ * a hidden field the server rendered, never something a member types or reads (see
+ * the module header — it is still never *displayed*).
+ *
+ * Shape only. Whether the code names a row THIS GROUP owns is a database question,
+ * answered by `getGroupCurrencyForUpdate` in the service (a seeded row or another
+ * group's row is indistinguishable from a typo: `CurrencyNotFoundError` → 404).
+ */
+const opaqueCodeField = z.string().trim().min(1, { message: 'A currency is required' });
+
+/**
+ * The manage-currencies screen's DELETE form (#62): nothing but the target row.
+ * Deliberately its own schema rather than a reuse of {@link editCustomCurrencySchema}
+ * — Superforms derives a form's default `id` from its JSON schema, so the three
+ * forms on that page must be structurally distinct for their action results to
+ * route back to the right client instance.
+ */
+export const customCurrencyRefSchema = z.object({ code: opaqueCodeField });
+
+/** Inferred delete/target input. */
+export type CustomCurrencyRefInput = z.infer<typeof customCurrencyRefSchema>;
+
+/**
+ * The manage-currencies screen's EDIT form (#62): the target row plus the full set
+ * of fields, because an HTML form posts everything it renders.
+ *
+ * Every field is REQUIRED here even though {@link updateCustomCurrencySchema} makes
+ * them optional, and the two do not disagree. A form always submits all four — a
+ * frozen field is rendered read-only (or as a hidden input carrying the stored
+ * value), which still POSTS. The service compares each submitted value against the
+ * stored row and treats "same value" as "not a change", so re-posting a frozen
+ * `displayCode` / `exponent` unchanged stays legal on a referenced row, and an edit
+ * that moves nothing writes no `audit_log` row. The partial schema exists for
+ * non-form callers; this one is the shape of the HTML form.
+ */
+export const editCustomCurrencySchema = createCustomCurrencySchema.extend({
+	code: opaqueCodeField
+});
+
+/** Inferred edit-form input — the target row plus all four fields. */
+export type EditCustomCurrencyInput = z.infer<typeof editCustomCurrencySchema>;

@@ -6,6 +6,7 @@
 	// `enhance` upgrades it for inline feedback without a full navigation.
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
+	import { resolve } from '$app/paths';
 	import { renameGroupSchema } from '$lib/schemas/group';
 	import { network } from '$lib/pwa/online.svelte';
 	import { writeDisabled } from '$lib/pwa/offline-writes';
@@ -13,6 +14,7 @@
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
 	import GroupNav from '$lib/components/GroupNav.svelte';
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -24,6 +26,12 @@
 	const { form: renameData, message, submitting, enhance } = renameForm;
 
 	const write = $derived(writeDisabled(network.offline, $submitting));
+
+	// Custom currencies live on their own screen (issue #62; PLAN §7.5.2) — this is
+	// the entry point to it.
+	const currenciesHref = $derived(
+		resolve('/groups/[id]/settings/currencies', { id: data.group.id })
+	);
 </script>
 
 <svelte:head>
@@ -80,6 +88,25 @@
 					</p>
 				{/if}
 			</form>
+		</Card.Content>
+	</Card.Root>
+
+	<Card.Root>
+		<Card.Header>
+			<Card.Title>Currencies</Card.Title>
+			<Card.Description>
+				Define your own currency for recording transactions — an unlisted national currency, or
+				something that was never money. Balances stay in {data.group.settlementCurrency}.
+			</Card.Description>
+		</Card.Header>
+		<Card.Content>
+			<a
+				href={currenciesHref}
+				class="flex min-h-11 items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent/50"
+			>
+				Manage custom currencies
+				<ChevronRightIcon class="size-4 text-muted-foreground" aria-hidden="true" />
+			</a>
 		</Card.Content>
 	</Card.Root>
 </div>

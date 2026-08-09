@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
 	createCustomCurrencySchema,
+	customCurrencyRefSchema,
+	editCustomCurrencySchema,
 	updateCustomCurrencySchema,
 	DISPLAY_CODE_MAX_LENGTH
 } from './custom-currency';
@@ -143,5 +145,47 @@ describe('updateCustomCurrencySchema (partial — the frozen fields may be omitt
 		expect(updateCustomCurrencySchema.safeParse({ exponent: 4 }).success).toBe(false);
 		expect(updateCustomCurrencySchema.safeParse({ displayCode: '   ' }).success).toBe(false);
 		expect(updateCustomCurrencySchema.safeParse({ symbol: '' }).success).toBe(false);
+	});
+});
+
+describe('the manage-currencies FORM schemas (#62)', () => {
+	it('editCustomCurrencySchema carries the target row plus all four fields', () => {
+		const parsed = editCustomCurrencySchema.parse({ code: 'cur_beer', ...VALID });
+		expect(parsed).toEqual({ code: 'cur_beer', ...VALID });
+	});
+
+	it('normalizes the edit form exactly as create does', () => {
+		const parsed = editCustomCurrencySchema.parse({
+			code: 'cur_beer',
+			...VALID,
+			displayCode: ' pint '
+		});
+		expect(parsed.displayCode).toBe('PINT');
+	});
+
+	it('rejects an edit that names no row — the opaque code is how a form targets one', () => {
+		expect(editCustomCurrencySchema.safeParse(VALID).success).toBe(false);
+		expect(editCustomCurrencySchema.safeParse({ code: '  ', ...VALID }).success).toBe(false);
+	});
+
+	it('still requires every field: an HTML form always posts all of them', () => {
+		for (const key of ['displayCode', 'name', 'symbol', 'exponent'] as const) {
+			const input: Record<string, unknown> = { code: 'cur_beer', ...VALID };
+			delete input[key];
+			expect(editCustomCurrencySchema.safeParse(input).success, `missing ${key}`).toBe(false);
+		}
+	});
+
+	it('customCurrencyRefSchema is the delete target and nothing else', () => {
+		expect(customCurrencyRefSchema.parse({ code: 'cur_beer' })).toEqual({ code: 'cur_beer' });
+		expect(customCurrencyRefSchema.safeParse({ code: '' }).success).toBe(false);
+	});
+
+	it('the three form schemas are structurally distinct (Superforms ids derive from shape)', () => {
+		const shape = (s: { safeParse: (v: unknown) => { success: boolean } }) => s;
+		// create has no `code`; edit has `code` + 4 fields; the ref has ONLY `code`.
+		expect(shape(createCustomCurrencySchema).safeParse({ code: 'cur_x' }).success).toBe(false);
+		expect(customCurrencyRefSchema.safeParse({ code: 'cur_x' }).success).toBe(true);
+		expect(editCustomCurrencySchema.safeParse({ code: 'cur_x' }).success).toBe(false);
 	});
 });
