@@ -27,9 +27,11 @@ import {
 	toGroupDto,
 	toMemberDto,
 	toBalanceDto,
+	toGroupCurrencyDto,
 	toTransactionListItemDto,
 	toTransactionDetailDto
 } from '$lib/server/api/v1';
+import type { GroupCurrency } from '$lib/server/currencies';
 import { CURRENCIES } from '$lib/money';
 import { apiErrorEnvelope } from '$lib/server/api/errors';
 import {
@@ -100,6 +102,35 @@ const balances: MemberBalance[] = [
 	// Negative balances are real (a debtor) — the Money schema must accept them.
 	{ memberId: 'mem_grace', balance: -45000 }
 ];
+
+/** The internal identifier no `/api/v1` payload may carry, in EITHER direction. */
+const OPAQUE_CURRENCY_CODE = 'cur_9f2e5a10-0000-4000-8000-000000000001';
+
+/** A seeded row of a group's currency set (`code == display_code`). */
+const seededGroupCurrency: GroupCurrency = {
+	code: 'THB',
+	displayCode: 'THB',
+	name: 'Thai Baht',
+	exponent: 2,
+	symbol: '฿',
+	groupId: null,
+	createdBy: null,
+	createdAt: null,
+	isCustom: false
+};
+
+/** A group-defined row — the case where the display code and the row key diverge. */
+const customGroupCurrency: GroupCurrency = {
+	code: OPAQUE_CURRENCY_CODE,
+	displayCode: 'BEER',
+	name: 'Bottle of beer',
+	exponent: 0,
+	symbol: '🍺',
+	groupId: 'grp_tokyo',
+	createdBy: 'usr_ada',
+	createdAt: new Date('2026-08-01T00:00:00.000Z'),
+	isCustom: true
+};
 
 const listItem: TransactionListItem = {
 	id: 'txn_ramen',
@@ -203,6 +234,19 @@ describe('live DTO output matches the spec (PLAN §16.10)', () => {
 		}
 	});
 
+	it('GroupCurrency — the real mapper output for a seeded AND a group-defined row', () => {
+		// The group-scoped table (issue #68): same triple as `Currency`, but keyed by
+		// DISPLAY code, so `BEER` must validate here and `cur_…` must not.
+		expectValid('GroupCurrency', toGroupCurrencyDto(seededGroupCurrency));
+		expectValid('GroupCurrency', toGroupCurrencyDto(customGroupCurrency));
+		expectInvalid('GroupCurrency', { code: OPAQUE_CURRENCY_CODE, exponent: 0, symbol: '🍺' });
+		// And it stays the SMALL reference triple — `name` / `isCustom` are not on the wire.
+		expectInvalid('GroupCurrency', {
+			...toGroupCurrencyDto(customGroupCurrency),
+			name: 'Bottle of beer'
+		});
+	});
+
 	it('Error — every envelope the real `errors.ts` builder can emit', () => {
 		expectValid('Error', apiErrorEnvelope('not_found'));
 		expectValid('Error', apiErrorEnvelope('forbidden_scope'));
@@ -244,11 +288,25 @@ describe('live DTO output matches the spec (PLAN §16.10)', () => {
 	});
 
 	it('the reference table and the settlement currency stay ISO-4217', () => {
-		// Only the MONEY code widened. `Currency.code` (GET /currencies) and
+		// Only the MONEY code widened. `Currency.code` (the GLOBAL GET /currencies) and
 		// `Group.settlementCurrency` are still the strict 3-letter form, because a custom
 		// currency is entry-only and global-table-invisible (ADR-0014 decisions 1 + 7).
+		// The group-scoped table is the one place a display code is served (`GroupCurrency`).
 		expectInvalid('Currency', { code: 'BEER', exponent: 0, symbol: '🍺' });
 		expectInvalid('Group', { ...toGroupDto(group), settlementCurrency: 'BEER' });
+	});
+
+	// ── The WRITE body speaks display code too (issue #68; ADR-0014 decision 8) ──
+	it('TransactionInput accepts a group-defined display code and REJECTS the opaque key', () => {
+		// The published contract has to permit what the routes now accept, and must not
+		// permit the internal identifier — the spec is where "the opaque code is not part
+		// of this API" is enforceable for a client that never reads our source.
+		const beerBody = { ...QUICKSTART_CREATE_BODY, currency: 'BEER' };
+		expectValid('TransactionInput', beerBody);
+		expectInvalid('TransactionInput', {
+			...QUICKSTART_CREATE_BODY,
+			currency: OPAQUE_CURRENCY_CODE
+		});
 	});
 
 	it('rejects a payload that drifts from the schema (the check actually bites)', () => {

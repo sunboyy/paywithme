@@ -29,7 +29,8 @@ info:
     - **Money**: every monetary value is a self-describing
       `{ "amount": <integer minor units>, "currency": "<ISO code>" }` object. Never a
       float, never a formatted string. Discover each currency's minor-unit exponent
-      and symbol once via `GET /currencies`.
+      and symbol once via `GET /currencies` — or, for a group that defined a currency
+      of its own, `GET /groups/{gid}/currencies`.
     - **Errors**: every error is `{ "error": { "code", "message", "details"? } }`.
     - **CORS is closed** — this API is server-to-server; it is not callable from a
       browser page.
@@ -195,6 +196,41 @@ paths:
                   balance: { amount: 45000, currency: 'THB' }
                 - memberId: 'mem_grace'
                   balance: { amount: -45000, currency: 'THB' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /groups/{gid}/currencies:
+    parameters:
+      - $ref: '#/components/parameters/GroupId'
+    get:
+      tags: [Groups]
+      operationId: listGroupCurrencies
+      summary: List the currencies this group can record in
+      description: |
+        Every currency a transaction in this group may be entered in: the currencies from
+        `GET /currencies`, plus any this group has defined for itself (an unlisted national
+        currency, or a unit that was never money, like `BEER`). Each is keyed by its
+        **display code** — the same code transactions report and the code you send back in
+        a write body.
+
+        Use this to discover a group-defined currency you have not already seen on a
+        transaction, and to get its `exponent` and `symbol` — the global `GET /currencies`
+        is a static table and does not list them. A group-defined code means nothing
+        outside its own group. Unpaginated.
+      responses:
+        '200':
+          description: The currencies this group can record in.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/GroupCurrency' }
+              example:
+                - { code: 'THB', exponent: 2, symbol: '฿' }
+                - { code: 'JPY', exponent: 0, symbol: '¥' }
+                - { code: 'BEER', exponent: 0, symbol: '🍺' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -595,10 +631,14 @@ components:
         unit that was never money, like `BEER`), and a transaction entered in one carries
         the short code that group chose.
 
+        This is the vocabulary in **both** directions: the code a transaction reports is
+        the code you send back when you write one.
+
         A group-defined code is meaningful **only inside its own group**: two groups may
         each define the same code for unrelated units, and `GET /currencies` — a global
-        table — does not list them, so their `exponent` and `symbol` cannot be resolved
-        from it. Never treat such a code as ISO-4217 and never carry it between groups.
+        table — does not list them. Resolve their `exponent` and `symbol` from
+        `GET /groups/{gid}/currencies` instead. Never treat such a code as ISO-4217 and
+        never carry it between groups.
       examples: ['THB', 'JPY', 'BEER']
 
     Money:
@@ -636,6 +676,27 @@ components:
         symbol:
           type: string
           description: The display symbol, e.g. `฿`.
+
+    GroupCurrency:
+      type: object
+      description: |
+        One currency a specific group can record a transaction in, and how to format it.
+        The same triple as `Currency`, with one difference: `code` is a **display code**,
+        so it is an ISO-4217 code for a listed currency and the group's own short code
+        (`BEER`) for one that group defined. Only the group-scoped
+        `GET /groups/{gid}/currencies` serves these; the global `GET /currencies` stays
+        strictly ISO-4217.
+      required: [code, exponent, symbol]
+      additionalProperties: false
+      properties:
+        code: { $ref: '#/components/schemas/DisplayCurrencyCode' }
+        exponent:
+          type: integer
+          minimum: 0
+          description: Minor units per major unit, as a power of ten. `2` for `THB`, `0` for `BEER`.
+        symbol:
+          type: string
+          description: The display symbol, e.g. `฿` — chosen by a member for a group-defined currency.
 
     Group:
       type: object
@@ -990,16 +1051,18 @@ components:
           minimum: 0
           description: The total in `currency`'s minor units. Must be greater than zero unless `itemized`.
         currency:
-          allOf: [{ $ref: '#/components/schemas/CurrencyCode' }]
+          allOf: [{ $ref: '#/components/schemas/DisplayCurrencyCode' }]
           description: |
-            The **entry** currency — what was actually spent. May differ from the group's
-            settlement currency, but must be one of the ISO-4217 codes from `GET /currencies`.
+            The **entry** currency — what was actually spent, named by its **display code**:
+            the same code a transaction reports on the way out. May differ from the group's
+            settlement currency.
 
-            A currency a group defined for itself cannot be named here, because this API never
-            discloses the internal identifier such a currency is stored under (see
-            `DisplayCurrencyCode`). Since this body is a FULL replacement, a transaction entered
-            in one is therefore **not editable through this API in v1** — read it, delete it and
-            restore it here; edit it in the app.
+            One of the ISO-4217 codes from `GET /currencies`, or a code this group defined for
+            itself (see `GET /groups/{gid}/currencies`). It is resolved against the group in
+            the path, so a code belonging to another group is rejected exactly like an unknown
+            one — a `422 validation_error` naming `currency`. A transaction entered in a
+            group-defined currency therefore round-trips: `PUT` back the `currency` a `GET`
+            served you.
         exchangeRate:
           type: string
           pattern: '^\d{1,12}(?:\.\d{1,6})?$'

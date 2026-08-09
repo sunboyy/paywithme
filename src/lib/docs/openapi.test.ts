@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { loadOpenApiJson, loadOpenApiYaml } from './openapi';
+import { loadOpenApiJson, loadOpenApiYaml, OPENAPI_JSON_FILE, OPENAPI_YAML_FILE } from './openapi';
 
 const spec = loadOpenApiYaml();
 
@@ -94,6 +94,17 @@ describe('spec-wide conventions (PLAN §16.3, §16.9)', () => {
 		expect(spec.security).toEqual([{ bearerAuth: [] }]);
 		const schemes = (spec.components as Record<string, Record<string, unknown>>).securitySchemes;
 		expect(schemes.bearerAuth).toMatchObject({ type: 'http', scheme: 'bearer' });
+	});
+
+	it('never mentions the opaque currency key — in EITHER direction (ADR-0014 #8)', () => {
+		// `/api/v1` speaks display code both ways; the internal `cur_…` row key is not
+		// part of the contract and must not be documented as if it were — not in an
+		// example, not in a description, not in a schema. A published example is the
+		// fastest way for an internal identifier to become a de-facto contract, so this
+		// scans the raw bytes of both published files rather than the parsed tree.
+		for (const file of [OPENAPI_YAML_FILE, OPENAPI_JSON_FILE]) {
+			expect(readFileSync(file, 'utf8')).not.toContain('cur_');
+		}
 	});
 });
 

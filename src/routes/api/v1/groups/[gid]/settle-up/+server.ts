@@ -14,6 +14,17 @@
 // settlement currency is loaded from the group row (NEVER trusted from the payload);
 // a group the key can't see → 404 (conflated). On success we re-read the persisted
 // detail and return the `TransactionDetail` DTO, 201 Created (§16.4 response table).
+//
+// ── Why there is no display-code translation here (ADR-0014 decision 8) ───────
+// The sibling write endpoints translate their body's `currency` from a display code
+// to the internal currency key. This one has NOTHING TO TRANSLATE, by construction:
+// the request body carries no currency at all, and the currency the built Transfer
+// uses is the group's SETTLEMENT currency, read from the group row. A settlement
+// currency is always one of the seeded 29 (decision 1 — a custom currency is
+// entry-only), and a seeded row satisfies `code == display_code`, so the value is
+// already in BOTH vocabularies at once. Adding a translation call would be a no-op
+// on a server-derived value; this comment is here so its absence reads as a decision
+// rather than an omission.
 
 import { z } from 'zod';
 import { getGroupForUser } from '$lib/server/groups';

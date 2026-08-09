@@ -17,7 +17,7 @@ import {
 	softDeleteTransaction
 } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
-import { resolveEntryCurrency } from '$lib/server/entry-currency';
+import { resolveEntryCurrency, resolveWriteCurrency } from '$lib/server/entry-currency';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
@@ -55,6 +55,13 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 // 422 via the wrapper), refuses a soft-deleted txn (TransactionDeletedError → 422
 // "restore first"), and 404s an absent / other-group id (conflated). On success we
 // re-read the persisted detail and return the `TransactionDetail` DTO, 200.
+//
+// The body's `currency` is a DISPLAY code (§7.5.2 "REST surface"; ADR-0014 decision
+// 8), translated to the internal currency key before the service runs. This is what
+// makes the resource round-trip: the `currency` a GET served can be sent straight
+// back, including for a transaction recorded in a currency the group defined itself
+// — which a full-replacement PUT could not otherwise express, since the opaque key
+// is never disclosed. Unresolvable → the ordinary entry-currency 422.
 export const PUT = withWriteErrorHandling(async ({ locals, params, request }) => {
 	const principal = locals.apiKey;
 	if (!principal) return unauthorized();
@@ -69,8 +76,11 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 	const limited = await requireRateLimit(principal, 'write');
 	if (limited) return limited;
 
-	// Unparseable body → 400. The parsed value is the full internal input verbatim.
-	const input = await parseJsonBody(request);
+	// Unparseable body → 400. The parsed value is the full internal input verbatim,
+	// save for the ONE documented substitution (§16.4): `currency` arrives as a
+	// display code and is translated to the internal key against THIS group.
+	const body = await parseJsonBody(request);
+	const input = await resolveWriteCurrency(gid, body);
 
 	// Throws TransactionValidationError (→ 422), TransactionDeletedError (→ 422),
 	// GroupAccessError / TransactionNotFoundError (→ 404) — all mapped by the wrapper.

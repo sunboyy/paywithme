@@ -24,12 +24,31 @@ vi.mock('$lib/server/transactions', async (importOriginal) => {
 const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
 vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
 
+// The `currencies` table, stubbed with a thenable query chain (as in
+// `entry-currency.test.ts`), so the REAL display-code translation runs here and only
+// the rows it reads are faked. `state.currencyRows` = this group's CUSTOM rows; the
+// seeded 29 are compiled in and need no stub.
+const { select, state } = vi.hoisted(() => {
+	const state = { currencyRows: [] as Record<string, unknown>[] };
+	const select = vi.fn(() => {
+		const chain: Record<string, unknown> = {};
+		chain.from = () => chain;
+		chain.where = () => chain;
+		chain.then = (resolve: (v: unknown) => unknown) => resolve(state.currencyRows);
+		return chain;
+	});
+	return { select, state };
+});
+vi.mock('$lib/server/db', () => ({ db: { select } }));
+
 import { GET, PUT, DELETE } from './+server';
 import {
 	TransactionNotFoundError,
 	TransactionValidationError,
 	TransactionDeletedError
 } from '$lib/server/transactions';
+import { buildEntryCurrencySchema, UNSUPPORTED_CURRENCY_MESSAGE } from '$lib/schemas/currency';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
@@ -131,6 +150,7 @@ const detail = {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	state.currencyRows = [];
 	requireRateLimit.mockResolvedValue(null);
 });
 
@@ -223,47 +243,123 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 		]);
 	});
 
-	// ── The GET → PUT round trip for a CUSTOM-currency transaction (issue #64) ──
-	// A DELIBERATE, DOCUMENTED LIMIT of v1, pinned here so it is a decision rather
-	// than an emergent surprise.
+	// ── The GET → PUT round trip for a CUSTOM-currency transaction (issue #68) ──
 	//
-	// `TransactionInput.currency` is validated against the group's allowed set, keyed
-	// on the `currencies` PRIMARY KEY — which for a group-defined row is the opaque
-	// `cur_…`. Reads now emit only `display_code` (ADR-0014 decision 7, and the whole
-	// point of this task), and no v1 endpoint lists a group's own currencies
-	// (`GET /currencies` is the static global table by §16.4). So a client has no way
-	// to name a custom currency in a write body, and `PUT` is FULL REPLACEMENT, so it
-	// cannot simply omit the field either: a custom-currency transaction is not
-	// editable through this API in v1 and must be edited in the app.
+	// This is the property that makes `PUT` an honest full-replacement resource: the
+	// representation `GET` serves must be one this endpoint accepts back. Until #68 it
+	// was not — reads emitted `display_code` (#64) and writes demanded the opaque key,
+	// so `3 BEER` could be read and never written back. ADR-0014 decision 8 closes the
+	// gap by making the write path speak display code too.
 	//
-	// The fix is NOT to accept `display_code` on the write path or to add a
-	// per-group currencies endpoint — either is a design change beyond ADR-0014
-	// decision 7's "writes are unchanged", and is filed for a recorded decision.
-	//
-	// That the DISPLAY code genuinely fails validation is proved where the rule lives
-	// (`lib/schemas/transaction.test.ts`, "rejects the display code — only the primary
-	// key identifies a row"); this pins how the boundary REPORTS it.
-	it('a PUT naming a custom currency by its DISPLAY code → 422 (not editable in v1)', async () => {
-		updateTransaction.mockRejectedValue(
-			new TransactionValidationError([
-				{
-					code: 'custom',
-					path: ['currency'],
-					message: 'Currency is not available for this group'
-				} as never
-			])
-		);
-		const { status, body } = await read(
-			(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'BEER' }))) as Response
-		);
-		expect(status).toBe(422);
-		expect(body.error.code).toBe('validation_error');
-		expect(body.error.details.fieldErrors.currency).toEqual([
-			'Currency is not available for this group'
-		]);
-		// And the response says nothing the client could retry WITH — no opaque code is
-		// handed back as a consolation. That is the leak this task closed.
-		expect(JSON.stringify(body)).not.toContain('cur_');
+	// The service is mocked here, so acceptance is checked against the very gate the
+	// real service builds: `buildEntryCurrencySchema` over the group's set, keyed on
+	// `currencies.code` (`transactions.ts`). Revert the route translation and the
+	// forwarded `BEER` fails that gate — which is exactly the old bug.
+	describe('the DISPLAY code round-trips (§7.5.2 "REST surface"; ADR-0014 #8)', () => {
+		/** This group's own custom row: `BEER`, stored under an opaque key. */
+		const BEER_ROW = {
+			code: 'cur_beer',
+			displayCode: 'BEER',
+			name: 'Bottle of beer',
+			exponent: 0,
+			symbol: '🍺'
+		};
+
+		/** The allowed entry-currency set the service assembles for this group. */
+		function groupGate() {
+			return buildEntryCurrencySchema([...SEEDED_CURRENCY_DESCRIPTORS, BEER_ROW]);
+		}
+
+		/** The `currency` the route handed the service. */
+		function forwardedCurrency(): unknown {
+			return (updateTransaction.mock.calls[0][0].input as { currency: unknown }).currency;
+		}
+
+		/** The stored transaction: 3 BEER @ 250, settling to ฿750.00. */
+		const beerDetail = {
+			...detail,
+			amountTotal: 3,
+			currency: 'cur_beer',
+			amountTotalSettlement: 75000,
+			isForeign: true,
+			payers: [{ memberId: 'm1', amountPaid: 3 }]
+		};
+
+		beforeEach(() => {
+			state.currencyRows = [BEER_ROW];
+			updateTransaction.mockResolvedValue(undefined);
+			getTransactionDetail.mockResolvedValue(beerDetail);
+		});
+
+		it('GET serves `BEER`, and PUTting that exact body back is accepted unchanged', async () => {
+			// 1. READ. The wire says `BEER`; the opaque key it is stored under never appears.
+			const got = await read((await GET(makeEvent('g1', 't1'))) as Response);
+			expect(got.body.amount).toEqual({ amount: 3, currency: 'BEER' });
+			expect(JSON.stringify(got.body)).not.toContain('cur_');
+
+			// 2. WRITE THE SAME CODE BACK, verbatim from what the read served.
+			const echoed = {
+				...validInput,
+				amountTotal: 3,
+				currency: got.body.amount.currency,
+				exchangeRate: '250',
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm1', amountPaid: 3 }]
+			};
+			const put = await read((await PUT(makeMutationEvent('PUT', echoed))) as Response);
+			expect(put.status).toBe(200);
+
+			// 3. The service received the STORED key — so the transaction's currency is
+			//    unchanged by the round trip, which is the whole claim.
+			expect(forwardedCurrency()).toBe('cur_beer');
+			expect(groupGate().safeParse(forwardedCurrency()).success).toBe(true);
+			expect(updateTransaction.mock.calls[0][0].input).toEqual({
+				...echoed,
+				currency: 'cur_beer'
+			});
+			// 4. And the response still speaks display code.
+			expect(put.body.amount).toEqual({ amount: 3, currency: 'BEER' });
+		});
+
+		it('the OPAQUE key is REJECTED on the way in, even though it is the stored value', async () => {
+			// Accepting it would make the internal identifier a de-facto contract — the
+			// thing decision 8 explicitly refuses. It must fail like an invention.
+			await read(
+				(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'cur_beer' }))) as Response
+			);
+			expect(forwardedCurrency()).not.toBe('cur_beer');
+			const gated = groupGate().safeParse(forwardedCurrency());
+			expect(gated.success).toBe(false);
+			expect(gated.error?.issues[0].message).toBe(UNSUPPORTED_CURRENCY_MESSAGE);
+		});
+
+		it("another group's display code fails exactly like an unknown code", async () => {
+			// This group defines nothing; `BEER` lives elsewhere. Both cases must forward
+			// the SAME unusable value, so the 422 leaks nothing about other groups.
+			state.currencyRows = [];
+
+			await read(
+				(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'BEER' }))) as Response
+			);
+			const other = forwardedCurrency();
+
+			updateTransaction.mockClear();
+			await read(
+				(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'XXX' }))) as Response
+			);
+			const unknown = forwardedCurrency();
+
+			expect(other).toEqual(unknown);
+			expect(groupGate().safeParse(other).success).toBe(false);
+		});
+
+		it('a SEEDED body is forwarded byte-for-byte and reads no `currencies` rows', async () => {
+			// Regression: every pre-#68 client body keeps working, and pays no query.
+			getTransactionDetail.mockResolvedValue(detail);
+			await read((await PUT(makeMutationEvent('PUT', validInput))) as Response);
+			expect(updateTransaction.mock.calls[0][0].input).toEqual(validInput);
+			expect(select).not.toHaveBeenCalled();
+		});
 	});
 
 	it('editing a soft-deleted txn (TransactionDeletedError) → 422 validation_error', async () => {
