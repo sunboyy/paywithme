@@ -139,7 +139,8 @@ function programForm(opts: { valid: boolean; data?: unknown }) {
 function makeLoadEvent(user: User | null) {
 	return {
 		params: { id: 'g1', txid: 't1' },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL('http://localhost/groups/g1/transactions/t1')
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -151,7 +152,8 @@ function makeActionEvent(user: User | null) {
 	return {
 		request,
 		params: { id: 'g1', txid: 't1' },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL(request.url)
 	} as unknown as Parameters<(typeof actions)['edit']>[0];
 }
 

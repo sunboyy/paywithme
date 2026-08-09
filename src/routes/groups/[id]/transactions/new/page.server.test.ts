@@ -136,7 +136,8 @@ function makeActionEvent(user: User | null) {
 	return {
 		request,
 		params: { id: 'g1' },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL(request.url)
 	} as unknown as Parameters<(typeof actions)['default']>[0];
 }
 

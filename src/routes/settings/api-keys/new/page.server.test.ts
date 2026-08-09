@@ -21,7 +21,10 @@ import { load, actions } from './+page.server';
 const USER = { id: 'user_1', name: 'Ann' };
 
 function makeLoadEvent(user: typeof USER | null) {
-	return { locals: { user } } as unknown as Parameters<typeof load>[0];
+	return {
+		locals: { user },
+		url: new URL('http://localhost/settings/api-keys/new')
+	} as unknown as Parameters<typeof load>[0];
 }
 
 /** A form-encoded POST — exactly the shape a no-JS submission arrives in. */
@@ -32,9 +35,12 @@ function makeActionEvent(fields: Record<string, string>, user: typeof USER | nul
 		body: new URLSearchParams(fields).toString()
 	});
 	const cookies = { set: vi.fn(), get: vi.fn(), delete: vi.fn() };
-	const event = { request, locals: { user }, cookies } as unknown as Parameters<
-		(typeof actions)['default']
-	>[0];
+	const event = {
+		request,
+		locals: { user },
+		cookies,
+		url: new URL(request.url)
+	} as unknown as Parameters<(typeof actions)['default']>[0];
 	return { event, cookies };
 }
 
@@ -69,7 +75,11 @@ describe('/settings/api-keys/new load', () => {
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
-			if (isRedirect(e)) expect(e.location).toBe('/login');
+			if (isRedirect(e)) {
+				expect(e.location).toBe(
+					'/login?redirectTo=' + encodeURIComponent('/settings/api-keys/new')
+				);
+			}
 		}
 	});
 
@@ -180,7 +190,11 @@ describe('/settings/api-keys/new create action', () => {
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
-			if (isRedirect(e)) expect(e.location).toBe('/login');
+			if (isRedirect(e)) {
+				expect(e.location).toBe(
+					'/login?redirectTo=' + encodeURIComponent('/settings/api-keys/new')
+				);
+			}
 		}
 		expect(createApiKeyForUser).not.toHaveBeenCalled();
 	});

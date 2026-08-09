@@ -22,7 +22,8 @@ type GroupCard = Group & { net: number | null; netFormatted: string | null };
 /** Minimal `load` event with `locals.user`. */
 function makeLoadEvent(user: User | null) {
 	return {
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL('http://localhost/groups?view=mine')
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -46,7 +47,7 @@ describe('/groups load', () => {
 		getUserNetBalanceByGroup.mockResolvedValue(new Map());
 	});
 
-	it('redirects an anonymous user to /login and never lists groups', async () => {
+	it('redirects an anonymous user to login with the requested path and query', async () => {
 		try {
 			await load(makeLoadEvent(null));
 			expect.unreachable('expected a redirect to be thrown');
@@ -54,7 +55,7 @@ describe('/groups load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups?view=mine'));
 			}
 		}
 

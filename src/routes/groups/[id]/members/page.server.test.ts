@@ -94,7 +94,8 @@ function makeActionEvent(fields: Record<string, string>, user: User | null, id =
 	return {
 		request,
 		params: { id },
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL(request.url)
 	} as unknown as Parameters<(typeof actions)['addMember']>[0];
 }
 
@@ -128,7 +129,7 @@ describe('/groups/[id]/members load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(getGroupForUser).not.toHaveBeenCalled();
@@ -271,7 +272,7 @@ describe('/groups/[id]/members ?/renameMember action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(renameMember).not.toHaveBeenCalled();
@@ -319,7 +320,7 @@ describe('/groups/[id]/members ?/removeMember action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(removeMember).not.toHaveBeenCalled();
@@ -388,7 +389,7 @@ describe('/groups/[id]/members ?/reactivate action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(reactivateMember).not.toHaveBeenCalled();
@@ -430,7 +431,7 @@ describe('/groups/[id]/members ?/createInvite action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(createInvite).not.toHaveBeenCalled();
@@ -468,7 +469,7 @@ describe('/groups/[id]/members ?/revokeInvite action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/g1/members'));
 			}
 		}
 		expect(revokeInvite).not.toHaveBeenCalled();

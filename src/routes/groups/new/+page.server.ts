@@ -11,22 +11,23 @@ import { zod4 } from 'sveltekit-superforms/adapters';
 import { createGroupSchema } from '$lib/schemas/group';
 import { createGroup } from '$lib/server/groups';
 import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, url }) => {
 	// Creating a group requires an authenticated session (the creator becomes the
 	// first member — PLAN §6.1). `requireUser` THROWS the redirect, so it stays
 	// outside any try/catch.
-	requireUser(locals);
+	requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 	return { form: await superValidate(zod4(createGroupSchema)) };
 };
 
 export const actions: Actions = {
-	default: async ({ request, locals }) => {
+	default: async ({ request, locals, url }) => {
 		// Guard the mutation too — never trust that `load` ran for this request.
 		// `requireUser` THROWS the redirect, so it stays above the validate/try below.
-		const user = requireUser(locals);
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(createGroupSchema));
 		if (!form.valid) {

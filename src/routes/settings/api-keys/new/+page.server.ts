@@ -16,17 +16,17 @@ import { zod4 } from 'sveltekit-superforms/adapters';
 import { createApiKeySchema } from '$lib/schemas/api-key';
 import { createApiKeyForUser } from '$lib/server/api-keys';
 import { setApiKeyReveal } from '$lib/server/api-key-reveal';
+import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import type { Actions, PageServerLoad } from './$types';
 
 /** Where the post-create redirect lands — the one-time reveal screen. */
 const REVEAL_ROUTE = '/settings/api-keys/created';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, url }) => {
 	// Minting a key acts on the caller's own account, so a session is required.
 	// `redirect()` throws — keep it out of any try/catch (the 2.5/2.6 trap).
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
+	requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 	// The schema's defaults (`scope: 'read'`, `expiry: 'never'`) seed the form, so
 	// the SSR'd HTML already has the least-privilege, non-expiring options checked
@@ -35,11 +35,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 };
 
 export const actions: Actions = {
-	default: async ({ request, locals, cookies }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
-		const userId = locals.user.id;
+	default: async ({ request, locals, cookies, url }) => {
+		const userId = requireUser(locals, { redirectTo: url.pathname }).id;
 
 		const form = await superValidate(request, zod4(createApiKeySchema));
 		if (!form.valid) {

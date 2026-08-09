@@ -21,6 +21,7 @@ import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { categoriesFor } from '$lib/categories';
 import { getCurrency, CURRENCIES, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
 import { listEntityActivity, type ActivityEntry } from '$lib/server/activity';
@@ -35,10 +36,14 @@ import {
 } from '$lib/server/transactions';
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ params, locals }) => {
+export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard (task 3.8): anonymous → redirect; no-access/not-found → 404.
 	// THROWS control flow — keep outside any try/catch.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	const settlementCurrency = group.settlementCurrency as CurrencyCode;
 	const currency = getCurrency(settlementCurrency);
@@ -129,8 +134,8 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 
 export const actions: Actions = {
 	// ── edit ────────────────────────────────────────────────────────────────────
-	edit: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	edit: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		// Re-load the group for its settlement currency + member allow-list (trusted
 		// group context, NOT the payload).
@@ -186,8 +191,8 @@ export const actions: Actions = {
 	},
 
 	// ── delete (soft) ─────────────────────────────────────────────────────────────
-	delete: async ({ params, locals }) => {
-		const user = requireUser(locals);
+	delete: async ({ params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 		try {
 			await softDeleteTransaction({
 				userId: user.id,
@@ -206,8 +211,8 @@ export const actions: Actions = {
 	},
 
 	// ── restore ─────────────────────────────────────────────────────────────────
-	restore: async ({ params, locals }) => {
-		const user = requireUser(locals);
+	restore: async ({ params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 		try {
 			await restoreTransaction({
 				userId: user.id,

@@ -37,3 +37,8 @@ export function safeRedirectTo(value: unknown): string | null {
 	if (value.startsWith('//') || value.startsWith('/\\')) return null;
 	return value;
 }
+
+/** Return the requested local path and query, without origin or fragment. */
+export function pathAndQuery(url: Pick<URL, 'pathname' | 'search'>): string {
+	return url.pathname + url.search;
+}

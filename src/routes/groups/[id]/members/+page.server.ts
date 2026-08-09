@@ -23,6 +23,7 @@ import { addMemberSchema, memberIdSchema, renameMemberSchema } from '$lib/schema
 import { createInviteSchema, revokeInviteSchema } from '$lib/schemas/invite';
 import { GroupAccessError, userHasGroupAccess } from '$lib/server/groups';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import {
 	addMember,
 	listMembers,
@@ -56,7 +57,11 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// existence never leaked). Both helpers THROW control flow, so this call lives
 	// OUTSIDE the try/catch blocks below or the catch would swallow the navigation.
 	// It also returns the already-loaded `group`, so we don't re-query.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	// Degrade gracefully (PLAN §12): a transient list failure renders an empty
 	// member list rather than 500-ing the whole page. (Access already succeeded,
@@ -106,11 +111,11 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 };
 
 export const actions: Actions = {
-	addMember: async ({ request, params, locals }) => {
+	addMember: async ({ request, params, locals, url }) => {
 		// Guard the mutation too — never trust that `load` ran. `requireUser` THROWS
 		// a redirect for an anonymous caller (task 3.8 centralized guard); the
 		// service then re-asserts group access (→ 404) as defense in depth.
-		const user = requireUser(locals);
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(addMemberSchema));
 		if (!form.valid) {
@@ -138,8 +143,8 @@ export const actions: Actions = {
 		return message(form, { type: 'success', text: 'Member added' });
 	},
 
-	renameMember: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	renameMember: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(renameMemberSchema));
 		if (!form.valid) {
@@ -167,8 +172,8 @@ export const actions: Actions = {
 		return message(form, { type: 'success', text: 'Member renamed' });
 	},
 
-	removeMember: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	removeMember: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(memberIdSchema));
 		if (!form.valid) {
@@ -205,8 +210,8 @@ export const actions: Actions = {
 		return message(form, { type: 'success', text: 'Member removed' });
 	},
 
-	reactivate: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	reactivate: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(memberIdSchema));
 		if (!form.valid) {
@@ -233,8 +238,8 @@ export const actions: Actions = {
 		return message(form, { type: 'success', text: 'Member reactivated' });
 	},
 
-	createInvite: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	createInvite: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(createInviteSchema));
 		if (!form.valid) {
@@ -259,8 +264,8 @@ export const actions: Actions = {
 		return message(form, { type: 'success', text: 'Invite link created' });
 	},
 
-	revokeInvite: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	revokeInvite: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(revokeInviteSchema));
 		if (!form.valid) {

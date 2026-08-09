@@ -13,7 +13,8 @@ type User = { id: string; name: string };
 /** Minimal `load` event with `locals.user`. */
 function makeLoadEvent(user: User | null) {
 	return {
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL('http://localhost/groups/new')
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -27,7 +28,8 @@ function makeActionEvent(fields: Record<string, string>, user: User | null) {
 	});
 	return {
 		request,
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL(request.url)
 	} as unknown as Parameters<(typeof actions)['default']>[0];
 }
 
@@ -44,7 +46,7 @@ describe('/groups/new load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/new'));
 			}
 		}
 	});
@@ -74,7 +76,7 @@ describe('/groups/new default action', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/groups/new'));
 			}
 		}
 		expect(createGroup).not.toHaveBeenCalled();

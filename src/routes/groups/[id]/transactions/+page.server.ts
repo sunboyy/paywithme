@@ -12,6 +12,7 @@
 
 import { error } from '@sveltejs/kit';
 import { requireGroupAccess } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { GroupAccessError } from '$lib/server/groups';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
 import { listMembers } from '$lib/server/members';
@@ -46,7 +47,11 @@ export interface MemberFilterOption {
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard: anonymous → redirect; no-access/not-found → 404. Returns
 	// the already-loaded group. THROWS control flow → outside any try/catch.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	const settlementCurrency = group.settlementCurrency as CurrencyCode;
 	const currency = getCurrency(settlementCurrency);
