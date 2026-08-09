@@ -22,7 +22,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	});
 
 	return {
-		group: { id: group.id, name: group.name },
+		// `settlementCurrency` is read-only here (the §6.4 lock) — it is shown so the
+		// custom-currency entry point can say what balances stay denominated in.
+		group: { id: group.id, name: group.name, settlementCurrency: group.settlementCurrency },
 		renameForm: await superValidate({ name: group.name }, zod4(renameGroupSchema), {
 			errors: false
 		})
