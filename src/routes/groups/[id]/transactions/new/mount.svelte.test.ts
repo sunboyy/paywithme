@@ -41,10 +41,10 @@ function pageData(): PageData {
 			spending: [{ id: 'spending-food-drink', name: 'Food & Drink', icon: 'utensils' }],
 			transfer: [{ id: 'transfer-cash', name: 'Cash', icon: 'banknote' }]
 		},
-		currency: { code: 'THB', symbol: '฿', exponent: 2 },
+		currency: { code: 'THB', displayCode: 'THB', symbol: '฿', exponent: 2 },
 		currencies: [
-			{ code: 'THB', symbol: '฿', exponent: 2, name: 'Thai Baht' },
-			{ code: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
+			{ code: 'THB', displayCode: 'THB', symbol: '฿', exponent: 2, name: 'Thai Baht' },
+			{ code: 'JPY', displayCode: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
 		],
 		form: defaults(zod4(schema))
 	};

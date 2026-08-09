@@ -6,6 +6,11 @@
 // and the client `superForm` (tasks 4.7–4.11) both build their validation from
 // this module, so the rules and their messages never drift across the boundary.
 //
+// Two pieces of GROUP CONTEXT are closed over by the factory rather than trusted
+// from the payload: the settlement currency (see below) and — since PLAN §7.5.2 /
+// ADR-0014 — the group's permitted ENTRY currencies (the seeded 29 plus the
+// group's own custom rows). See `BuildTransactionSchemaOptions.entryCurrencies`.
+//
 // ── What this schema DOES and DOES NOT do (scope, PLAN §7.4) ──────────────────
 // It validates every §7.4 rule that is decidable from the SUBMITTED PAYLOAD
 // ALONE — structural shape and cross-field math within the input, all in
@@ -21,7 +26,8 @@
 //       equality computed with integer round-half-up math; discount ≤ its base
 //       and `amount_total >= 0`.
 //   - category: a known category id whose `applies_to` matches `type`.
-//   - FX (§7.6): supported `currency`; rate==1 iff `currency` == settlement;
+//   - FX (§7.6): a `currency` the GROUP may record in (§7.5.2 — the seeded 29 plus
+//       that group's own custom rows); rate==1 iff `currency` == settlement;
 //       rate>0 for a foreign currency; and the SCALAR
 //       `amount_total_settlement == convert(amount_total, rate)`.
 //
@@ -38,8 +44,9 @@
 //   - **Membership / DB checks** ("members must belong to the transaction's
 //     group", category/currency existence vs the seeded DB rows): those need
 //     server/DB context and are enforced in the server action (task 4.7). This
-//     pure schema only checks ids against the in-app `CATEGORIES` constant and
-//     `currencyCodeSchema`; it never reaches into the DB.
+//     pure schema only checks ids against the in-app `CATEGORIES` constant and the
+//     group's ENTRY-CURRENCY set (passed in as context, §7.5.2 — the caller does
+//     the DB read); it never reaches into the DB itself.
 //
 // ── Money & numeric representation (decisions, documented) ───────────────────
 // All money fields are **integer minor units** of the transaction currency — the
@@ -66,13 +73,14 @@
 
 import { z } from 'zod';
 import {
-	asEntryCurrencyCode,
-	getCurrency,
-	type EntryCurrencyCode,
+	toCurrencyDescriptor,
+	SEEDED_CURRENCY_DESCRIPTORS,
+	type CurrencyDescriptor,
+	type CurrencyRef,
 	type SeededCurrencyCode
 } from '$lib/money';
 import { getCategory } from '$lib/categories';
-import { currencyCodeSchema } from './currency';
+import { buildEntryCurrencySchema } from './currency';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared field rules (factored out so messages never drift — mirrors group.ts).
@@ -375,17 +383,29 @@ export function applyCharges(
  * built schema uses it for the scalar `amount_total_settlement` equality check
  * (the per-share settlement DISTRIBUTION is task 4.10, deliberately not here).
  *
+ * ── The entry currency is a REF, not a bare code (PLAN §7.5.2 / ADR-0014) ─────
+ * `txnCurrency` takes either a seeded code OR a resolved {@link CurrencyDescriptor}.
+ * It used to re-resolve a bare code through `getCurrency()` — a synchronous lookup
+ * over the compiled-in seeded constant — which THROWS for a group-defined custom
+ * currency, whose code exists only as a `currencies` row. That was unreachable only
+ * while the seeded-29 enum gated every transaction write; now that a custom code can
+ * BE the entry currency, callers that have the row hand the row over. The settlement
+ * currency stays a seeded code by construction (ADR-0014 decision 1).
+ *
  * @example convertToSettlement(20000, 'CNY', 'THB', '4.85') // ¥200.00 → ฿970.00 = 97000
  * @example convertToSettlement(20000, 'CNY', 'JPY', '21.5') // ¥200.00 → ¥4300 (0-dp) = 4300
+ * @example convertToSettlement(3, beerRow, 'THB', '250') // 3 BEER (0-dp) → ฿750.00 = 75000
  */
 export function convertToSettlement(
 	amount: number,
-	txnCurrency: EntryCurrencyCode,
+	txnCurrency: CurrencyRef,
 	settlementCurrency: SeededCurrencyCode,
 	exchangeRate: string
 ): number {
-	const expTxn = currencyExponent(txnCurrency);
-	const expStl = currencyExponent(settlementCurrency);
+	// A descriptor resolves to itself (validated); a seeded code resolves through the
+	// constant. Either way this is the currency's OWN exponent — never a hardcoded dp.
+	const expTxn = toCurrencyDescriptor(txnCurrency).exponent;
+	const expStl = toCurrencyDescriptor(settlementCurrency).exponent;
 
 	// rate (≤6 fractional digits) → an integer scaled by 10^6, exactly.
 	const RATE_SCALE = 1_000_000;
@@ -413,15 +433,6 @@ export function convertToSettlement(
 		throw new Error(`Settlement conversion result out of safe-integer range: ${resultBig}`);
 	}
 	return result;
-}
-
-/** Resolve a currency's minor-unit exponent, throwing on an unknown code (defensive — validated upstream). */
-function currencyExponent(code: EntryCurrencyCode): number {
-	const currency = getCurrency(code);
-	if (currency === undefined) {
-		throw new Error(`Unknown currency code: ${String(code)}`);
-	}
-	return currency.exponent;
 }
 
 /**
@@ -567,6 +578,23 @@ export interface BuildTransactionSchemaOptions {
 	 * (task 4.7) — the pure schema never reaches into the DB.
 	 */
 	readonly memberIds?: readonly string[];
+	/**
+	 * The GROUP's permitted **entry** currencies (PLAN §7.5.2 / ADR-0014): the 29
+	 * seeded rows plus this group's own custom rows — exactly what
+	 * `listCurrenciesForGroup` returns. Group context, like `settlementCurrency`,
+	 * and for the same reason: it is never trusted from the payload.
+	 *
+	 * Two things read it, so the picker and the validator cannot disagree:
+	 *   - `currency` is validated against these codes (another group's custom code
+	 *     is rejected exactly like an unknown one);
+	 *   - the §7.6 conversion takes the RESOLVED descriptor from here, since a
+	 *     custom code cannot be looked up in the compiled-in seeded constant.
+	 *
+	 * Defaults to the seeded 29, which is what every caller that has no group
+	 * context (the MCP write path — settlement-currency-only by ADR-0014 decision 7
+	 * — and the unit tests) wants: behaviour identical to before this feature.
+	 */
+	readonly entryCurrencies?: readonly CurrencyDescriptor[];
 }
 
 /**
@@ -578,8 +606,21 @@ export interface BuildTransactionSchemaOptions {
  * Returns a Zod schema whose parsed output is a normalized {@link TransactionInput}.
  */
 export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
-	const { settlementCurrency, memberIds } = options;
+	const { settlementCurrency, memberIds, entryCurrencies = SEEDED_CURRENCY_DESCRIPTORS } = options;
 	const knownMembers = memberIds === undefined ? undefined : new Set(memberIds);
+
+	// The group's entry-currency set, indexed by the code the payload carries. The
+	// FX rules below need the RESOLVED row (its exponent, and whether it is custom),
+	// which for a group-defined currency exists nowhere else (PLAN §7.5.2).
+	const entryByCode = new Map(entryCurrencies.map((c) => [c.code, c]));
+
+	/**
+	 * The submitted entry currency, resolved. `undefined` is unreachable from a
+	 * successful parse — `currency` is validated against these very codes — so the
+	 * FX refinements below treat it as "nothing more to check" rather than failing
+	 * twice for one cause.
+	 */
+	const entryOf = (code: string): CurrencyDescriptor | undefined => entryByCode.get(code);
 
 	return (
 		z
@@ -591,7 +632,11 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 				categoryId: z.string().trim().min(1, { message: 'A category is required' }),
 				// Transaction-currency total, integer minor units (already parsed on client).
 				amountTotal: minorUnitsField,
-				currency: currencyCodeSchema,
+				// GROUP-SCOPED (PLAN §7.5.2 / ADR-0014): the seeded 29 plus this group's
+				// own custom rows. Deliberately NOT `currencyCodeSchema` — that one still
+				// guards the group's SETTLEMENT currency, which a custom currency may
+				// never be (ADR-0014 decision 1).
+				currency: buildEntryCurrencySchema(entryCurrencies),
 				exchangeRate: exchangeRateField,
 				// Canonical settlement total (settlement-currency minor units) — its
 				// equality to convert(amountTotal, rate) is checked below (§7.6 scalar).
@@ -732,17 +777,21 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 			// ── FX scalar: amount_total_settlement == convert(amount_total, rate)
 			//    (PLAN §7.6 formula). Per-SHARE settlement distribution is task 4.10. ──
 			.refine(
-				(tx) =>
-					tx.amountTotalSettlement ===
-					// `currency` is already validated as a supported code by `currencyCodeSchema`;
-					// the inferred type is the broad `string` (the enum tuple is `[string, ...]`),
-					// so tag it as an entry-currency code for the conversion helper.
-					convertToSettlement(
-						tx.amountTotal,
-						asEntryCurrencyCode(tx.currency),
-						settlementCurrency,
-						tx.exchangeRate
-					),
+				(tx) => {
+					// The RESOLVED entry row, not the bare code: a custom currency's exponent
+					// lives only in the `currencies` table, so re-resolving the code through the
+					// compiled-in seeded constant would THROW (PLAN §7.5.2 / ADR-0014).
+					const entry = entryOf(tx.currency);
+					if (entry === undefined) {
+						// Unreachable from a successful parse — `currency` was validated against
+						// this very set. Never fail twice for one cause.
+						return true;
+					}
+					return (
+						tx.amountTotalSettlement ===
+						convertToSettlement(tx.amountTotal, entry, settlementCurrency, tx.exchangeRate)
+					);
+				},
 				{
 					message: 'The settlement total must equal the converted transaction total',
 					path: ['amountTotalSettlement']

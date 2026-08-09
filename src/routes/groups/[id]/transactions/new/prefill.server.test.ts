@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 
 // §8.4 settle-via-transfer PREFILL tests for the `new` transaction page `load`
 // (task 5.4). The settle page links here with `?type=transfer&from&to&amount&category`
@@ -23,6 +24,12 @@ vi.mock('$lib/server/groups', async () => {
 });
 vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
+
+// The group-scoped ENTRY-CURRENCY set (#63; PLAN §7.5.2). The route reads it for
+// the picker AND for the group-scoped entry-currency validator; mocked to the
+// seeded 29 so these tests exercise the unchanged seeded-currency behaviour.
+const { listCurrenciesForGroup } = vi.hoisted(() => ({ listCurrenciesForGroup: vi.fn() }));
+vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 
 import { load } from './+page.server';
 
@@ -68,6 +75,10 @@ function makeLoadEvent(query = '') {
 
 beforeEach(() => {
 	getGroupForUser.mockReset();
+	listCurrenciesForGroup.mockReset();
+	listCurrenciesForGroup.mockResolvedValue(
+		SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false }))
+	);
 	listMembers.mockReset();
 	requireGroupAccess.mockReset();
 	requireUser.mockReset();

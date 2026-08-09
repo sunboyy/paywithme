@@ -1,14 +1,24 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { isHttpError } from '@sveltejs/kit';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 
 // Route test for the transaction list `load` (task 4.7): the filter state is
 // parsed from `url.searchParams` and passed to `listTransactions`; the shaped
 // rows + filter state come back. Services are mocked (no real DB).
+//
+// The GROUP-SCOPED currency set (#63; PLAN §7.5.2) is mocked here too. It is not
+// optional scaffolding: `load` reads it for every row's ENTRY-currency descriptor
+// (§7.6 Display), so leaving it unmocked would have the real service hit a DB that
+// isn't there.
 
-const { listTransactions, requireGroupAccess, listMembers } = vi.hoisted(() => ({
-	listTransactions: vi.fn(),
-	requireGroupAccess: vi.fn(),
-	listMembers: vi.fn()
-}));
+const { listTransactions, requireGroupAccess, listMembers, listCurrenciesForGroup } = vi.hoisted(
+	() => ({
+		listTransactions: vi.fn(),
+		requireGroupAccess: vi.fn(),
+		listMembers: vi.fn(),
+		listCurrenciesForGroup: vi.fn()
+	})
+);
 
 vi.mock('$lib/server/transactions', async () => {
 	const actual = await vi.importActual<typeof import('$lib/server/transactions')>(
@@ -18,10 +28,34 @@ vi.mock('$lib/server/transactions', async () => {
 });
 vi.mock('$lib/server/access', () => ({ requireGroupAccess }));
 vi.mock('$lib/server/members', () => ({ listMembers }));
+vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 
 import { load } from './+page.server';
+import { GroupAccessError } from '$lib/server/groups';
 
 const GROUP = { id: 'g1', name: 'Trip', settlementCurrency: 'THB' };
+
+/** This group's own custom currency: opaque PK, member-typed display code, 0-dp. */
+const BEER = {
+	code: 'cur_beer',
+	displayCode: 'BEER',
+	name: 'Bottle of beer',
+	symbol: '🍺',
+	exponent: 0,
+	isCustom: true
+};
+
+/** What `listCurrenciesForGroup` returns: the seeded 29 first, then the group's own. */
+function groupCurrencies(custom: (typeof BEER)[] = []) {
+	return [
+		...SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({
+			...c,
+			name: c.displayCode,
+			isCustom: false
+		})),
+		...custom
+	];
+}
 
 function makeLoadEvent(search: string) {
 	return {
@@ -36,6 +70,8 @@ beforeEach(() => {
 	requireGroupAccess.mockReset();
 	requireGroupAccess.mockResolvedValue({ user: { id: 'u1', name: 'Alice' }, group: GROUP });
 	listTransactions.mockResolvedValue([]);
+	listCurrenciesForGroup.mockReset();
+	listCurrenciesForGroup.mockResolvedValue(groupCurrencies());
 	listMembers.mockReset();
 	// Two members: the viewer (linked to u1) and one other participant slot.
 	listMembers.mockResolvedValue([
@@ -226,5 +262,70 @@ describe('/groups/[id]/transactions load — member filter (PLAN §10)', () => {
 		listMembers.mockRejectedValueOnce(new Error('db down'));
 		const result = (await load(makeLoadEvent(''))) as MemberResult;
 		expect(result.members).toEqual([]);
+	});
+});
+
+// ── The group-scoped ENTRY-currency set reaching the page (#63; PLAN §7.5.2) ──
+//
+// The list renders each row's ORIGINAL amount in the currency it was RECORDED in
+// (§7.6 Display). A group-defined currency exists only as a `currencies` row, so
+// the page cannot format one from its code alone — the resolved descriptor has to
+// travel in `data.currencies`. These assert that wiring at load level; the
+// rendering itself is covered by `mount.svelte.test.ts`.
+describe('/groups/[id]/transactions load — entry-currency descriptors (§7.5.2)', () => {
+	it("passes the group's own custom row through to `currencies`", async () => {
+		listCurrenciesForGroup.mockResolvedValue(groupCurrencies([BEER]));
+
+		const result = (await load(makeLoadEvent(''))) as {
+			currencies: { code: string; displayCode: string; symbol: string; exponent: number }[];
+		};
+
+		expect(listCurrenciesForGroup).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
+		expect(result.currencies).toContainEqual({
+			code: 'cur_beer',
+			displayCode: 'BEER',
+			symbol: '🍺',
+			exponent: 0
+		});
+	});
+
+	it('carries every seeded currency with `displayCode === code`', async () => {
+		const result = (await load(makeLoadEvent(''))) as {
+			currencies: { code: string; displayCode: string }[];
+		};
+		// The seeded invariant (PLAN §7.5.2) — a seeded row's display code IS its code,
+		// so a same-currency row keeps formatting exactly as it did before #63.
+		expect(result.currencies).toHaveLength(SEEDED_CURRENCY_DESCRIPTORS.length);
+		expect(result.currencies.every((c) => c.code === c.displayCode)).toBe(true);
+		expect(result.currencies.find((c) => c.code === 'THB')?.displayCode).toBe('THB');
+	});
+
+	it('the settlement currency travels with a displayCode too', async () => {
+		const result = (await load(makeLoadEvent(''))) as {
+			currency: { code: string; displayCode: string };
+		};
+		expect(result.currency).toEqual(expect.objectContaining({ code: 'THB', displayCode: 'THB' }));
+	});
+
+	it('404s (never 500s) when the currency read loses the access race', async () => {
+		// Access was established moments earlier, so this can only be the group
+		// vanishing mid-request — the same answer the transaction read gives.
+		listCurrenciesForGroup.mockRejectedValue(new GroupAccessError());
+		try {
+			await load(makeLoadEvent(''));
+			expect.unreachable('load should have thrown');
+		} catch (e) {
+			expect(isHttpError(e)).toBe(true);
+			expect((e as { status: number }).status).toBe(404);
+		}
+	});
+
+	it('PROPAGATES a real currency-read failure instead of degrading to an empty set', async () => {
+		// An empty currency set is not a coherent page: a row recorded in a custom
+		// currency would then have no descriptor to format with and the component would
+		// throw anyway. Swallowing this is also what previously hid the fact that these
+		// tests never mocked the service at all.
+		listCurrenciesForGroup.mockRejectedValue(new Error('connection refused'));
+		await expect(load(makeLoadEvent(''))).rejects.toThrow('connection refused');
 	});
 });

@@ -6,6 +6,7 @@ import {
 	MAX_PERCENT_BPS,
 	type ChargeInput
 } from './transaction';
+import { asEntryCurrencyCode, SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 
 // Unit tests for the shared transaction create/edit input schema (PLAN §7.4, with
 // the §7.2.2 charge model and §7.6 FX conversion). Everything here is INPUT-level:
@@ -92,9 +93,17 @@ describe('buildTransactionSchema — valid cases', () => {
 describe('buildTransactionSchema — editable date (PLAN §7.1)', () => {
 	it('defaults the date to today (UTC) when omitted', () => {
 		// `baseSpending()` carries no `date` — the schema fills it with today.
+		//
+		// BRACKETED, not a second clock read. The schema reads the wall clock when it
+		// parses and this assertion would read it again; a UTC midnight landing between
+		// the two makes them disagree, which fails once and then never reproduces. So
+		// bound the parse and accept either side of a boundary — the same before/after
+		// idiom `server/invites.test.ts` uses for expiry timestamps.
+		const before = new Date().toISOString().slice(0, 10);
 		const parsed = thbSchema.safeParse(baseSpending());
+		const after = new Date().toISOString().slice(0, 10);
 		expect(parsed.success).toBe(true);
-		expect(parsed.data?.date).toBe(new Date().toISOString().slice(0, 10));
+		expect([before, after]).toContain(parsed.data?.date);
 	});
 
 	it('accepts a backdated date (the day-after-it-happened case)', () => {
@@ -746,5 +755,193 @@ describe('buildTransactionSchema — optional member allow-list', () => {
 			memberIds: ['m1', 'm2', 'm3']
 		});
 		expect(schema.safeParse(baseSpending()).success).toBe(true);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A CUSTOM entry currency (PLAN §7.5.2 / ADR-0014) — issue #63.
+//
+// A group-defined currency is entry-only: it never touches the settlement side, so
+// every rule below is about the ENTRY half. The fixtures give BEER exponent 0 on
+// purpose — the conversion then has to bridge a 0-dp entry currency to a 2-dp
+// settlement currency, which is exactly where a hardcoded ×100 would show up.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** This group's custom currency: opaque PK, member-typed display code, 0-dp. */
+const BEER = { code: 'cur_beer', displayCode: 'BEER', exponent: 0, symbol: '🍺' };
+/** ANOTHER group's custom currency — a real row, absent from THIS group's set. */
+const THEIR_TOKEN = { code: 'cur_other', displayCode: 'TOKEN', exponent: 2, symbol: 'T' };
+
+/** A THB group that has defined BEER (what `listCurrenciesForGroup` returns). */
+const beerSchema = buildTransactionSchema({
+	settlementCurrency: 'THB',
+	entryCurrencies: [...SEEDED_CURRENCY_DESCRIPTORS, BEER]
+});
+
+/** 3 BEER at ฿250 each = ฿750.00. */
+function beerSpending(overrides: Record<string, unknown> = {}) {
+	return baseSpending({
+		amountTotal: 3,
+		currency: BEER.code,
+		exchangeRate: '250',
+		amountTotalSettlement: 75000,
+		payers: [{ memberId: 'm1', amountPaid: 3 }],
+		...overrides
+	});
+}
+
+describe('convertToSettlement — a CUSTOM entry currency (§7.5.2)', () => {
+	it('converts from a resolved descriptor (3 BEER @250 → ฿750.00)', () => {
+		expect(convertToSettlement(3, BEER, 'THB', '250')).toBe(75000);
+	});
+
+	it("honours the custom currency's OWN exponent (2-dp custom → 2-dp settlement)", () => {
+		const token = { code: 'cur_tok', displayCode: 'TOK', exponent: 2, symbol: 'T' };
+		// 12.50 TOK at 4 → ฿50.00
+		expect(convertToSettlement(1250, token, 'THB', '4')).toBe(5000);
+	});
+
+	it('rounds half-up like every other conversion (1 BEER @ 0.005 → ฿0.01)', () => {
+		expect(convertToSettlement(1, BEER, 'THB', '0.005')).toBe(1);
+	});
+
+	it('THROWS if handed the opaque code instead of the row (the #63 handoff)', () => {
+		// `convertToSettlement` used to resolve its entry currency through the seeded
+		// constant, which cannot see a `currencies` row. Passing a bare custom code is
+		// still a programming error — it must fail loudly, never format at a guessed
+		// precision.
+		expect(() => convertToSettlement(3, asEntryCurrencyCode(BEER.code), 'THB', '250')).toThrow();
+	});
+});
+
+describe('buildTransactionSchema — a CUSTOM entry currency (§7.5.2 / ADR-0014)', () => {
+	it("accepts a transaction recorded in the group's own custom currency", () => {
+		const res = beerSchema.safeParse(beerSpending());
+		expect(res.success).toBe(true);
+		if (res.success) {
+			expect(res.data.currency).toBe(BEER.code);
+			expect(res.data.amountTotalSettlement).toBe(75000);
+		}
+	});
+
+	it('rejects a settlement total that does not match the converted total', () => {
+		const res = beerSchema.safeParse(beerSpending({ amountTotalSettlement: 74999 }));
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			expect(res.error.issues.some((i) => i.path.includes('amountTotalSettlement'))).toBe(true);
+		}
+	});
+
+	it("rejects ANOTHER group's custom code on `currency`", () => {
+		const res = beerSchema.safeParse(beerSpending({ currency: THEIR_TOKEN.code }));
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			expect(res.error.issues.some((i) => i.path.includes('currency'))).toBe(true);
+		}
+	});
+
+	it('rejects the display code — only the primary key identifies a row', () => {
+		expect(beerSchema.safeParse(beerSpending({ currency: BEER.displayCode })).success).toBe(false);
+	});
+
+	it('requires a rate: a missing or empty one is rejected', () => {
+		for (const rate of ['', undefined]) {
+			const res = beerSchema.safeParse(beerSpending({ exchangeRate: rate }));
+			expect(res.success, String(rate)).toBe(false);
+			if (!res.success) {
+				expect(res.error.issues.some((i) => i.path.includes('exchangeRate'))).toBe(true);
+			}
+		}
+	});
+
+	it('rejects rate 0 (the shared > 0 field rule still applies)', () => {
+		expect(beerSchema.safeParse(beerSpending({ exchangeRate: '0' })).success).toBe(false);
+	});
+
+	it('ACCEPTS rate 1 — a 1:1 peg is a real rate, not the same-currency seam', () => {
+		// ADR-0014 decision 6 makes a rate MANDATORY for a custom currency (the `> 0`
+		// rule above); it does not forbid the value 1. "Our internal credit is worth
+		// exactly one baht" is a legitimate thing to record, and nothing in §7.6 or the
+		// ADR bans it. The rate-1 rule one refine up is scoped to `currency ==
+		// settlement`, which a custom currency can never satisfy — so it passes here
+		// vacuously rather than being a seam this currency falls into.
+		// 3 BEER (0-dp) at 1 → ฿3.00 = 300 satang.
+		const res = beerSchema.safeParse(
+			beerSpending({ exchangeRate: '1', amountTotalSettlement: 300 })
+		);
+		expect(res.success).toBe(true);
+	});
+
+	it('accepts a fractional rate (3 BEER @ 1.5 → ฿4.50)', () => {
+		expect(
+			beerSchema.safeParse(beerSpending({ exchangeRate: '1.5', amountTotalSettlement: 450 }))
+				.success
+		).toBe(true);
+	});
+
+	it('re-edits and round-trips: the parsed output feeds straight back in', () => {
+		// A faithful re-edit (§7.6) re-submits what the detail page reconstructed. The
+		// custom currency, its rate and its settlement total must survive that loop
+		// unchanged — a drifting settlement total is how a re-save silently moves money.
+		const first = beerSchema.safeParse(beerSpending());
+		expect(first.success).toBe(true);
+		if (!first.success) return;
+		const second = beerSchema.safeParse(first.data);
+		expect(second.success).toBe(true);
+		if (!second.success) return;
+		expect(second.data).toStrictEqual(first.data);
+		expect(second.data.amountTotalSettlement).toBe(
+			convertToSettlement(second.data.amountTotal, BEER, 'THB', second.data.exchangeRate)
+		);
+	});
+});
+
+describe('buildTransactionSchema — seeded-currency REGRESSION with a custom set present', () => {
+	it('a same-currency THB transaction is unaffected by the group having BEER', () => {
+		expect(beerSchema.safeParse(baseSpending()).success).toBe(true);
+	});
+
+	it('a foreign SEEDED currency still needs a rate and converts identically', () => {
+		const payload = baseSpending({
+			currency: 'CNY',
+			exchangeRate: '4.85',
+			amountTotal: 20000,
+			amountTotalSettlement: 97000,
+			payers: [{ memberId: 'm1', amountPaid: 20000 }]
+		});
+		expect(beerSchema.safeParse(payload).success).toBe(true);
+		// …and byte-identically to the seeded-only schema.
+		expect(thbSchema.safeParse(payload).success).toBe(true);
+	});
+
+	it('a seeded currency at rate 1 that is NOT the settlement currency still converts', () => {
+		// The custom-currency rate-1 rule must not leak onto seeded currencies: 1 USD
+		// = 1 THB is odd but expressible, and USD is not custom.
+		const res = thbSchema.safeParse(
+			baseSpending({ currency: 'USD', exchangeRate: '1', amountTotalSettlement: 9000 })
+		);
+		expect(res.success).toBe(true);
+	});
+
+	it('the DEFAULT (no entryCurrencies) is still exactly the seeded 29', () => {
+		// Every caller with no group context — the MCP write path (settlement-currency
+		// only, ADR-0014 decision 7) and the older tests — keeps pre-#63 behaviour.
+		const res = thbSchema.safeParse(beerSpending());
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			expect(res.error.issues.some((i) => i.path.includes('currency'))).toBe(true);
+		}
+		// …while every seeded code is still accepted by that same default schema.
+		expect(
+			thbSchema.safeParse(
+				baseSpending({
+					currency: 'JPY',
+					exchangeRate: '0.22',
+					amountTotal: 1000,
+					amountTotalSettlement: 22000,
+					payers: [{ memberId: 'm1', amountPaid: 1000 }]
+				})
+			).success
+		).toBe(true);
 	});
 });

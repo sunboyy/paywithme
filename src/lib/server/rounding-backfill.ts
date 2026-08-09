@@ -41,6 +41,7 @@ import {
 	transactionCharges
 } from './db/transactions-schema';
 import { groups } from './db/groups-schema';
+import { currencies } from './db/currencies-schema';
 import { writeAuditLog } from './audit';
 import { convertToSettlement, type ItemInput, type ChargeInput } from '$lib/schemas/transaction';
 import {
@@ -48,7 +49,12 @@ import {
 	resolveItemizedWithCharges,
 	distributeToSettlement
 } from '$lib/transactions/resolve';
-import { asEntryCurrencyCode, type SeededCurrencyCode } from '$lib/money';
+import {
+	SEEDED_CURRENCY_DESCRIPTORS,
+	toCurrencyDescriptor,
+	type CurrencyDescriptor,
+	type SeededCurrencyCode
+} from '$lib/money';
 
 /** What one transaction's re-resolution changed, in settlement minor units. */
 export interface TransactionDelta {
@@ -144,6 +150,23 @@ async function backfillGroup({
 		.where(eq(transactions.groupId, group.id))
 		.orderBy(asc(transactions.occurredAt), asc(transactions.id));
 
+	// This group's ENTRY-currency descriptors (PLAN §7.5.2): the seeded 29 plus its
+	// own custom rows. A transaction recorded in a group-defined currency carries an
+	// opaque code that resolves nowhere else, and re-resolving needs its exponent —
+	// so the rows are loaded once per group rather than per transaction.
+	const customRows = await db
+		.select({
+			code: currencies.code,
+			displayCode: currencies.displayCode,
+			exponent: currencies.exponent,
+			symbol: currencies.symbol
+		})
+		.from(currencies)
+		.where(eq(currencies.groupId, group.id));
+	const entryCurrencies = new Map<string, CurrencyDescriptor>(
+		[...SEEDED_CURRENCY_DESCRIPTORS, ...customRows].map((c) => [c.code, c])
+	);
+
 	const changed: TransactionDelta[] = [];
 	const netOwedByMember = new Map<string, number>();
 
@@ -152,6 +175,9 @@ async function backfillGroup({
 		const delta = await recalculateTransaction({
 			txn,
 			roundingSeq: ordinal,
+			entryCurrency:
+				entryCurrencies.get(txn.currency) ??
+				toCurrencyDescriptor(txn.currency as SeededCurrencyCode),
 			settlementCurrency: group.settlementCurrency as SeededCurrencyCode,
 			groupId: group.id,
 			actorUserId,
@@ -188,11 +214,14 @@ async function backfillGroup({
 async function recalculateTransaction({
 	txn,
 	roundingSeq,
+	entryCurrency,
 	settlementCurrency,
 	groupId,
 	actorUserId,
 	apply
 }: {
+	/** The RESOLVED entry-currency row — a custom code resolves nowhere else (§7.5.2). */
+	entryCurrency: CurrencyDescriptor;
 	txn: {
 		id: string;
 		title: string;
@@ -314,7 +343,7 @@ async function recalculateTransaction({
 	// transaction this is the identity.
 	const amountTotalSettlement = convertToSettlement(
 		txn.amountTotal,
-		asEntryCurrencyCode(txn.currency),
+		entryCurrency,
 		settlementCurrency,
 		txn.exchangeRate
 	);

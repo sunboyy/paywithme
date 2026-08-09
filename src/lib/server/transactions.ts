@@ -70,6 +70,7 @@ import {
 	transactionCharges
 } from './db/transactions-schema';
 import { members } from './db/groups-schema';
+import { currencies } from './db/currencies-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog, type AuditVia } from './audit';
 import {
@@ -87,6 +88,9 @@ import { getCategory } from '$lib/categories';
 import {
 	asEntryCurrencyCode,
 	formatAmount,
+	getCurrency,
+	SEEDED_CURRENCY_DESCRIPTORS,
+	type CurrencyDescriptor,
 	type EntryCurrencyCode,
 	type SeededCurrencyCode
 } from '$lib/money';
@@ -217,12 +221,24 @@ export async function createTransaction({
 		// member ids, then RE-VALIDATE — the single source of truth (task 4.4). The
 		// member allow-list rejects payers/beneficiaries outside the group.
 		const memberIds = await activeMemberIds(groupId, tx);
-		const schema = buildTransactionSchema({ settlementCurrency: currency, memberIds });
+		// The ENTRY-currency allow-list is group context too (PLAN §7.5.2): the seeded
+		// 29 plus THIS group's custom rows, resolved on the same handle so it is part
+		// of the same unit of work as the write it gates.
+		const entryCurrencies = await resolveEntryCurrencies(groupId, input, tx);
+		const schema = buildTransactionSchema({
+			settlementCurrency: currency,
+			memberIds,
+			entryCurrencies
+		});
 		const parsed = schema.safeParse(input);
 		if (!parsed.success) {
 			throw new TransactionValidationError(parsed.error.issues);
 		}
 		const data = parsed.data;
+		// The RESOLVED entry currency — a custom one carries its exponent/symbol only
+		// on its row, so every conversion and every formatted amount below takes the
+		// descriptor, never the bare code (ADR-0014 decision 4).
+		const entryDescriptor = requireEntryDescriptor(entryCurrencies, data.currency);
 
 		// Category must exist in the seeded set AND match the type (the schema already
 		// checks the in-app constant; this is the DB-existence half, task 4.7's job).
@@ -244,6 +260,7 @@ export async function createTransaction({
 			groupId,
 			userId,
 			settlementCurrency: currency,
+			entryCurrency: entryDescriptor,
 			data,
 			roundingSeq,
 			now
@@ -256,8 +273,8 @@ export async function createTransaction({
 		const entryCurrency = asEntryCurrencyCode(data.currency);
 		const isForeign = entryCurrency !== currency;
 		const amountSummary = isForeign
-			? `${formatAmount(data.amountTotal, entryCurrency)} (${formatAmount(amountTotalSettlement, currency)})`
-			: formatAmount(data.amountTotal, entryCurrency);
+			? `${formatAmount(data.amountTotal, entryDescriptor)} (${formatAmount(amountTotalSettlement, currency)})`
+			: formatAmount(data.amountTotal, entryDescriptor);
 		await writeAuditLog(tx, {
 			groupId,
 			actorUserId: userId,
@@ -319,6 +336,13 @@ async function resolveAndWriteTransaction(
 		groupId: string;
 		userId: string;
 		settlementCurrency: SeededCurrencyCode;
+		/**
+		 * The RESOLVED entry-currency row for `data.currency` (PLAN §7.5.2). Passed in
+		 * rather than looked up: a group-defined custom currency lives only in the
+		 * `currencies` table, so the seeded-constant lookup the conversion used to do
+		 * would throw for it.
+		 */
+		entryCurrency: CurrencyDescriptor;
 		data: TransactionInput;
 		/**
 		 * The rounding-rotation ordinal (ADR-0013): freshly allocated from the group
@@ -336,6 +360,7 @@ async function resolveAndWriteTransaction(
 		groupId,
 		userId,
 		settlementCurrency: currency,
+		entryCurrency,
 		data,
 		roundingSeq,
 		now
@@ -346,7 +371,7 @@ async function resolveAndWriteTransaction(
 	// (defense in depth; the schema already validated the client value equals this).
 	const amountTotalSettlement = convertToSettlement(
 		data.amountTotal,
-		asEntryCurrencyCode(data.currency),
+		entryCurrency,
 		currency,
 		data.exchangeRate
 	);
@@ -550,6 +575,71 @@ async function deleteTransactionChildren(exec: DbExecutor, transactionId: string
 	await exec.delete(transactionCharges).where(eq(transactionCharges.transactionId, transactionId));
 	await exec.delete(transactionShares).where(eq(transactionShares.transactionId, transactionId));
 	await exec.delete(transactionPayers).where(eq(transactionPayers.transactionId, transactionId));
+}
+
+/**
+ * The ENTRY currencies this group may record a transaction in (PLAN §7.5.2 /
+ * ADR-0014): the 29 seeded rows plus THIS group's own custom rows, and no other
+ * group's. This is the allow-list the shared schema validates `currency` against
+ * and the source of the resolved descriptor the §7.6 conversion needs.
+ *
+ * ── Why the `currencies` table is only read when it has to be ────────────────
+ * Almost every transaction is recorded in one of the seeded 29, whose descriptors
+ * are compiled in. So we peek at the SUBMITTED code first and skip the query
+ * entirely when it is seeded — the common path costs nothing, and a group that
+ * never opens the custom-currency UI issues exactly the queries it did before.
+ *
+ * Peeking at unvalidated input is safe here because the peek only decides whether
+ * to WIDEN the search, never what is allowed: the returned set is still built from
+ * a `group_id`-scoped query, so a forged code (another group's custom currency, a
+ * bare invention) is simply absent and the schema rejects it.
+ *
+ * Runs on the caller's executor, so the allow-list is read in the same transaction
+ * as the write it gates.
+ */
+async function resolveEntryCurrencies(
+	groupId: string,
+	input: unknown,
+	executor: DbExecutor
+): Promise<readonly CurrencyDescriptor[]> {
+	const submitted =
+		typeof input === 'object' && input !== null
+			? (input as { currency?: unknown }).currency
+			: undefined;
+	if (typeof submitted !== 'string' || getCurrency(submitted) !== undefined) {
+		// Seeded (or unusable, in which case the schema rejects it against the seeded
+		// set with the same message) — no custom row can be relevant.
+		return SEEDED_CURRENCY_DESCRIPTORS;
+	}
+
+	const rows = await executor
+		.select({
+			code: currencies.code,
+			displayCode: currencies.displayCode,
+			exponent: currencies.exponent,
+			symbol: currencies.symbol
+		})
+		.from(currencies)
+		.where(eq(currencies.groupId, groupId));
+
+	return [...SEEDED_CURRENCY_DESCRIPTORS, ...rows];
+}
+
+/**
+ * The resolved descriptor for a VALIDATED entry-currency code. Present by
+ * construction — the schema just accepted the code against this very set — so a
+ * miss is a contract violation worth failing loudly on rather than formatting an
+ * amount at a guessed precision.
+ */
+function requireEntryDescriptor(
+	allowed: readonly CurrencyDescriptor[],
+	code: string
+): CurrencyDescriptor {
+	const match = allowed.find((c) => c.code === code);
+	if (match === undefined) {
+		throw new Error(`Entry currency is not in this group's allowed set: ${code}`);
+	}
+	return match;
 }
 
 /**
@@ -1411,12 +1501,19 @@ export async function updateTransaction({
 		const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, tx));
 
 		const memberIds = await activeMemberIds(groupId, tx);
-		const schema = buildTransactionSchema({ settlementCurrency: currency, memberIds });
+		// Group-scoped entry-currency allow-list — see `createTransaction`.
+		const entryCurrencies = await resolveEntryCurrencies(groupId, input, tx);
+		const schema = buildTransactionSchema({
+			settlementCurrency: currency,
+			memberIds,
+			entryCurrencies
+		});
 		const parsed = schema.safeParse(input);
 		if (!parsed.success) {
 			throw new TransactionValidationError(parsed.error.issues);
 		}
 		const data = parsed.data;
+		const entryDescriptor = requireEntryDescriptor(entryCurrencies, data.currency);
 
 		await assertCategoryExists(data.categoryId, tx);
 
@@ -1430,6 +1527,7 @@ export async function updateTransaction({
 			groupId,
 			userId,
 			settlementCurrency: currency,
+			entryCurrency: entryDescriptor,
 			data,
 			// REUSE the stored ordinal — never allocate a new one on edit (ADR-0013).
 			roundingSeq: existing.roundingSeq,
@@ -1441,8 +1539,8 @@ export async function updateTransaction({
 		const entryCurrency = asEntryCurrencyCode(data.currency);
 		const isForeign = entryCurrency !== currency;
 		const amountSummary = isForeign
-			? `${formatAmount(data.amountTotal, entryCurrency)} (${formatAmount(amountTotalSettlement, currency)})`
-			: formatAmount(data.amountTotal, entryCurrency);
+			? `${formatAmount(data.amountTotal, entryDescriptor)} (${formatAmount(amountTotalSettlement, currency)})`
+			: formatAmount(data.amountTotal, entryDescriptor);
 		await writeAuditLog(tx, {
 			groupId,
 			actorUserId: actor,
