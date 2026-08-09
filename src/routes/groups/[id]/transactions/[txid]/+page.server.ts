@@ -19,9 +19,10 @@ import { setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { categoriesFor } from '$lib/categories';
-import { getCurrency, CURRENCIES, type SeededCurrencyCode } from '$lib/money';
+import { getCurrency, type CurrencyDescriptor, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
+import { listCurrenciesForGroup } from '$lib/server/currencies';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
 import { listEntityActivity, type ActivityEntry } from '$lib/server/activity';
@@ -36,6 +37,65 @@ import {
 } from '$lib/server/transactions';
 import type { Actions, PageServerLoad } from './$types';
 
+/**
+ * The group's permitted ENTRY currencies (PLAN §7.5.2): the seeded 29 plus this
+ * group's own custom rows. Access was already established by the caller, so a
+ * `GroupAccessError` here can only be a race (the group vanished mid-request) —
+ * answered the way every other lookup on this route answers it, with a 404 that
+ * never distinguishes "gone" from "never yours" (§12).
+ */
+async function loadEntryCurrencies(userId: string, groupId: string) {
+	try {
+		return await listCurrenciesForGroup({ userId, groupId });
+	} catch (e) {
+		if (e instanceof GroupAccessError) {
+			error(404, 'Transaction not found');
+		}
+		throw e;
+	}
+}
+
+/**
+ * Resolve the descriptor for a transaction's stored entry currency.
+ *
+ * It is always present in the group's set: `transactions.currency` is a foreign key
+ * to `currencies.code`, a seeded row is in every group's set, and a custom row is
+ * scoped to this group and cannot be deleted while referenced (#61). The seeded
+ * branch below is therefore defensive only — it keeps the function total if a caller
+ * ever passes a narrower list.
+ *
+ * An unresolvable code THROWS rather than degrading. The tempting last resort —
+ * `{ code, displayCode: code }` — would put an opaque `cur_…` on screen, which
+ * CONTEXT.md ("Display code") forbids outright, and any invented `exponent` would
+ * render the amount at the wrong scale. Both are worse than a loud failure in a
+ * state the schema says cannot happen; this mirrors `assertDescriptor` in
+ * `lib/money`, which refuses a malformed descriptor for the same reason.
+ */
+function resolveEntryCurrency(
+	allowed: readonly CurrencyDescriptor[],
+	code: string
+): CurrencyDescriptor {
+	const match = allowed.find((c) => c.code === code);
+	if (match) {
+		return {
+			code: match.code,
+			displayCode: match.displayCode,
+			symbol: match.symbol,
+			exponent: match.exponent
+		};
+	}
+	const seeded = getCurrency(code);
+	if (seeded) {
+		return {
+			code: seeded.code,
+			displayCode: seeded.code,
+			symbol: seeded.symbol,
+			exponent: seeded.exponent
+		};
+	}
+	throw new Error(`Transaction currency is not in the group's currency set: ${code}`);
+}
+
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard (task 3.8): anonymous → redirect; no-access/not-found → 404.
 	// THROWS control flow — keep outside any try/catch.
@@ -47,6 +107,13 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
+
+	// Every currency this group may record in (PLAN §7.5.2): the seeded 29 plus this
+	// group's own custom rows. Feeds the entry-currency picker, the group-scoped
+	// entry-currency validator, AND the resolved descriptor this transaction's own
+	// amounts are formatted with — a custom code has no entry in the compiled-in
+	// seeded constant, so `formatAmount('cur_…')` would throw.
+	const entryCurrencies = await loadEntryCurrencies(user.id, params.id);
 
 	let detail;
 	try {
@@ -102,7 +169,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Seed the edit form from the RECONSTRUCTED input (§7.2/§7.6 faithful re-edit).
 	const schema = buildTransactionSchema({
 		settlementCurrency,
-		memberIds: formMembers.map((m) => m.id)
+		memberIds: formMembers.map((m) => m.id),
+		entryCurrencies
 	});
 	const form = await superValidate(detail.input, zod4(schema), {
 		// Don't surface validation errors on first paint — it's a faithful round-trip.
@@ -115,11 +183,27 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		history,
 		memberNames,
 		group: { id: group.id, name: group.name, settlementCurrency },
+		// The settlement currency is always one of the seeded 29 (ADR-0014 decision 1),
+		// where `displayCode === code` by definition.
 		currency: currency
-			? { code: currency.code, symbol: currency.symbol, exponent: currency.exponent }
-			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },
-		currencies: CURRENCIES.map((c) => ({
+			? {
+					code: currency.code,
+					displayCode: currency.code,
+					symbol: currency.symbol,
+					exponent: currency.exponent
+				}
+			: {
+					code: settlementCurrency,
+					displayCode: settlementCurrency,
+					symbol: settlementCurrency,
+					exponent: 2
+				},
+		// THIS transaction's own entry currency, resolved — what the read-only view
+		// formats `amountTotal`, payer amounts and item amounts with (§7.6 Display).
+		entryCurrency: resolveEntryCurrency(entryCurrencies, detail.currency),
+		currencies: entryCurrencies.map((c) => ({
 			code: c.code,
+			displayCode: c.displayCode,
 			symbol: c.symbol,
 			exponent: c.exponent,
 			name: c.name
@@ -148,9 +232,13 @@ export const actions: Actions = {
 		const activeMembers = (await listMembers({ userId: user.id, groupId: params.id })).filter(
 			(m) => m.deactivatedAt === null
 		);
+		// Group-scoped entry-currency set — trusted group context, re-read here rather
+		// than trusted from the payload (same rule as the settlement currency above).
+		const entryCurrencies = await loadEntryCurrencies(user.id, params.id);
 		const schema = buildTransactionSchema({
 			settlementCurrency,
-			memberIds: activeMembers.map((m) => m.id)
+			memberIds: activeMembers.map((m) => m.id),
+			entryCurrencies
 		});
 
 		const form = await superValidate(request, zod4(schema));

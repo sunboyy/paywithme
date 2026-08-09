@@ -15,6 +15,13 @@
 	// currency reveals a rate / settlement-total entry (enter EITHER; the other is
 	// derived) with a live converted total, and recomputes `amountTotalSettlement`
 	// from the rate. Same-currency stays the no-op seam (rate '1', settlement == txn).
+	//
+	// A GROUP-DEFINED custom currency (#63; PLAN §7.5.2 / ADR-0014) is just another
+	// entry in the `currencies` list — with two consequences here: every money helper
+	// is given the RESOLVED descriptor rather than a code (a custom code resolves
+	// nowhere), and the picker/labels render `displayCode`, never the opaque `code`
+	// the form posts. Such a currency is ALWAYS foreign, so the FX entry is always
+	// revealed for one and the rate-1 seam is never reached.
 
 	import type { ChargeInput, TransactionInput } from '$lib/schemas/transaction';
 	import type { SuperForm } from 'sveltekit-superforms';
@@ -33,9 +40,25 @@
 		icon: string;
 	}
 
-	/** A currency descriptor (symbol + exponent for entry/format). */
+	/**
+	 * A RESOLVED currency descriptor (symbol + exponent for entry/format) — the
+	 * shape `lib/money` takes when a code cannot be looked up in the compiled-in
+	 * seeded constant, which is exactly the case for a group-defined custom currency
+	 * (PLAN §7.5.2 / ADR-0014 decision 4). Structurally a `CurrencyDescriptor`, so it
+	 * is passed straight to `formatAmount` / `parseAmount` / `sanitizeAmountInput`.
+	 */
 	export interface FormCurrency {
+		/**
+		 * The PRIMARY KEY — an ISO code for a seeded currency, an opaque `cur_…` id
+		 * for a custom one. It is what the form POSTS (`transactions.currency` stores
+		 * it) and is **never rendered**; every screen string uses `displayCode`.
+		 */
 		code: string;
+		/**
+		 * The user-visible code (`THB`, `BEER`). Equals `code` for a seeded currency.
+		 * This is what the picker, the FX labels and every formatted amount show.
+		 */
+		displayCode: string;
 		symbol: string;
 		exponent: number;
 		/** Optional display name (shown in the FX currency picker). */
@@ -140,21 +163,28 @@
 	// Whether the chosen entry currency is FOREIGN (≠ settlement) — drives the FX UI.
 	const isForeign = $derived(entryCode !== settlementCode);
 
-	// The descriptor for the CHOSEN entry currency (symbol/exponent for amount entry).
+	// The RESOLVED descriptor for the chosen entry currency — what every amount field
+	// on this form is denominated in, and what every money helper below is given.
+	//
+	// A DESCRIPTOR, never a bare code (PLAN §7.5.2 / ADR-0014 decision 4): a
+	// group-defined custom currency exists only as a `currencies` row, so
+	// `formatAmount('cur_…')` / `parseAmount('cur_…')` would throw — the synchronous
+	// lookup over the seeded constant cannot find it. Handing the row over is what
+	// lets a custom entry currency parse, format and display at its own exponent.
 	const entryCurrency = $derived(currencyOptions.find((c) => c.code === entryCode) ?? currency);
-	// `entryCode` is what every amount field on the form is denominated in.
-	const currencyCode = $derived(entryCode);
 
 	// Display formatters for the read-only previews below (the breakdown, the
-	// derived itemized total). The ISO code is kept ONLY for a foreign entry
-	// currency: within a group the settlement currency is already established by
-	// context, so "JPY ¥6,800" on every preview line is redundant width. A
-	// code-prefixed amount here therefore always signals "foreign".
+	// derived itemized total). The code is kept ONLY for a foreign entry currency:
+	// within a group the settlement currency is already established by context, so
+	// "JPY ¥6,800" on every preview line is redundant width. A code-prefixed amount
+	// here therefore always signals "foreign" — and a CUSTOM currency always
+	// disambiguates regardless (its member-authored symbol can't be assumed unique),
+	// which `formatAmount` enforces on its own.
 	const entryDisplay = $derived((minor: number) =>
-		formatAmount(minor, currencyCode, { code: isForeign })
+		formatAmount(minor, entryCurrency, { code: isForeign })
 	);
 	const settlementDisplay = $derived((minor: number) =>
-		formatAmount(minor, settlementCode, { code: false })
+		formatAmount(minor, currency, { code: false })
 	);
 
 	// The FX rate string (settlement units per 1 entry unit, ≤6dp). For a foreign
@@ -185,7 +215,7 @@
 	// svelte-ignore state_referenced_locally
 	let totalInput = $state(
 		$formData.amountTotal > 0
-			? formatAmount($formData.amountTotal, currencyCode, { symbol: false })
+			? formatAmount($formData.amountTotal, entryCurrency, { symbol: false })
 			: ''
 	);
 
@@ -194,7 +224,7 @@
 		Object.fromEntries(
 			$formData.beneficiaries
 				.filter((b) => b.rawAmount !== undefined)
-				.map((b) => [b.memberId, formatAmount(b.rawAmount ?? 0, currencyCode, { symbol: false })])
+				.map((b) => [b.memberId, formatAmount(b.rawAmount ?? 0, entryCurrency, { symbol: false })])
 		)
 	);
 
@@ -219,7 +249,7 @@
 		const trimmed = value.trim();
 		if (trimmed === '') return null;
 		try {
-			return parseAmount(trimmed, currencyCode);
+			return parseAmount(trimmed, entryCurrency);
 		} catch {
 			return null;
 		}
@@ -265,7 +295,7 @@
 		const trimmed = value.trim();
 		if (trimmed === '') return null;
 		try {
-			return parseAmount(trimmed, settlementCode);
+			return parseAmount(trimmed, currency);
 		} catch {
 			return null;
 		}
@@ -295,7 +325,7 @@
 			// the settlement total at the txn total as a placeholder (the schema will
 			// reject the invalid rate, surfacing the error before save).
 			nextSettlement =
-				rate !== null ? convertToSettlement(total, entryCode, settlementCode, rate) : total;
+				rate !== null ? convertToSettlement(total, entryCurrency, settlementCode, rate) : total;
 		}
 
 		// Guard EVERY write with an equality check so this effect is idempotent. It
@@ -322,10 +352,10 @@
 		const total = $formData.splitMode === 'itemized' ? itemizedTotal : (toMinor(totalInput) ?? 0);
 		if (rate === null || total <= 0) return null;
 		try {
-			const stl = convertToSettlement(total, entryCode, settlementCode, rate);
+			const stl = convertToSettlement(total, entryCurrency, settlementCode, rate);
 			return {
-				txn: formatAmount(total, entryCode),
-				settlement: formatAmount(stl, settlementCode, { code: false })
+				txn: formatAmount(total, entryCurrency),
+				settlement: formatAmount(stl, currency, { code: false })
 			};
 		} catch {
 			return null;
@@ -361,7 +391,7 @@
 		fxDriver = 'total';
 		// The SETTLEMENT currency's precision, not the entry currency's — this box is
 		// denominated in what the group settles in (§7.6).
-		settlementTotalInput = sanitizeAmountInput(raw, settlementCode);
+		settlementTotalInput = sanitizeAmountInput(raw, currency);
 	}
 
 	// What the settlement box shows: the typed string while the user is driving the
@@ -371,12 +401,14 @@
 		fxDriver === 'total'
 			? settlementTotalInput
 			: settlementPreview
-				? formatAmount($formData.amountTotalSettlement, settlementCode, { symbol: false })
+				? formatAmount($formData.amountTotalSettlement, currency, { symbol: false })
 				: ''
 	);
 
+	// The picker's own label: the DISPLAY code, never the opaque `code` of a custom
+	// row (CONTEXT.md "Display code").
 	const selectedCurrencyLabel = $derived(
-		`${entryCurrency.code}${entryCurrency.name ? ` · ${entryCurrency.name}` : ''}`
+		`${entryCurrency.displayCode}${entryCurrency.name ? ` · ${entryCurrency.name}` : ''}`
 	);
 
 	// ── Beneficiary selection ─────────────────────────────────────────────────────
@@ -452,7 +484,7 @@
 	}
 
 	function setRawAmount(memberId: string, raw: string) {
-		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		const cleaned = sanitizeAmountInput(raw, entryCurrency);
 		amountInputs[memberId] = cleaned;
 		const minor = toMinor(cleaned) ?? 0;
 		$formData.beneficiaries = $formData.beneficiaries.map((b) =>
@@ -471,7 +503,7 @@
 		Object.fromEntries(
 			$formData.payers
 				.filter((p) => p.amountPaid > 0)
-				.map((p) => [p.memberId, formatAmount(p.amountPaid, currencyCode, { symbol: false })])
+				.map((p) => [p.memberId, formatAmount(p.amountPaid, entryCurrency, { symbol: false })])
 		)
 	);
 
@@ -486,7 +518,7 @@
 		for (const p of $formData.payers) {
 			if ((toMinor(paidInputs[p.memberId] ?? '') ?? 0) !== p.amountPaid) {
 				paidInputs[p.memberId] =
-					p.amountPaid > 0 ? formatAmount(p.amountPaid, currencyCode, { symbol: false }) : '';
+					p.amountPaid > 0 ? formatAmount(p.amountPaid, entryCurrency, { symbol: false }) : '';
 			}
 		}
 	}
@@ -508,7 +540,7 @@
 
 	/** A keystroke in a payer's amount box (see the money-field note above). */
 	function setPaid(memberId: string, raw: string) {
-		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		const cleaned = sanitizeAmountInput(raw, entryCurrency);
 		paidInputs[memberId] = cleaned;
 		const minor = toMinor(cleaned) ?? 0;
 		$formData.payers = $formData.payers.map((p) =>
@@ -537,7 +569,7 @@
 	// Per-item amount display strings, index-aligned to `$formData.items`.
 	let itemAmountInputs = $state<string[]>(
 		$formData.items.map((it) =>
-			it.amount > 0 ? formatAmount(it.amount, currencyCode, { symbol: false }) : ''
+			it.amount > 0 ? formatAmount(it.amount, entryCurrency, { symbol: false }) : ''
 		)
 	);
 
@@ -578,7 +610,7 @@
 					? String(c.value / 100)
 					: ''
 				: c.value > 0
-					? formatAmount(c.value, currencyCode, { symbol: false })
+					? formatAmount(c.value, entryCurrency, { symbol: false })
 					: ''
 		)
 	);
@@ -649,7 +681,7 @@
 		// a different grammar (0–100 → basis points, its own precision rule), so it is
 		// left as typed here rather than run through a money sanitizer that would
 		// mangle it; constraining that entry is a separate change.
-		const cleaned = mode === 'absolute' ? sanitizeAmountInput(raw, currencyCode) : raw;
+		const cleaned = mode === 'absolute' ? sanitizeAmountInput(raw, entryCurrency) : raw;
 		chargeValueInputs[index] = cleaned;
 		patchCharge(index, { value: parseChargeValue(mode, cleaned) });
 	}
@@ -691,7 +723,7 @@
 	}
 
 	function setItemAmount(index: number, raw: string) {
-		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		const cleaned = sanitizeAmountInput(raw, entryCurrency);
 		itemAmountInputs[index] = cleaned;
 		patchItem(index, { amount: toMinor(cleaned) ?? 0 });
 	}
@@ -749,7 +781,7 @@
 	}
 
 	function setItemRawAmount(index: number, memberId: string, raw: string) {
-		const cleaned = sanitizeAmountInput(raw, currencyCode);
+		const cleaned = sanitizeAmountInput(raw, entryCurrency);
 		itemMemberAmountInputs[`${index}:${memberId}`] = cleaned;
 		const minor = toMinor(cleaned) ?? 0;
 		const beneficiaries = $formData.items[index].beneficiaries.map((b) =>
@@ -1020,7 +1052,7 @@
 					placeholder="0.00"
 					aria-invalid={$errors.amountTotal ? 'true' : undefined}
 					aria-describedby={$errors.amountTotal ? 'amountTotal-error' : undefined}
-					bind:value={() => totalInput, (v) => (totalInput = sanitizeAmountInput(v, currencyCode))}
+					bind:value={() => totalInput, (v) => (totalInput = sanitizeAmountInput(v, entryCurrency))}
 					class="h-14 flex-1 border-0 bg-transparent px-1 text-2xl font-semibold tabular-nums shadow-none focus-visible:ring-0"
 				/>
 			</div>
@@ -1097,7 +1129,7 @@
 					class="size-4 transition-transform group-open/currency:rotate-180"
 					aria-hidden="true"
 				/>
-				Paid in {entryCode}{isForeign ? '' : ' — the group currency'}
+				Paid in {entryCurrency.displayCode}{isForeign ? '' : ' — the group currency'}
 			</summary>
 			<div class="space-y-2 pt-2">
 				<Label>Currency</Label>
@@ -1131,11 +1163,11 @@
 										     highlighted — pointing at the wrong currency. -->
 										<Command.Item
 											value={option.code}
-											keywords={[option.name ?? '', option.symbol]}
+											keywords={[option.displayCode, option.name ?? '', option.symbol]}
 											data-checked={option.code === entryCode}
 											onSelect={() => onCurrencyChange(option.code)}
 										>
-											{option.code}{option.name ? ` · ${option.name}` : ''}
+											{option.displayCode}{option.name ? ` · ${option.name}` : ''}
 											{#if option.code === settlementCode}
 												<span class="text-xs text-muted-foreground">(group)</span>
 											{/if}
@@ -1156,11 +1188,13 @@
 	{#if isForeign}
 		<div class="space-y-3 rounded-md border p-3">
 			<p class="text-sm font-medium">
-				Exchange to {currency.code}
+				Exchange to {currency.displayCode}
 			</p>
 			<div class="grid grid-cols-2 gap-3">
 				<div class="space-y-1">
-					<Label for="fx-rate">Rate (1 {entryCode} = ? {currency.code})</Label>
+					<Label for="fx-rate"
+						>Rate (1 {entryCurrency.displayCode} = ? {currency.displayCode})</Label
+					>
 					<Input
 						id="fx-rate"
 						inputmode="decimal"
@@ -1172,7 +1206,7 @@
 					/>
 				</div>
 				<div class="space-y-1">
-					<Label for="fx-total">Total in {currency.code}</Label>
+					<Label for="fx-total">Total in {currency.displayCode}</Label>
 					<div class="flex items-center gap-1">
 						<span class="text-xs text-muted-foreground" aria-hidden="true">{currency.symbol}</span>
 						<Input

@@ -18,6 +18,7 @@ export {
 	type SeededCurrencyCode,
 	CURRENCIES,
 	CURRENCY_CODES,
+	SEEDED_CURRENCY_DESCRIPTORS,
 	asEntryCurrencyCode,
 	getCurrency,
 	isCustomCurrency
@@ -31,6 +32,7 @@ export {
 	type DistributeResult,
 	MAX_SAFE_MINOR,
 	scaleFactor,
+	toCurrencyDescriptor,
 	parseAmount,
 	sanitizeAmountInput,
 	formatAmount,

@@ -1936,3 +1936,179 @@ describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
 		expect(audit.metadata).not.toHaveProperty('keyName');
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A CUSTOM entry currency end-to-end through the service (issue #63; PLAN §7.5.2,
+// §7.6; ADR-0014).
+//
+// This is the path that used to be impossible: `currencyCodeSchema` gated every
+// write to the seeded 29, and `convertToSettlement` re-resolved its entry currency
+// through the compiled-in constant, so a `cur_…` code could not even be validated,
+// let alone converted. The group-scoped allow-list and the descriptor-based
+// conversion are what these assert.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The group's own custom currency row, as `currencies` stores it (0-dp). */
+const BEER_ROW = { code: 'cur_beer', displayCode: 'BEER', exponent: 0, symbol: '🍺' };
+
+/** 7 BEER at ฿250 = ฿1,750.00, split equally between m1/m2/m3. */
+function beerInput() {
+	return {
+		...equalInput(),
+		amountTotal: 7,
+		currency: BEER_ROW.code,
+		exchangeRate: '250',
+		amountTotalSettlement: 175_000,
+		payers: [{ memberId: 'm1', amountPaid: 7 }],
+		beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }, { memberId: 'm3' }]
+	};
+}
+
+const THREE_MEMBERS = [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }];
+
+describe('createTransaction — a group-defined CUSTOM entry currency (§7.5.2)', () => {
+	// SELECT order for a NON-seeded code: access → active members → the group's
+	// custom `currencies` rows → category existence.
+	function queueCustomSelects(members = THREE_MEMBERS, currencyRows = [BEER_ROW]) {
+		queueSelects(ACCESS_OK, members, currencyRows, CATEGORY_ROW);
+	}
+
+	it('records the transaction in the custom currency', async () => {
+		queueCustomSelects();
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(typeof id).toBe('string');
+
+		const row = insertsTo('transactions')[0].values;
+		// The OPAQUE code is what `transactions.currency` stores (the FK target).
+		expect(row.currency).toBe(BEER_ROW.code);
+		expect(row.amountTotal).toBe(7);
+		expect(row.exchangeRate).toBe('250');
+		// Converted server-side from the RESOLVED row's exponent (0-dp → 2-dp).
+		expect(row.amountTotalSettlement).toBe(175_000);
+	});
+
+	it('resolved shares sum EXACTLY to amount_total_settlement (§7.6)', async () => {
+		queueCustomSelects();
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+
+		const owed = insertsTo('transaction_shares').map((i) => i.values.amountOwed as number);
+		expect(owed).toHaveLength(3);
+		// ฿1,750.00 three ways does not divide cleanly — the largest-remainder
+		// distribution must still tie out to the canonical total, to the satang.
+		expect(owed.reduce((a, b) => a + b, 0)).toBe(175_000);
+
+		const paidSettlement = insertsTo('transaction_payers').map(
+			(i) => i.values.amountPaidSettlement as number
+		);
+		expect(paidSettlement.reduce((a, b) => a + b, 0)).toBe(175_000);
+	});
+
+	it("only THIS group's custom rows widen the allow-list", async () => {
+		// The `currencies` read is scoped to the group; if it comes back without the
+		// submitted code (another group's currency, a deleted row), validation fails
+		// on `currency` — it is never silently accepted.
+		queueCustomSelects(THREE_MEMBERS, []);
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: beerInput(),
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('audits the amount with the DISPLAY code, never the opaque one', async () => {
+		queueCustomSelects();
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+
+		const summary = insertsTo('audit_log')[0].values.summary as string;
+		expect(summary).toContain('BEER');
+		expect(summary).not.toContain('cur_beer');
+	});
+
+	it('a SEEDED currency issues no extra currencies read (regression)', async () => {
+		// The common path must not pay for this feature: a seeded code short-circuits
+		// the `currencies` lookup, so the SELECT order is unchanged (access → members →
+		// category). If a read had been added, this queue would be off by one and the
+		// category check would see the member rows.
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		const row = insertsTo('transactions')[0].values;
+		expect(row.currency).toBe('THB');
+		expect(row.amountTotalSettlement).toBe(9000);
+	});
+});
+
+describe('updateTransaction — re-editing a CUSTOM-currency transaction (§7.5.2 / §7.6)', () => {
+	it('round-trips: an edited rate re-resolves and the shares still tie out', async () => {
+		// SELECT order: access → load txn → active members → custom currencies →
+		// category → the item-id lookup for child deletion.
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Beers', deletedAt: null, roundingSeq: 2 }],
+			THREE_MEMBERS,
+			[BEER_ROW],
+			CATEGORY_ROW,
+			[]
+		);
+
+		// The rate moves ฿250 → ฿260 per beer: 7 × 260 = ฿1,820.00.
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: { ...beerInput(), exchangeRate: '260', amountTotalSettlement: 182_000 },
+			settlementCurrency: 'THB'
+		});
+
+		const row = updatesTo('transactions')[0].values;
+		expect(row.currency).toBe(BEER_ROW.code);
+		expect(row.exchangeRate).toBe('260');
+		expect(row.amountTotalSettlement).toBe(182_000);
+
+		const owed = insertsTo('transaction_shares').map((i) => i.values.amountOwed as number);
+		expect(owed.reduce((a, b) => a + b, 0)).toBe(182_000);
+	});
+
+	it("rejects an edit that moves the transaction to another group's custom code", async () => {
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Beers', deletedAt: null, roundingSeq: 0 }],
+			THREE_MEMBERS,
+			[BEER_ROW], // this group has BEER, and only BEER
+			CATEGORY_ROW,
+			[]
+		);
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: { ...beerInput(), currency: 'cur_someone_elses' },
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+	});
+});

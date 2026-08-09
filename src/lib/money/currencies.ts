@@ -196,6 +196,23 @@ export function isCustomCurrency(currency: CurrencyDescriptor): boolean {
 export const CURRENCY_CODES = CURRENCIES.map((c) => c.code) as readonly SeededCurrencyCode[];
 
 /**
+ * The seeded 29 as {@link CurrencyDescriptor}s, in PLAN §7.5.1 order.
+ *
+ * Seeded rows satisfy `code == display_code` by definition (PLAN §7.5.2), so this
+ * is a pure widening of {@link CURRENCIES} — no lookup, no DB. It exists because
+ * the group-scoped entry-currency set is "these PLUS the group's custom rows", and
+ * both halves have to be the same shape before they can be unioned: the schema
+ * factory's default allowed set, and the server's "seeded ∪ this group's rows"
+ * resolution, are both built from it.
+ */
+export const SEEDED_CURRENCY_DESCRIPTORS: readonly CurrencyDescriptor[] = CURRENCIES.map((c) => ({
+	code: c.code,
+	displayCode: c.code,
+	exponent: c.exponent,
+	symbol: c.symbol
+}));
+
+/**
  * O(1) lookup map (code → Currency). Built once at module load; backs
  * `getCurrency` and lets money math (task 4.1) resolve a currency's exponent
  * without scanning the list.

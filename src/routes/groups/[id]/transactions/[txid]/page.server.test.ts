@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 import { isRedirect, isHttpError } from '@sveltejs/kit';
 
 // Route tests for the `[txid]` transaction view/edit page (task 4.11).
@@ -62,6 +63,12 @@ vi.mock('$lib/server/groups', async () => {
 vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/activity', () => ({ listEntityActivity }));
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
+
+// The group-scoped ENTRY-CURRENCY set (#63; PLAN §7.5.2). The route reads it for
+// the picker AND for the group-scoped entry-currency validator; mocked to the
+// seeded 29 so these tests exercise the unchanged seeded-currency behaviour.
+const { listCurrenciesForGroup } = vi.hoisted(() => ({ listCurrenciesForGroup: vi.fn() }));
+vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 
 import { load, actions } from './+page.server';
 import { GroupAccessError } from '$lib/server/groups';
@@ -159,6 +166,10 @@ function makeActionEvent(user: User | null) {
 
 beforeEach(() => {
 	superValidate.mockReset();
+	listCurrenciesForGroup.mockReset();
+	listCurrenciesForGroup.mockResolvedValue(
+		SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false }))
+	);
 	setError.mockReset();
 	getTransactionDetail.mockReset();
 	updateTransaction.mockReset();
@@ -402,5 +413,83 @@ describe('/groups/[id]/transactions/[txid] restore action', () => {
 			expect(isHttpError(e)).toBe(true);
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
+	});
+});
+
+// ── The resolved ENTRY-currency descriptor reaching the view (#63; PLAN §7.5.2) ──
+//
+// The detail page formats `amountTotal`, every payer line and every item amount in
+// the transaction's OWN entry currency (§7.6 Display). A group-defined currency
+// exists only as a `currencies` row, so the page cannot resolve one from the stored
+// code — `load` has to hand it the descriptor. These exercise both branches of
+// `resolveEntryCurrency`; the rendering is covered by `mount.svelte.test.ts`.
+
+/** This group's own custom currency: opaque PK, member-typed display code, 0-dp. */
+const BEER = {
+	code: 'cur_beer',
+	displayCode: 'BEER',
+	name: 'Bottle of beer',
+	symbol: '🍺',
+	exponent: 0,
+	isCustom: true
+};
+
+describe('/groups/[id]/transactions/[txid] load — entry-currency descriptor (§7.5.2)', () => {
+	it('resolves a SEEDED entry currency, with displayCode === code', async () => {
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			entryCurrency: { code: string; displayCode: string; symbol: string; exponent: number };
+		};
+		expect(result.entryCurrency).toEqual({
+			code: 'THB',
+			displayCode: 'THB',
+			symbol: '฿',
+			exponent: 2
+		});
+	});
+
+	it("resolves a CUSTOM entry currency from the group's set", async () => {
+		listCurrenciesForGroup.mockResolvedValue([
+			...SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false })),
+			BEER
+		]);
+		// 3 BEER @ ฿250 = ฿750.00 — a 0-dp entry currency, foreign by construction.
+		getTransactionDetail.mockResolvedValue(
+			detailFixture({
+				amountTotal: 3,
+				currency: BEER.code,
+				amountTotalSettlement: 75_000,
+				isForeign: true,
+				payers: [{ memberId: 'm1', amountPaid: 3 }]
+			})
+		);
+
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			entryCurrency: { code: string; displayCode: string; symbol: string; exponent: number };
+			currencies: { code: string; displayCode: string }[];
+		};
+
+		// The exponent is the one thing no compiled-in constant knows — getting it from
+		// the row is what makes "3" render as 3 beers rather than ฿0.03.
+		expect(result.entryCurrency).toEqual({
+			code: 'cur_beer',
+			displayCode: 'BEER',
+			symbol: '🍺',
+			exponent: 0
+		});
+		// …and the picker's list carries it too, so the edit form can select it.
+		expect(result.currencies).toContainEqual(
+			expect.objectContaining({ code: 'cur_beer', displayCode: 'BEER', exponent: 0 })
+		);
+	});
+
+	it('THROWS rather than putting an unresolvable code on screen', async () => {
+		// Unreachable in production (`transactions.currency` is an FK into the very set
+		// `listCurrenciesForGroup` returns). If it ever happens, the alternatives are
+		// worse than a loud failure: `displayCode: code` would leak an opaque `cur_…`
+		// against CONTEXT.md, and any invented exponent renders money at the wrong scale.
+		getTransactionDetail.mockResolvedValue(detailFixture({ currency: 'cur_from_nowhere' }));
+		await expect(load(makeLoadEvent({ id: 'u1', name: 'Alice' }))).rejects.toThrow(
+			/not in the group's currency set/
+		);
 	});
 });

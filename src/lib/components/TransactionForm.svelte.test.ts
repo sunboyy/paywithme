@@ -32,7 +32,13 @@ const categories: { spending: FormCategory[]; transfer: FormCategory[] } = {
 	transfer: [{ id: 'transfer-debt-settlement', name: 'Debt settlement', icon: 'handshake' }]
 };
 
-const currency: FormCurrency = { code: 'THB', symbol: '฿', exponent: 2, name: 'Thai Baht' };
+const currency: FormCurrency = {
+	code: 'THB',
+	displayCode: 'THB',
+	symbol: '฿',
+	exponent: 2,
+	name: 'Thai Baht'
+};
 
 const schema = buildTransactionSchema({
 	settlementCurrency: SETTLEMENT,
@@ -87,8 +93,25 @@ function renderForm(
 /** A second supported currency, so the FX picker has something to choose between. */
 const MULTI_CURRENCY: FormCurrency[] = [
 	currency,
-	{ code: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
+	{ code: 'JPY', displayCode: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
 ];
+
+/**
+ * A GROUP-DEFINED custom currency (PLAN §7.5.2 / ADR-0014): the primary key is an
+ * opaque `cur_…` id and `BEER` is only its display code. It is 0-dp and carries a
+ * member-authored symbol, so it exercises both halves of the descriptor path — the
+ * exponent that no compiled-in constant knows, and the symbol that can never be
+ * assumed unique.
+ */
+const BEER: FormCurrency = {
+	code: 'cur_beer',
+	displayCode: 'BEER',
+	symbol: '🍺',
+	exponent: 0,
+	name: 'Bottle of beer'
+};
+
+const WITH_CUSTOM: FormCurrency[] = [...MULTI_CURRENCY, BEER];
 
 afterEach(() => cleanup());
 
@@ -613,5 +636,157 @@ describe('TransactionForm split-mode round trip', () => {
 		await clickTab(container, 'Equal');
 
 		expect(get(form.form).beneficiaries).toEqual([{ memberId: 'm-alex' }, { memberId: 'm-bo' }]);
+	});
+});
+
+// ── A group-defined CUSTOM entry currency (issue #63; PLAN §7.5.2, ADR-0014) ──
+//
+// The rule that has to hold everywhere on this form: the OPAQUE `code` is what the
+// form POSTS and is never what the user reads. A `cur_8f2a…` leaking into the
+// picker, a label or an amount is the visible failure mode of the whole feature.
+describe('TransactionForm — custom entry currency', () => {
+	/**
+	 * Every user-visible string THIS render produced.
+	 *
+	 * Deliberately scoped to `container` rather than `document.body`: the currency
+	 * combobox portals its content onto `document.body`, so reading the body couples
+	 * each assertion to whatever an earlier test left open. The picker's own contents
+	 * are asserted in the picker test, which queries the portal directly.
+	 */
+	function screenText(container: HTMLElement): string {
+		return container.textContent ?? '';
+	}
+
+	it('renders amounts in a custom currency instead of throwing', () => {
+		// `formatAmount('cur_beer')` cannot resolve — the money helpers must be handed
+		// the descriptor. Before #63 this render threw.
+		expect(() =>
+			renderForm(
+				{
+					currency: BEER.code,
+					exchangeRate: '250',
+					amountTotal: 3,
+					amountTotalSettlement: 75000,
+					payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+				},
+				WITH_CUSTOM
+			)
+		).not.toThrow();
+	});
+
+	it('never shows the opaque code anywhere on the form', () => {
+		const { container } = renderForm(
+			{
+				currency: BEER.code,
+				exchangeRate: '250',
+				amountTotal: 3,
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+			},
+			WITH_CUSTOM
+		);
+		expect(screenText(container)).not.toContain('cur_beer');
+		// …and DOES name it by its display code (the "Paid in BEER" disclosure).
+		expect(screenText(container)).toContain('BEER');
+	});
+
+	it('posts the OPAQUE code — the display code can never identify the row', () => {
+		const { form } = renderForm(
+			{
+				currency: BEER.code,
+				exchangeRate: '250',
+				amountTotal: 3,
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+			},
+			WITH_CUSTOM
+		);
+		expect(get(form.form).currency).toBe(BEER.code);
+	});
+
+	it('lists the custom currency by DISPLAY code in the picker', async () => {
+		const { container } = renderForm({}, WITH_CUSTOM);
+		const trigger = container.querySelector('[aria-label="Currency"]') as HTMLElement;
+		trigger.click();
+		await tick();
+
+		const labels = [...document.querySelectorAll('[data-slot="command-item"]')].map((el) =>
+			el.textContent?.trim()
+		);
+		expect(labels.some((l) => l?.startsWith('BEER'))).toBe(true);
+		expect(labels.every((l) => !l?.includes('cur_beer'))).toBe(true);
+	});
+
+	it('is ALWAYS foreign: the FX entry is revealed and never the rate-1 seam', () => {
+		// A custom currency can never equal the settlement currency (ADR-0014 decision
+		// 6), so the rate/settlement-total field must be present without the user
+		// having to switch anything.
+		const { container, form } = renderForm(
+			{
+				currency: BEER.code,
+				exchangeRate: '250',
+				amountTotal: 3,
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+			},
+			WITH_CUSTOM
+		);
+		expect(container.querySelector('#fx-rate')).not.toBeNull();
+		expect(container.querySelector('#fx-total')).not.toBeNull();
+		expect(get(form.form).exchangeRate).not.toBe('1');
+	});
+
+	it('takes the entry exponent from the custom row (0-dp: no decimals accepted)', async () => {
+		const { container } = renderForm(
+			{
+				currency: BEER.code,
+				exchangeRate: '250',
+				amountTotal: 3,
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+			},
+			WITH_CUSTOM
+		);
+		const input = container.querySelector<HTMLInputElement>('#amountTotal')!;
+		await fireEvent.input(input, { target: { value: '4.5' } });
+		// BEER is 0-dp — the fraction is refused as it is typed.
+		expect(input.value).toBe('4');
+	});
+
+	it('recomputes the settlement total from the custom exponent (4 BEER @250 = ฿1,000.00)', async () => {
+		const { container, form } = renderForm(
+			{
+				currency: BEER.code,
+				exchangeRate: '250',
+				amountTotal: 3,
+				amountTotalSettlement: 75000,
+				payers: [{ memberId: 'm-alex', amountPaid: 3 }]
+			},
+			WITH_CUSTOM
+		);
+		const input = container.querySelector<HTMLInputElement>('#amountTotal')!;
+		await fireEvent.input(input, { target: { value: '4' } });
+		await tick();
+
+		expect(get(form.form).amountTotal).toBe(4);
+		// 4 (0-dp) × 250 → 100000 satang. A hardcoded ×100 on the entry side would
+		// give 1000× this.
+		expect(get(form.form).amountTotalSettlement).toBe(100_000);
+	});
+
+	it('a SEEDED entry currency still renders exactly as before (regression)', () => {
+		const { container, form } = renderForm(
+			{
+				currency: 'JPY',
+				exchangeRate: '0.22',
+				amountTotal: 1000,
+				amountTotalSettlement: 22000,
+				payers: [{ memberId: 'm-alex', amountPaid: 1000 }]
+			},
+			WITH_CUSTOM
+		);
+		expect(get(form.form).currency).toBe('JPY');
+		expect(screenText(container)).toContain('JPY');
+		expect(screenText(container)).not.toContain('cur_beer');
 	});
 });

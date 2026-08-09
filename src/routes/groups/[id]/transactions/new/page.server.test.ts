@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 import { isRedirect, isHttpError } from '@sveltejs/kit';
 
 // Route tests for the `new` transaction page (task 4.7).
@@ -42,6 +43,12 @@ vi.mock('$lib/server/groups', async () => {
 });
 vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
+
+// The group-scoped ENTRY-CURRENCY set (#63; PLAN §7.5.2). The route reads it for
+// the picker AND for the group-scoped entry-currency validator; mocked to the
+// seeded 29 so these tests exercise the unchanged seeded-currency behaviour.
+const { listCurrenciesForGroup } = vi.hoisted(() => ({ listCurrenciesForGroup: vi.fn() }));
+vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 
 import { load, actions } from './+page.server';
 import { GroupAccessError } from '$lib/server/groups';
@@ -143,6 +150,10 @@ function makeActionEvent(user: User | null, search = '') {
 
 beforeEach(() => {
 	superValidate.mockReset();
+	listCurrenciesForGroup.mockReset();
+	listCurrenciesForGroup.mockResolvedValue(
+		SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false }))
+	);
 	setError.mockReset();
 	createTransaction.mockReset();
 	getGroupForUser.mockReset();
@@ -170,6 +181,36 @@ describe('/groups/[id]/transactions/new load', () => {
 		expect(result.members).toHaveLength(2);
 		expect(result.categories.spending.length).toBeGreaterThan(0);
 		expect(result.currency.code).toBe('THB');
+	});
+
+	it('offers the GROUP-SCOPED currency set, custom rows included (§7.5.2)', async () => {
+		// The picker and the entry-currency validator read ONE list — the group's own
+		// (#61 `listCurrenciesForGroup`), not the compiled-in seeded constant. Each
+		// entry carries the `display_code` the picker renders alongside the opaque
+		// primary key it posts.
+		listCurrenciesForGroup.mockResolvedValue([
+			...SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false })),
+			{
+				code: 'cur_beer',
+				displayCode: 'BEER',
+				symbol: '🍺',
+				exponent: 0,
+				name: 'Bottle of beer',
+				isCustom: true
+			}
+		]);
+
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			currencies: { code: string; displayCode: string; exponent: number }[];
+		};
+
+		expect(listCurrenciesForGroup).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
+		const beer = result.currencies.find((c) => c.code === 'cur_beer');
+		expect(beer).toEqual(
+			expect.objectContaining({ displayCode: 'BEER', exponent: 0, symbol: '🍺' })
+		);
+		// Seeded rows still travel with `displayCode === code` (the seeded invariant).
+		expect(result.currencies.find((c) => c.code === 'THB')?.displayCode).toBe('THB');
 	});
 });
 

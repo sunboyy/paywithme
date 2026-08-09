@@ -121,6 +121,23 @@ function assertDescriptor(currency: CurrencyDescriptor): CurrencyDescriptor {
 }
 
 /**
+ * Public form of {@link resolveCurrency}: normalise a {@link CurrencyRef} to a
+ * validated {@link CurrencyDescriptor}.
+ *
+ * For callers that need the resolved row itself rather than a formatted string —
+ * chiefly the §7.6 conversion, which needs the entry currency's `exponent` and
+ * must work for a group-defined custom currency whose code `getCurrency()` cannot
+ * find. Passing a descriptor through returns it (after the same shape guard a
+ * formatter would apply); passing a seeded code widens it with
+ * `displayCode === code`, the seeded-row invariant.
+ *
+ * @throws if the code is not a seeded currency, or the descriptor is malformed.
+ */
+export function toCurrencyDescriptor(currency: CurrencyRef): CurrencyDescriptor {
+	return resolveCurrency(currency);
+}
+
+/**
  * `10 ** exponent` for `currency` — the factor between one major unit and its
  * minor units (1 for 0-dp currencies, 100 for 2-dp, 1000 for 3-dp). Reads the
  * resolved exponent so precision is always per-currency.

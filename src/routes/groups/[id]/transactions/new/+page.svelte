@@ -25,7 +25,11 @@
 	// svelte-ignore state_referenced_locally
 	const schema = buildTransactionSchema({
 		settlementCurrency: data.group.settlementCurrency as SeededCurrencyCode,
-		memberIds: data.members.map((m) => m.id)
+		memberIds: data.members.map((m) => m.id),
+		// The group's entry-currency set (PLAN §7.5.2) — the same list the picker
+		// renders, so client validation accepts exactly what the server does (and
+		// resolves a custom currency's exponent for the §7.6 conversion).
+		entryCurrencies: data.currencies
 	});
 
 	// svelte-ignore state_referenced_locally

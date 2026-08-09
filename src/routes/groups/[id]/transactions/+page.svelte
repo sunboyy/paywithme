@@ -6,7 +6,7 @@
 	// row links to the per-transaction page (task 4.11). Empty state when none.
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { formatAmount, type SeededCurrencyCode } from '$lib/money';
+	import { asEntryCurrencyCode, formatAmount, type SeededCurrencyCode } from '$lib/money';
 	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
@@ -23,6 +23,25 @@
 	let { data }: { data: PageData } = $props();
 
 	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
+
+	// Entry-currency descriptors by code (PLAN §7.5.2). A row's ORIGINAL amount is
+	// denominated in the currency it was RECORDED in, which may be one this group
+	// defined itself — that one exists only as a `currencies` row, so `formatAmount`
+	// must be handed the row rather than the code it would fail to look up (and the
+	// row is what carries `display_code`, the only code a user may ever see).
+	const entryCurrencies = $derived(new Map(data.currencies.map((c) => [c.code, c])));
+
+	/**
+	 * Format a transaction's ORIGINAL total in its OWN entry currency. Seeded codes
+	 * fall back to the code itself, which `formatAmount` resolves through the seeded
+	 * constant exactly as before.
+	 */
+	function entryAmount(minor: number, code: string, isForeign: boolean): string {
+		const descriptor = entryCurrencies.get(code);
+		return descriptor
+			? formatAmount(minor, descriptor, { code: isForeign })
+			: formatAmount(minor, asEntryCurrencyCode(code), { code: isForeign });
+	}
 
 	// Empty-state branching (task 8.1): distinguish "no transactions yet" (offer
 	// the create CTA) from "your filter matched nothing" (offer to clear it).
@@ -281,7 +300,7 @@
 								     once); a foreign amount keeps it so the two can't be confused. -->
 								<span class="shrink-0 text-right">
 									<span class="block font-medium tabular-nums">
-										{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
+										{entryAmount(txn.amountTotal, txn.currency, txn.isForeign)}
 									</span>
 									{#if txn.isForeign}
 										<span class="block text-xs text-muted-foreground tabular-nums">

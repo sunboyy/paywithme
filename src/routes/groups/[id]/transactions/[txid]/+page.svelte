@@ -40,13 +40,20 @@
 	const isDeleted = $derived(detail.deletedAt !== null);
 
 	/**
-	 * Amount in the TRANSACTION's own entry currency. The ISO code is kept only
-	 * when that currency is foreign to the group — a settlement-currency amount is
-	 * already identified by the page's context, so "JPY ¥6,800" on every line is
-	 * noise. A code-prefixed amount on this page therefore always means "foreign".
+	 * Amount in the TRANSACTION's own entry currency, formatted from the RESOLVED
+	 * descriptor the `load` supplied (PLAN §7.5.2). It has to be the descriptor and
+	 * not the stored code: a group-defined custom currency exists only as a
+	 * `currencies` row, so the code would not resolve — and the row is what carries
+	 * `display_code`, the only code that may ever reach a screen.
+	 *
+	 * The code is kept only when that currency is foreign to the group — a
+	 * settlement-currency amount is already identified by the page's context, so
+	 * "JPY ¥6,800" on every line is noise. A code-prefixed amount on this page
+	 * therefore always means "foreign"; a CUSTOM currency always prefixes anyway
+	 * (its member-authored symbol can't be assumed unique).
 	 */
 	const entry = $derived((minor: number) =>
-		formatAmount(minor, detail.currency, { code: detail.isForeign })
+		formatAmount(minor, data.entryCurrency, { code: detail.isForeign })
 	);
 	/** Amount in the group's settlement currency — always context-established. */
 	const settlement = $derived((minor: number) =>
@@ -64,7 +71,11 @@
 	// svelte-ignore state_referenced_locally
 	const schema = buildTransactionSchema({
 		settlementCurrency: data.group.settlementCurrency as SeededCurrencyCode,
-		memberIds: data.members.map((m) => m.id)
+		memberIds: data.members.map((m) => m.id),
+		// The group's entry-currency set (PLAN §7.5.2) — the same list the picker
+		// renders, so client validation accepts exactly what the server does (and
+		// resolves a custom currency's exponent for the §7.6 conversion).
+		entryCurrencies: data.currencies
 	});
 
 	// svelte-ignore state_referenced_locally
@@ -188,7 +199,7 @@
 					</p>
 					{#if detail.isForeign}
 						<p class="text-sm text-muted-foreground tabular-nums">
-							{settlement(detail.amountTotalSettlement)} · rate via {detail.currency}
+							{settlement(detail.amountTotalSettlement)} · rate via {data.entryCurrency.displayCode}
 							→ {settlementCurrency}
 						</p>
 					{/if}
