@@ -29,3 +29,6 @@ npm-debug.log*
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
