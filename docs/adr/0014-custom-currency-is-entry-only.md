@@ -87,14 +87,27 @@ never equal the settlement currency, so §7.6's rate-1 same-currency seam never
 applies to it and the FX field is always shown. `exchange_rate` is
 `numeric(18,6)`, so `1 BEER = 250.000000 THB` is expressible.
 
-**7. Agent and API _writes_ are unchanged; _reads_ must map and wrap.** Assistant
-writes are already restricted to the group settlement currency, so
-`create_transaction` / `update_transaction` / `settle_up` never accept a custom
-code and `list_currencies` can stay the global seeded table. But **reads return
-any transaction**, so `toMcpMoney` and the REST money DTO would otherwise emit the
+**7. Agent writes are unchanged; _reads_ must map and wrap.** Assistant writes are
+already restricted to the group settlement currency, so `create_transaction` /
+`update_transaction` / `settle_up` never accept a custom code and
+`list_currencies` can stay the global seeded table. But **reads return any
+transaction**, so `toMcpMoney` and the REST money DTO would otherwise emit the
 opaque `code`. Both must resolve `display_code`, and because `display_code` /
 `name` / `symbol` are member-authored they are wrapped per ADR-0003 / ADR-0004
 wherever they reach an agent.
+
+**8. `/api/v1` speaks `display_code` in _both_ directions; the opaque `code` never
+leaves the server.** (Amends decision 7, which originally said API writes were
+unchanged too — see "Amendment: REST writes accept a display code" below.) A
+transaction write body carries the **display code**, resolved server-side against
+the group already named in the URL path; and a new group-scoped
+`GET /groups/{gid}/currencies` lists that group's usable currencies by display
+code so a client can discover one it has not already seen on a transaction. The
+global `GET /currencies` stays the static seeded table, unchanged.
+
+This is deliberately **REST-only**. The Connector is not affected: assistant
+writes remain settlement-currency-only by decision 1, which is a restriction on
+_which currencies an agent may write in_, not on vocabulary.
 
 ## Why not let a custom currency be the settlement currency
 
@@ -146,6 +159,49 @@ without any of this ADR's machinery. It is rejected **as a substitute**, not as 
 idea: it cannot express a non-monetary unit, which is the half of the request that
 needs a decision. The two are complementary, and widening the seeded list stays
 the right answer whenever the missing currency is a real one.
+
+## Amendment: REST writes accept a display code
+
+_2026-08-09, issue #68. Adds decision 8; narrows decision 7 to the agent surface._
+
+Decision 7 as first written said API writes needed no change, reasoning from the
+Connector: assistant writes are settlement-only, so no write path can encounter a
+custom code. That is true of the Connector and **false of `/api/v1`**, which is a
+general-purpose client surface with no such restriction. Once reads emitted only
+`display_code`, a REST client could read a custom-currency transaction and could
+not write one back: `PUT` is full replacement, so `currency` cannot be omitted, and
+`display_code` did not validate. The round-trip had worked before only because the
+opaque code was leaking — the bug the read fix closed.
+
+The write **plumbing** was never the problem and needs no change:
+`createTransaction` / `updateTransaction` already build their entry-currency gate
+from the group's own set (`resolveEntryCurrencies`), custom rows included. The gap
+was purely the vocabulary on the wire — reads spoke display code, writes demanded
+the opaque code, and nothing connected them. Decision 8 is therefore a translation
+at the route boundary, not a change to any service.
+
+Two properties make resolving a display code to a row safe, and both are already
+enforced: `(group_id, display_code)` is unique and a display code may not shadow a
+seeded code, so within one group a display code names **exactly one** currency;
+and `display_code` freezes the moment a transaction references it (decision 5), so
+for any transaction that exists in a custom currency, the code it was read under
+cannot subsequently move. The only mutable window belongs to a currency no
+transaction references — and naming it in a write body is what freezes it.
+
+**Why not leave it (app-only editing).** Read-then-write round-tripping is the
+defining property of a full-replacement `PUT` resource. Serving a representation
+the same endpoint will not accept back is a broken resource regardless of what
+this ADR says about writes, and "the web app is the only place this row can be
+edited" is a one-way door that gets discovered by a user rather than by us.
+
+**Why not expose the opaque code on a group-scoped endpoint.** It would also let a
+client construct a valid write body, and it is the wrong trade: publishing the
+opaque code makes an internal identifier a permanent part of the public contract,
+so it could never be regenerated, re-formatted or migrated afterwards. It also
+re-introduces exactly what decision 7's read fix removed, and leaves the API
+speaking two different currency vocabularies depending on the endpoint. The
+display code is the identifier the domain already treats as public
+(`CONTEXT.md`, "Display code"); the opaque one exists to be invisible.
 
 ## Consequences
 
