@@ -213,7 +213,7 @@ export const actions: Actions = {
 	default: async ({ request, params, locals, url }) => {
 		// Guard the mutation too — never trust that `load` ran. `requireUser` THROWS
 		// the redirect; keep it above the validate/try below.
-		const user = requireUser(locals, { redirectTo: url.pathname });
+		const user = requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 		// Re-load the group for its settlement currency + member allow-list so the
 		// schema is rebuilt server-side from trusted group context (NOT the payload).

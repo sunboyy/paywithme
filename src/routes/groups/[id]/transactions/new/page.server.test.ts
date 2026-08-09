@@ -128,8 +128,8 @@ function makeLoadEvent(user: User | null) {
 	} as unknown as Parameters<typeof load>[0];
 }
 
-function makeActionEvent(user: User | null) {
-	const request = new Request('http://localhost/groups/g1/transactions/new', {
+function makeActionEvent(user: User | null, search = '') {
+	const request = new Request(`http://localhost/groups/g1/transactions/new${search}`, {
 		method: 'POST',
 		body: new FormData()
 	});
@@ -174,6 +174,19 @@ describe('/groups/[id]/transactions/new load', () => {
 });
 
 describe('/groups/[id]/transactions/new default action', () => {
+	it('preserves settle-prefill query state when authentication must resume', async () => {
+		const search = '?type=transfer&from=m1&to=m2&amount=1250';
+		requireUser.mockImplementationOnce(() => {
+			throw new Error('redirect');
+		});
+		await expect(actions.default(makeActionEvent(null, search))).rejects.toBeDefined();
+
+		expect(requireUser).toHaveBeenCalledWith(expect.objectContaining({ user: null }), {
+			redirectTo: '/groups/g1/transactions/new' + search
+		});
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
 	it('creates the transaction and redirects to the list on a valid POST', async () => {
 		try {
 			await actions.default(makeActionEvent({ id: 'u1', name: 'Alice' }));
