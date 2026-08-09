@@ -4,6 +4,7 @@
 // bare scalar, and `deletedAt` survives for a soft-deleted txn.
 
 import { describe, it, expect } from 'vitest';
+import { asEntryCurrencyCode } from '$lib/money';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { toTransactionDetailDto } from './transaction-detail';
 
@@ -104,5 +105,54 @@ describe('toTransactionDetailDto', () => {
 		expect(dto.splitMode).toBe('itemized');
 		expect(dto.isForeign).toBe(true);
 		expect(dto.createdAt).toBe('2026-05-01T10:00:00.000Z');
+	});
+});
+
+// ── A group-defined entry currency (PLAN §7.5.2; ADR-0014 decision 7) ─────────
+// EVERY entry-currency amount on the detail — the total, each payer line, each
+// item — must carry the display code, because each one is built from the same
+// resolved currency and a single missed one would leak the opaque key.
+
+const BEER = {
+	code: 'cur_9f2e5a10-0000-4000-8000-000000000001',
+	displayCode: 'BEER',
+	exponent: 0,
+	symbol: '🍺'
+};
+
+describe('toTransactionDetailDto — custom entry currency', () => {
+	const detail = () =>
+		makeDetail({
+			currency: asEntryCurrencyCode(BEER.code),
+			amountTotal: 3,
+			amountTotalSettlement: 75000
+		});
+
+	it('labels the total, the payer lines and the item amounts with the DISPLAY code', () => {
+		const dto = toTransactionDetailDto(detail(), BEER);
+
+		expect(dto.amount.currency).toBe('BEER');
+		expect(dto.payers.map((p) => p.amountPaid.currency)).toEqual(['BEER']);
+		expect(dto.items.map((i) => i.amount.currency)).toEqual(['BEER']);
+	});
+
+	it('never emits the opaque row key anywhere in the payload', () => {
+		expect(JSON.stringify(toTransactionDetailDto(detail(), BEER))).not.toContain('cur_');
+	});
+
+	it('leaves every SETTLEMENT amount alone — shares stay in the seeded currency', () => {
+		const dto = toTransactionDetailDto(detail(), BEER);
+
+		expect(dto.settlementAmount).toEqual({ amount: 75000, currency: 'THB' });
+		expect(dto.shares.every((s) => s.amountOwed.currency === 'THB')).toBe(true);
+		expect(dto.items.every((i) => i.shares.every((s) => s.amountOwed.currency === 'THB'))).toBe(
+			true
+		);
+	});
+
+	it('is unchanged for a seeded currency, resolved or not — `code == display_code`', () => {
+		const d = makeDetail();
+		const resolved = { code: 'USD', displayCode: 'USD', exponent: 2, symbol: '$' };
+		expect(toTransactionDetailDto(d, resolved)).toEqual(toTransactionDetailDto(d));
 	});
 });

@@ -46,6 +46,7 @@ import {
 	type TransactionListFilters
 } from '$lib/server/transactions';
 import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/api/v1';
+import { resolveEntryCurrencies, resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
@@ -149,7 +150,15 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 
 	const hasMore = rows.length > limit;
 	const pageRows = hasMore ? rows.slice(0, limit) : rows;
-	const data = pageRows.map(toTransactionListItemDto);
+	// Resolve the ENTRY currencies of the WHOLE PAGE in ONE pass so a page of
+	// group-defined-currency rows costs at most one extra query rather than one per row
+	// (`lib/server/entry-currency.ts`); an all-seeded page — the ordinary case — costs
+	// none. Each row is then labelled with its `display_code` (ADR-0014 decision 7).
+	const entryCurrencies = await resolveEntryCurrencies(
+		gid,
+		pageRows.map((row) => row.currency)
+	);
+	const data = pageRows.map((row) => toTransactionListItemDto(row, entryCurrencies(row.currency)));
 
 	// Mint the next cursor from the LAST SERVED row's full §16.4 sort key.
 	const last = pageRows.at(-1);
@@ -219,7 +228,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			groupId: gid,
 			txnId
 		});
-		return { status: 201, body: toTransactionDetailDto(detail) };
+		// §16.4's write payload is the FULL internal `TransactionInput`, whose entry
+		// currency may legitimately be one the group defined itself (PLAN §7.5.2) — so the
+		// 201 body resolves `display_code` exactly as the GET routes do.
+		const entryCurrency = await resolveEntryCurrency(gid, detail.currency);
+		return { status: 201, body: toTransactionDetailDto(detail, entryCurrency) };
 	};
 
 	return runCreateWithIdempotency({

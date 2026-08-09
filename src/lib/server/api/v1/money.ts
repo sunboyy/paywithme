@@ -31,31 +31,48 @@
 // in `TransactionDetailDto` — wrapping a percentage in `{ amount, currency }`
 // would be a lie.
 
-import type { EntryCurrencyCode } from '$lib/money';
+// ── `currency` is the DISPLAY code, never the row key (ADR-0014 decision 7) ──
+// A transaction's ENTRY currency may be one the group defined itself (PLAN
+// §7.5.2). Such a row is keyed by an OPAQUE generated id (`cur_9f2e…`) which is an
+// internal identifier and never appears in an API response (CONTEXT.md "Display
+// code"), so the transaction mappers resolve the row and emit its `display_code`
+// (`BEER`). The wire shape is unchanged — it is still `{ amount, currency }`, and
+// still the same string for all 29 seeded currencies, where `code == display_code`.
+//
+// One honest consequence: `GET /api/v1/currencies` is the STATIC §7.5.1 table
+// (§16.4) and does not list a group's own currencies, so a client cannot resolve a
+// custom code's exponent or symbol from it. That is deliberate — the reference
+// endpoint is a global table and a custom currency is group-scoped — and it is why
+// SETTLEMENT amounts, which every §8 figure is denominated in, are always one of
+// the 29 (ADR-0014 decision 1): the amounts a client must be able to format are
+// never affected.
 
 /**
  * A single monetary value on the `/api/v1` wire (PLAN §16.4): an integer
- * `amount` in minor units plus the ISO `currency` it is denominated in. See the
+ * `amount` in minor units plus the `currency` it is denominated in. See the
  * module header for why every amount is nested like this rather than flattened.
  */
 export interface Money {
 	/** The value in `currency`'s integer minor units (no floats). */
 	readonly amount: number;
 	/**
-	 * The code `amount` is denominated in. Always an ISO-4217 code today: an
-	 * ENTRY currency may in principle be a group-defined custom one, whose
-	 * user-visible `display_code` these read surfaces must resolve rather than
-	 * emit the opaque row key (ADR-0014 decision 7) — that mapping is a separate
-	 * task, and nothing can create a custom currency yet.
+	 * The code `amount` is denominated in — the currency's DISPLAY code. An ISO-4217
+	 * code for all 29 seeded currencies (and therefore for every settlement amount);
+	 * a group-defined entry currency's own short code (`BEER`) otherwise, never the
+	 * opaque `currencies.code` (ADR-0014 decision 7). A custom code is meaningful
+	 * only inside its own group.
 	 */
-	readonly currency: EntryCurrencyCode;
+	readonly currency: string;
 }
 
 /**
  * Build a {@link Money} from an integer minor-unit `amount` and its `currency`.
  * A tiny pure helper so mappers read declaratively and never hand-assemble the
  * object shape inconsistently.
+ *
+ * `currency` must already BE the display code — resolving a transaction's entry
+ * currency is the mapper's job (see `transaction-detail.ts`), not this helper's.
  */
-export function money(amount: number, currency: EntryCurrencyCode): Money {
+export function money(amount: number, currency: string): Money {
 	return { amount, currency };
 }

@@ -841,6 +841,12 @@ describe('buildTransactionSchema — a CUSTOM entry currency (§7.5.2 / ADR-0014
 	});
 
 	it('rejects the display code — only the primary key identifies a row', () => {
+		// This is also the rule that makes a custom-currency transaction UNEDITABLE
+		// through `/api/v1` in v1 (issue #64): reads emit `display_code` and nothing
+		// emits the opaque key, so no client can name this currency in a write body,
+		// and `PUT` is full replacement so it cannot omit the field. A documented limit
+		// — see the 422 pinned in the `[txid]` route suite — not an oversight, and NOT
+		// to be fixed by widening this schema (ADR-0014 decision 7: writes unchanged).
 		expect(beerSchema.safeParse(beerSpending({ currency: BEER.displayCode })).success).toBe(false);
 	});
 

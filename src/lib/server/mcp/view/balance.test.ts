@@ -145,4 +145,18 @@ describe('toBalancesView', () => {
 		expect(ghost?.displayName.author).toEqual({ kind: 'paywithme' });
 		expect(ghost?.isYou).toBe(false);
 	});
+
+	// ── Regression: the custom-currency work does NOT reach here (issue #64) ──
+	it('is untouched by custom currencies — every balance is the SEEDED settlement one', () => {
+		// ADR-0014 decision 1 is what makes this true and keeps it cheap: a custom
+		// currency is entry-only, so `groups.settlement_currency` is always one of the
+		// 29, no balance line ever needs a resolved row, and this view needed no change.
+		const view = toBalancesView({ group, members, balances });
+
+		for (const line of view.balances) {
+			expect(line.balance.currency).toBe(group.settlementCurrency);
+			expect(line.balance).not.toHaveProperty('isCustom');
+		}
+		expect(JSON.stringify(view)).not.toContain('cur_');
+	});
 });

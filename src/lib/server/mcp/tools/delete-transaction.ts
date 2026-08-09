@@ -44,7 +44,7 @@ import { toolSuccess } from '../errors';
 import { buildDeleteEchoBack, toTransactionView, UNTRUSTED_NOTE } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadGroupView, loadMemberViews } from './load';
+import { loadEntryCurrency, loadGroupView, loadMemberViews } from './load';
 
 /** The wire name. */
 const TOOL_NAME = 'delete_transaction';
@@ -152,7 +152,11 @@ export const deleteTransactionTool: McpTool<z.infer<typeof deleteTransactionArgs
 		// the transaction is still fully readable after a soft delete, which is what makes
 		// restoring it possible and what lets the echo name what left the ledger.
 		const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const deleted = toTransactionView({ detail, members, principal });
+		// A transaction recorded in a currency the GROUP defined can be deleted through the
+		// assistant even though it could never have been WRITTEN through it, so this read
+		// resolves the entry currency's row like every other read (ADR-0014 decision 7).
+		const entryCurrency = await loadEntryCurrency(groupId, detail.currency);
+		const deleted = toTransactionView({ detail, members, principal, entryCurrency });
 
 		return toolSuccess({
 			// The wrapped structured view (ADR-0003) — every name and the title inside an

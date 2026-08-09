@@ -857,9 +857,17 @@
 				"description": "An ISO-4217 code from `GET /currencies`.",
 				"examples": ["THB", "JPY"]
 			},
+			"DisplayCurrencyCode": {
+				"type": "string",
+				"minLength": 1,
+				"maxLength": 8,
+				"pattern": "^\\S+$",
+				"description": "The code an amount is **shown by**.\n\nAn ISO-4217 code from `GET /currencies` in almost every case — and ALWAYS for a\nsettlement amount, since a group settles only in a listed currency. A group may\nadditionally define its own **entry** currency (an unlisted national one, or a\nunit that was never money, like `BEER`), and a transaction entered in one carries\nthe short code that group chose.\n\nA group-defined code is meaningful **only inside its own group**: two groups may\neach define the same code for unrelated units, and `GET /currencies` — a global\ntable — does not list them, so their `exponent` and `symbol` cannot be resolved\nfrom it. Never treat such a code as ISO-4217 and never carry it between groups.\n",
+				"examples": ["THB", "JPY", "BEER"]
+			},
 			"Money": {
 				"type": "object",
-				"description": "A monetary value. `amount` is an integer in `currency`'s **minor units** — never a\nfloat, never a formatted string. `฿450.00` is `{ \"amount\": 45000, \"currency\": \"THB\" }`;\n`¥3600` (a 0-exponent currency) is `{ \"amount\": 3600, \"currency\": \"JPY\" }`. Get each\ncurrency's `exponent` from `GET /currencies`.\n",
+				"description": "A monetary value. `amount` is an integer in `currency`'s **minor units** — never a\nfloat, never a formatted string. `฿450.00` is `{ \"amount\": 45000, \"currency\": \"THB\" }`;\n`¥3600` (a 0-exponent currency) is `{ \"amount\": 3600, \"currency\": \"JPY\" }`. Get each\ncurrency's `exponent` from `GET /currencies`.\n\n`currency` is a display code, so a transaction entered in a currency its group\ndefined itself reports that group's code (see `DisplayCurrencyCode`). Settlement\namounts are always ISO-4217.\n",
 				"required": ["amount", "currency"],
 				"additionalProperties": false,
 				"properties": {
@@ -868,7 +876,7 @@
 						"description": "The value in `currency`'s minor units. May be negative (e.g. a balance)."
 					},
 					"currency": {
-						"$ref": "#/components/schemas/CurrencyCode"
+						"$ref": "#/components/schemas/DisplayCurrencyCode"
 					}
 				},
 				"examples": [
@@ -1453,7 +1461,7 @@
 								"$ref": "#/components/schemas/CurrencyCode"
 							}
 						],
-						"description": "The **entry** currency — what was actually spent. May differ from the group's settlement currency."
+						"description": "The **entry** currency — what was actually spent. May differ from the group's\nsettlement currency, but must be one of the ISO-4217 codes from `GET /currencies`.\n\nA currency a group defined for itself cannot be named here, because this API never\ndiscloses the internal identifier such a currency is stored under (see\n`DisplayCurrencyCode`). Since this body is a FULL replacement, a transaction entered\nin one is therefore **not editable through this API in v1** — read it, delete it and\nrestore it here; edit it in the app.\n"
 					},
 					"exchangeRate": {
 						"type": "string",

@@ -225,6 +225,32 @@ describe('live DTO output matches the spec (PLAN §16.10)', () => {
 		);
 	});
 
+	// ── A group-defined entry currency (issue #64; PLAN §7.5.2; ADR-0014 #7) ──
+	it('the published Money schema accepts a group-defined DISPLAY code', () => {
+		// The mappers now emit `display_code`, so the spec has to permit it or the
+		// live contract test would fail the first time anyone records `3 BEER`.
+		expectValid('Money', { amount: 3, currency: 'BEER' });
+		expectValid('Money', { amount: 75000, currency: 'THB' });
+	});
+
+	it('the published Money schema REJECTS the opaque row key', () => {
+		// `DisplayCurrencyCode` is capped at 8 characters, and an opaque code is
+		// `cur_<uuid>` (40) — so "the internal id never reaches the wire" is not just a
+		// convention in the mapper, it is unrepresentable in the published contract.
+		expectInvalid('Money', {
+			amount: 3,
+			currency: 'cur_9f2e5a10-0000-4000-8000-000000000001'
+		});
+	});
+
+	it('the reference table and the settlement currency stay ISO-4217', () => {
+		// Only the MONEY code widened. `Currency.code` (GET /currencies) and
+		// `Group.settlementCurrency` are still the strict 3-letter form, because a custom
+		// currency is entry-only and global-table-invisible (ADR-0014 decisions 1 + 7).
+		expectInvalid('Currency', { code: 'BEER', exponent: 0, symbol: '🍺' });
+		expectInvalid('Group', { ...toGroupDto(group), settlementCurrency: 'BEER' });
+	});
+
 	it('rejects a payload that drifts from the schema (the check actually bites)', () => {
 		// A float amount — the exact bug the integer-minor-units rule exists to prevent.
 		expectInvalid('Money', { amount: 900.5, currency: 'THB' });

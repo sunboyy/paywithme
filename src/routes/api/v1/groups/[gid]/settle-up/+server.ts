@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { getGroupForUser } from '$lib/server/groups';
 import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
+import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
 import { auditVia } from '$lib/server/api/provenance';
@@ -120,7 +121,11 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			groupId: gid,
 			txnId
 		});
-		return { status: 201, body: toTransactionDetailDto(detail) };
+		// A settle-up is a settlement-currency transfer by construction (§16.4), so this
+		// resolution is a no-op that costs no query — kept so every route that serves a
+		// transaction DTO resolves its entry currency the same way (ADR-0014 decision 7).
+		const entryCurrency = await resolveEntryCurrency(gid, detail.currency);
+		return { status: 201, body: toTransactionDetailDto(detail, entryCurrency) };
 	};
 
 	return runCreateWithIdempotency({

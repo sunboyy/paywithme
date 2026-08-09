@@ -17,7 +17,7 @@
 // The view data (payers, shares, items, charges, `deletedAt`) is kept — a
 // soft-deleted txn is still served (marked via `deletedAt`) so it can be shown.
 
-import type { EntryCurrencyCode, SeededCurrencyCode } from '$lib/money';
+import type { CurrencyDescriptor, SeededCurrencyCode } from '$lib/money';
 import type { TransactionDetail } from '$lib/server/transactions';
 import { money, type Money } from './money';
 
@@ -84,9 +84,19 @@ export interface TransactionDetailDto {
  * Map an internal {@link TransactionDetail} to its wire {@link TransactionDetailDto}.
  * PURE: object → object, no DB/IO. Drops `input` and nests every monetary value
  * as self-describing money in its correct currency (entry vs settlement).
+ *
+ * `entryCurrency` is the RESOLVED `currencies` row for `detail.currency`
+ * (`lib/server/entry-currency.ts`). Every entry-currency amount is labelled with
+ * its `displayCode`, so a transaction recorded in a currency the group defined
+ * itself reads as `BEER` rather than as the opaque row key the column stores
+ * (ADR-0014 decision 7). Omit it only where the entry currency is provably one of
+ * the seeded 29, for which `code == display_code` and the two are the same string.
  */
-export function toTransactionDetailDto(detail: TransactionDetail): TransactionDetailDto {
-	const entry: EntryCurrencyCode = detail.currency;
+export function toTransactionDetailDto(
+	detail: TransactionDetail,
+	entryCurrency?: CurrencyDescriptor
+): TransactionDetailDto {
+	const entry: string = entryCurrency?.displayCode ?? detail.currency;
 	const settlement: SeededCurrencyCode = detail.settlementCurrency;
 
 	return {

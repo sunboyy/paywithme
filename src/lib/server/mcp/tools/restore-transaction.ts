@@ -42,7 +42,7 @@ import { toolSuccess } from '../errors';
 import { buildRestoreEchoBack, toTransactionView, UNTRUSTED_NOTE } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadGroupView, loadMemberViews } from './load';
+import { loadEntryCurrency, loadGroupView, loadMemberViews } from './load';
 
 /** The wire name. */
 const TOOL_NAME = 'restore_transaction';
@@ -139,7 +139,10 @@ export const restoreTransactionTool: McpTool<z.infer<typeof restoreTransactionAr
 		// Re-read the PERSISTED state (now with `deletedAt` back to null) and project it
 		// wrapped, so the echo describes what the ledger actually holds.
 		const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const restored = toTransactionView({ detail, members, principal });
+		// Same as the delete path: a restore can target a transaction recorded in a
+		// group-defined currency, so the row is resolved and `display_code` served.
+		const entryCurrency = await loadEntryCurrency(groupId, detail.currency);
+		const restored = toTransactionView({ detail, members, principal, entryCurrency });
 
 		return toolSuccess({
 			// The wrapped structured view (ADR-0003) — every name and the title inside an

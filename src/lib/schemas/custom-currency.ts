@@ -20,7 +20,8 @@
 // `displayCode`, `name` and `symbol` are MEMBER-AUTHORED TEXT (CONTEXT.md): these
 // rules bound their shape and size, they do NOT make the text trusted. Wrapping
 // where it reaches an agent is ADR-0003 / ADR-0004 and belongs to the read
-// surfaces (#64).
+// surfaces — `mcp/view/transaction.ts`'s `CustomCurrencyView` wraps all three and
+// attributes them to `created_by` (#64).
 
 import { z } from 'zod';
 

@@ -257,4 +257,29 @@ describe('create_transaction rich wiring', () => {
 		expect(withDerivedIdempotency).not.toHaveBeenCalled();
 		expect(createTransaction).not.toHaveBeenCalled();
 	});
+
+	it('refuses a CUSTOM currency code with the existing error (ADR-0014 decision 7)', async () => {
+		// Regression for issue #64: the READ surfaces learned to serve `display_code`, so
+		// a model can now SEE `BEER` in a `get_transaction` result. The write path must
+		// have learned nothing — a custom code is still simply "not the group settlement
+		// currency", refused before anything is written.
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Round',
+			amount: '3',
+			currency: 'BEER',
+			splitBetween: ['mem_me', 'mem_bob']
+		});
+
+		expect(result.isError).toBe(true);
+		const envelope = result.structuredContent as unknown as {
+			error: { code: string; message: string; details: { fieldErrors: Record<string, string[]> } };
+		};
+		expect(envelope.error.code).toBe('validation_error');
+		expect(envelope.error.message).toContain('THB');
+		expect(envelope.error.details.fieldErrors.currency).toEqual([
+			'Currency must be THB for this group.'
+		]);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
 });
