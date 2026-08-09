@@ -22,6 +22,7 @@ import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { categoriesFor, defaultCategoryFor, getCategory } from '$lib/categories';
 import { getCurrency, CURRENCIES, MAX_SAFE_MINOR, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
 import { createTransaction, TransactionValidationError } from '$lib/server/transactions';
@@ -100,7 +101,11 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard (task 3.8): anonymous → redirect; no-access/not-found →
 	// 404. Returns the already-loaded group so we don't re-query. THROWS control
 	// flow, so it stays outside any try/catch.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	const settlementCurrency = group.settlementCurrency as CurrencyCode;
 	const currency = getCurrency(settlementCurrency);
@@ -205,10 +210,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 };
 
 export const actions: Actions = {
-	default: async ({ request, params, locals }) => {
+	default: async ({ request, params, locals, url }) => {
 		// Guard the mutation too — never trust that `load` ran. `requireUser` THROWS
 		// the redirect; keep it above the validate/try below.
-		const user = requireUser(locals);
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		// Re-load the group for its settlement currency + member allow-list so the
 		// schema is rebuilt server-side from trusted group context (NOT the payload).

@@ -13,7 +13,12 @@ const USER = { id: 'user_1', name: 'Ann' };
 function makeEvent(user: typeof USER | null = USER) {
 	const cookies = { get: vi.fn(), set: vi.fn(), delete: vi.fn() };
 	const setHeaders = vi.fn();
-	return { locals: { user }, cookies, setHeaders } as unknown as Parameters<typeof load>[0];
+	return {
+		locals: { user },
+		cookies,
+		setHeaders,
+		url: new URL('http://localhost/settings/api-keys/created')
+	} as unknown as Parameters<typeof load>[0];
 }
 
 const reveal = {
@@ -95,7 +100,11 @@ describe('/settings/api-keys/created load', () => {
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
-			if (isRedirect(e)) expect(e.location).toBe('/login');
+			if (isRedirect(e)) {
+				expect(e.location).toBe(
+					'/login?redirectTo=' + encodeURIComponent('/settings/api-keys/created')
+				);
+			}
 		}
 		expect(takeApiKeyReveal).not.toHaveBeenCalled();
 	});

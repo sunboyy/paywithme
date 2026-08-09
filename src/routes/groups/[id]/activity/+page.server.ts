@@ -11,6 +11,7 @@
 
 import { error } from '@sveltejs/kit';
 import { requireGroupAccess } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { GroupAccessError } from '$lib/server/groups';
 import { listGroupActivity, parseEntityTypeFilter, type ActivityEntry } from '$lib/server/activity';
 import { listMembers } from '$lib/server/members';
@@ -20,7 +21,11 @@ import type { PageServerLoad } from './$types';
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard: anonymous → redirect; no-access/not-found → 404. Returns
 	// the already-loaded group. THROWS control flow → outside any try/catch.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	// Filter state from the URL (server-first: links carry the filter so it works
 	// without JS). An unrecognized entity type / actor simply yields no filter.

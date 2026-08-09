@@ -13,15 +13,15 @@
 import { redirect } from '@sveltejs/kit';
 import { takeApiKeyReveal } from '$lib/server/api-key-reveal';
 import { maskApiKeySecret } from '$lib/server/api-keys';
+import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals, cookies, setHeaders }) => {
+export const load: PageServerLoad = async ({ locals, cookies, setHeaders, url }) => {
 	// `redirect()` throws — keep both redirects out of any try/catch.
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
+	const user = requireUser(locals, { redirectTo: pathAndQuery(url) });
 
-	const reveal = takeApiKeyReveal(cookies, locals.user.id);
+	const reveal = takeApiKeyReveal(cookies, user.id);
 	if (!reveal) {
 		// No key in flight: a refresh, a bookmark, or an expired flash. Nothing to
 		// show — and by design nothing CAN be shown again.

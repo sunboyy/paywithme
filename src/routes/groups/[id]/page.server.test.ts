@@ -92,7 +92,8 @@ type LoadResult = {
 function makeLoadEvent() {
 	return {
 		params: { id: 'g1' },
-		locals: { user: { id: 'u1', name: 'Alice' }, session: {} }
+		locals: { user: { id: 'u1', name: 'Alice' }, session: {} },
+		url: new URL('http://localhost/groups/g1')
 	} as unknown as Parameters<typeof load>[0];
 }
 

@@ -10,11 +10,16 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { renameGroupSchema } from '$lib/schemas/group';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { renameGroup, GroupAccessError } from '$lib/server/groups';
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ params, locals }) => {
-	const { group } = await requireGroupAccess({ locals, groupId: params.id });
+export const load: PageServerLoad = async ({ params, locals, url }) => {
+	const { group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	return {
 		group: { id: group.id, name: group.name },
@@ -25,8 +30,8 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 };
 
 export const actions: Actions = {
-	rename: async ({ request, params, locals }) => {
-		const user = requireUser(locals);
+	rename: async ({ request, params, locals, url }) => {
+		const user = requireUser(locals, { redirectTo: url.pathname });
 
 		const form = await superValidate(request, zod4(renameGroupSchema));
 		if (!form.valid) {

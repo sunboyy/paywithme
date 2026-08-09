@@ -56,6 +56,10 @@ export function requireUser(locals: App.Locals, options: { redirectTo?: string }
  * primitive `getGroupForUser`; a `null` result — meaning NO ACCESS, NOT FOUND, or
  * SOFT-DELETED — THROWS `error(404)`.
  *
+ * `redirectTo` only preserves navigation intent through authentication. Once the
+ * browser returns, this guard runs again and still requires group membership;
+ * carrying a destination never carries or grants authorization.
+ *
  * The three "you can't see this group" outcomes are deliberately conflated into a
  * single 404 so we never leak the EXISTENCE of groups the user can't access
  * (PLAN §12 "don't leak"): an attacker probing ids can't distinguish a group they
@@ -66,12 +70,14 @@ export function requireUser(locals: App.Locals, options: { redirectTo?: string }
  */
 export async function requireGroupAccess({
 	locals,
-	groupId
+	groupId,
+	redirectTo
 }: {
 	locals: App.Locals;
 	groupId: string;
+	redirectTo?: string;
 }): Promise<{ user: AuthedUser; group: Group }> {
-	const user = requireUser(locals);
+	const user = requireUser(locals, { redirectTo });
 
 	const group = await getGroupForUser(user.id, groupId);
 	if (!group) {

@@ -21,6 +21,7 @@
 
 import { formatAmount, getCurrency, type CurrencyCode } from '$lib/money';
 import { requireGroupAccess } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { getGroupBalances } from '$lib/server/balances';
 import { listMembers } from '$lib/server/members';
 import {
@@ -30,11 +31,15 @@ import {
 } from '$lib/transactions/balances';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ params, locals }) => {
+export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard (task 3.8): anonymous → /login; no-access/not-found → 404.
 	// Returns the already-loaded group so we don't re-query. THROWS control flow,
 	// so it stays outside any try/catch.
-	const { user, group } = await requireGroupAccess({ locals, groupId: params.id });
+	const { user, group } = await requireGroupAccess({
+		locals,
+		groupId: params.id,
+		redirectTo: pathAndQuery(url)
+	});
 
 	const settlementCurrency = group.settlementCurrency as CurrencyCode;
 	const currency = getCurrency(settlementCurrency);

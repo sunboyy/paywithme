@@ -17,7 +17,8 @@ type User = { name: string };
 function makeLoadEvent(user: User | null) {
 	return {
 		request: new Request('http://localhost/onboarding/passkey'),
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL('http://localhost/onboarding/passkey')
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -34,7 +35,7 @@ describe('/onboarding/passkey load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/onboarding/passkey'));
 			}
 		}
 

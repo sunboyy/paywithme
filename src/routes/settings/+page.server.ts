@@ -10,13 +10,15 @@
 // rename adds UI weight without a v1 need. The list/add/delete trio fully
 // satisfies task 2.9's required scope; rename was explicitly optional.
 
-import { fail, redirect } from '@sveltejs/kit';
+import { fail } from '@sveltejs/kit';
 import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { getAuthenticatorName } from '@better-auth/passkey';
 import { deletePasskeySchema } from '$lib/schemas/auth';
 import { revokeApiKeySchema } from '$lib/schemas/api-key';
 import { auth } from '$lib/server/auth';
+import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import {
 	ApiKeyNotFoundError,
 	listApiKeysForUser,
@@ -36,14 +38,12 @@ export type PasskeyListItem = {
 	createdAt: string;
 };
 
-export const load: PageServerLoad = async ({ locals, request }) => {
+export const load: PageServerLoad = async ({ locals, request, url }) => {
 	// Managing passkeys requires an authenticated session — `listPasskeys` and
 	// `deletePasskey` act on the caller's own credentials (PLAN §5.4). An
 	// anonymous hit goes to login. `redirect()` throws, so it lives OUTSIDE the
 	// try/catch below or the catch would swallow the navigation (2.5/2.6 trap).
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
+	requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 	// Degrade gracefully (PLAN §12): a transient list failure must render an empty
 	// list, not a 500. A user who skipped onboarding legitimately has zero, so an
@@ -86,7 +86,9 @@ export const load: PageServerLoad = async ({ locals, request }) => {
 };
 
 export const actions: Actions = {
-	delete: async ({ request }) => {
+	delete: async ({ request, locals, url }) => {
+		requireUser(locals, { redirectTo: url.pathname });
+
 		// `request.formData()` is consumed by superValidate; clone the headers we
 		// forward to better-auth BEFORE that (the Request body is single-use).
 		const headers = new Headers(request.headers);
@@ -119,11 +121,8 @@ export const actions: Actions = {
 	// a real per-row `<form>` (works with JS disabled) confirmed by
 	// `ConfirmSubmit.svelte`. Revoke = delete, so the key 401s on its very next
 	// request (§16.2); it is audited by the service.
-	revokeApiKey: async ({ request, locals }) => {
-		if (!locals.user) {
-			redirect(303, '/login');
-		}
-		const userId = locals.user.id;
+	revokeApiKey: async ({ request, locals, url }) => {
+		const userId = requireUser(locals, { redirectTo: url.pathname }).id;
 
 		// Clone the headers BEFORE `superValidate` consumes the (single-use) body —
 		// the plugin's session-scoped `getApiKey`/`deleteApiKey` need them.

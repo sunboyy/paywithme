@@ -9,14 +9,14 @@
 
 import { redirect } from '@sveltejs/kit';
 import { auth } from '$lib/server/auth';
+import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals, request }) => {
+export const load: PageServerLoad = async ({ locals, request, url }) => {
 	// Must be authenticated to enrol a passkey — `addPasskey` runs in the user's
 	// own session (PLAN §5.4). An anonymous hit goes to login.
-	if (!locals.user) {
-		redirect(303, '/login');
-	}
+	requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 	// Self-gate: a user who already has ≥1 passkey has nothing to be nudged
 	// about, so send them onward. We wrap ONLY the `listPasskeys` call in the

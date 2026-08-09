@@ -43,7 +43,8 @@ type User = { name: string; id?: string };
 function makeLoadEvent(user: User | null) {
 	return {
 		request: new Request('http://localhost/settings'),
-		locals: { user, session: user ? {} : null }
+		locals: { user, session: user ? {} : null },
+		url: new URL('http://localhost/settings')
 	} as unknown as Parameters<typeof load>[0];
 }
 
@@ -57,7 +58,7 @@ function makeRevokeEvent(
 		headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: 'session=abc' },
 		body: new URLSearchParams(fields).toString()
 	});
-	return { request, locals: { user } } as unknown as Parameters<
+	return { request, locals: { user }, url: new URL(request.url) } as unknown as Parameters<
 		(typeof actions)['revokeApiKey']
 	>[0];
 }
@@ -81,7 +82,11 @@ function makeActionEvent(fields: Record<string, string>) {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: body.toString()
 	});
-	return { request } as unknown as Parameters<(typeof actions)['delete']>[0];
+	return {
+		request,
+		locals: { user: { name: 'A', id: 'u1' }, session: {} },
+		url: new URL(request.url)
+	} as unknown as Parameters<(typeof actions)['delete']>[0];
 }
 
 describe('/settings load', () => {
@@ -101,7 +106,7 @@ describe('/settings load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/login');
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/settings'));
 			}
 		}
 
@@ -295,7 +300,9 @@ describe('/settings ?/revokeApiKey action', () => {
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
-			if (isRedirect(e)) expect(e.location).toBe('/login');
+			if (isRedirect(e)) {
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent('/settings'));
+			}
 		}
 		expect(revokeApiKeyForUser).not.toHaveBeenCalled();
 	});

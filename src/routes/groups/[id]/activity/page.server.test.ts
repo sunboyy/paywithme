@@ -105,6 +105,11 @@ describe('/groups/[id]/activity load', () => {
 	it('parses recognized entity + actor filters from the URL', async () => {
 		const result = (await load(makeLoadEvent('?entity=member&actor=u3'))) as LoadResult;
 
+		expect(requireGroupAccess).toHaveBeenCalledWith({
+			locals: { user: { id: 'u1', name: 'Alice' }, session: {} },
+			groupId: 'g1',
+			redirectTo: '/groups/g1/activity?entity=member&actor=u3'
+		});
 		expect(result.filters).toEqual({ entity: 'member', actor: 'u3' });
 		expect(listGroupActivity).toHaveBeenCalledWith({
 			userId: 'u1',

@@ -81,6 +81,20 @@ describe('requireUser', () => {
 });
 
 describe('requireGroupAccess', () => {
+	it('preserves the requested path while still short-circuiting before authorization', async () => {
+		const redirectTo = '/groups/g1/transactions?member=m2';
+		try {
+			await requireGroupAccess({ locals: makeLocals(null), groupId: 'g1', redirectTo });
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+			if (isRedirect(e)) {
+				expect(e.location).toBe('/login?redirectTo=' + encodeURIComponent(redirectTo));
+			}
+		}
+		expect(getGroupForUser).not.toHaveBeenCalled();
+	});
+
 	it('throws redirect to /login when anonymous and never fetches the group', async () => {
 		try {
 			await requireGroupAccess({ locals: makeLocals(null), groupId: 'g1' });
@@ -99,7 +113,11 @@ describe('requireGroupAccess', () => {
 	it('throws error(404) when getGroupForUser returns null (no access / soft-deleted)', async () => {
 		getGroupForUser.mockResolvedValueOnce(null);
 		try {
-			await requireGroupAccess({ locals: makeLocals(AUTH_USER), groupId: 'g1' });
+			await requireGroupAccess({
+				locals: makeLocals(AUTH_USER),
+				groupId: 'g1',
+				redirectTo: '/groups/g1/transactions?member=m2'
+			});
 			expect.unreachable('expected a 404');
 		} catch (e) {
 			expect(isHttpError(e)).toBe(true);

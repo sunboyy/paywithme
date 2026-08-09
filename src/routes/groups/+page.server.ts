@@ -14,15 +14,16 @@ import { listGroupsForUser } from '$lib/server/groups';
 import type { Group } from '$lib/server/groups';
 import { getUserNetBalanceByGroup } from '$lib/server/balances';
 import { requireUser } from '$lib/server/access';
+import { pathAndQuery } from '$lib/redirect';
 import { formatAmount, type CurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, url }) => {
 	// The dashboard is per-user (it lists the caller's own groups), so an
 	// anonymous request goes to login (task 3.8 centralized `requireUser`). It
 	// THROWS the redirect, so it lives OUTSIDE the try/catch below or the catch
 	// would swallow the navigation.
-	const user = requireUser(locals);
+	const user = requireUser(locals, { redirectTo: pathAndQuery(url) });
 
 	// Degrade gracefully (PLAN §12): a transient list failure renders an empty
 	// list, not a 500. A brand-new user legitimately has zero groups, so an empty

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { safeRedirectTo } from './redirect';
+import { pathAndQuery, safeRedirectTo } from './redirect';
 
 // Unit tests for the SAFE post-auth redirect sanitizer (task 3.7, PLAN §6.2/§12).
 // `redirectTo` is attacker-controlled, so the helper is the only gate between a
@@ -47,5 +47,12 @@ describe('safeRedirectTo', () => {
 	it('rejects bare/relative values not starting with /', () => {
 		expect(safeRedirectTo('groups')).toBeNull();
 		expect(safeRedirectTo('mailto:a@b.com')).toBeNull();
+	});
+});
+
+describe('pathAndQuery', () => {
+	it('preserves the requested path and query without origin or fragment', () => {
+		const url = new URL('https://paywithme.example/groups/g1/transactions?member=m2#row-3');
+		expect(pathAndQuery(url)).toBe('/groups/g1/transactions?member=m2');
 	});
 });
