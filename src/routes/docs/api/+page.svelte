@@ -239,19 +239,23 @@
 					<code class="font-mono text-xs">currency</code>. Such a code is
 					<strong class="font-medium text-foreground">meaningful only inside that group</strong>:
 					two groups may use the same one for unrelated units, and
-					<code class="font-mono text-xs">GET {data.basePath}/currencies</code> — a global table — does
-					not list it. Settlement amounts are never affected; they are always one of the listed currencies.
+					<code class="font-mono text-xs">GET {data.basePath}/currencies</code> — a global table —
+					does not list it. To see one — and to get its exponent and symbol — ask the group:
+					<code class="font-mono text-xs">GET {data.basePath}/groups/{'{gid}'}/currencies</code>
+					returns the listed currencies plus that group's own. Settlement amounts are never affected;
+					they are always one of the listed currencies.
 				</p>
 				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
-					One consequence, stated plainly: a transaction entered in a group-defined currency is
-					<strong class="font-medium text-foreground">not editable through this API in v1</strong>.
-					You can read it, and you can <code class="font-mono text-xs">DELETE</code> and restore it,
-					but
-					<code class="font-mono text-xs">PUT</code> is a full replacement and no value you can put
-					in
-					<code class="font-mono text-xs">currency</code> will validate — the API never discloses the
-					internal identifier such a currency is stored under. Edit those transactions in the paywithme
-					app.
+					The short code is the vocabulary in
+					<strong class="font-medium text-foreground">both directions</strong>: the
+					<code class="font-mono text-xs">currency</code> a transaction reports is the one you send
+					back when you write it, so a transaction entered in a group-defined currency round-trips
+					through
+					<code class="font-mono text-xs">PUT</code> unchanged. Codes are resolved against the group
+					in the path, so a code belonging to another group is refused exactly like an unknown one —
+					a
+					<code class="font-mono text-xs">422</code>. The internal identifier such a currency is
+					stored under is never disclosed, and is not accepted either.
 				</p>
 				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
 					Each group has a <strong class="font-medium text-foreground">settlement currency</strong>:

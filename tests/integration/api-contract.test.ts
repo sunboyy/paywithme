@@ -123,6 +123,12 @@ describeIntegration('integration: /api/v1 live contract vs. OpenAPI (issue #25; 
 				'Balance',
 				(await apiCall('GET', `/api/v1/groups/${gid}/balances`, { key })).body
 			);
+			// The group-scoped currency table (issue #68) — display-code keyed, so it
+			// validates against `GroupCurrency`, not the strict-ISO `Currency`.
+			expectEachValid(
+				'GroupCurrency',
+				(await apiCall('GET', `/api/v1/groups/${gid}/currencies`, { key })).body
+			);
 
 			// The one paginated envelope — validated whole (`data` + `nextCursor`).
 			const page = await apiCall('GET', `/api/v1/groups/${gid}/transactions?limit=1`, { key });

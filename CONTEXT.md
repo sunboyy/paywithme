@@ -70,7 +70,9 @@ The short code a currency is **shown by** — `THB`, or `BEER` for a Custom curr
 For a seeded currency it is the ISO code and there is nothing else; a Custom
 currency additionally carries an internal identifier that is never shown, never
 typed and never spoken about to a user. "Display code" is the only currency code
-that appears in an interface, a message, or an API response.
+that appears in an interface, a message, or an API request or response — `/api/v1`
+speaks it in both directions and resolves it against the group in the path
+(ADR-0014 decision 8).
 
 _Avoid_: currency code (ambiguous — say which one), symbol (that's `฿`, not `THB`).
 

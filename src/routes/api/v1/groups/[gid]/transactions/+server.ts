@@ -46,7 +46,11 @@ import {
 	type TransactionListFilters
 } from '$lib/server/transactions';
 import { toTransactionListItemDto, toTransactionDetailDto } from '$lib/server/api/v1';
-import { resolveEntryCurrencies, resolveEntryCurrency } from '$lib/server/entry-currency';
+import {
+	resolveEntryCurrencies,
+	resolveEntryCurrency,
+	resolveWriteCurrency
+} from '$lib/server/entry-currency';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
@@ -185,11 +189,21 @@ export const GET = withReadErrorHandling(async ({ locals, params, url }) => {
 // trusted from the payload. On success we re-read the persisted detail and return
 // the SAME `TransactionDetail` DTO the GET routes serve (§16.4), 201 Created.
 //
+// CURRENCY VOCABULARY (§16.4 / §7.5.2 "REST surface"; ADR-0014 decision 8): the body's
+// `currency` is a DISPLAY code — the one documented substitution on "the full internal
+// input verbatim". It is translated to the internal currency key HERE, against the
+// `{gid}` already in the path, BEFORE the service runs, so a code naming nothing this
+// group may record in fails as the service's ordinary entry-currency 422 (see
+// `resolveWriteCurrency`). A seeded code translates to itself, so every pre-existing
+// client body is forwarded byte-for-byte unchanged.
+//
 // IDEMPOTENCY (§16.6): when an `Idempotency-Key` header is present, the create +
 // re-read is run AT MOST ONCE per (calling key + request body) via
 // `runCreateWithIdempotency` — a same-body retry replays the stored 201 (no
 // duplicate txn / audit row), a different body → 409, a concurrent retry → 409.
-// Absent header → at-least-once (unchanged).
+// Absent header → at-least-once (unchanged). The fingerprint is taken from the RAW
+// REQUEST BYTES (`raw` below), i.e. the client's own vocabulary BEFORE translation —
+// so a replay is decided by what the client sent, never by server-side state.
 export const POST = withWriteErrorHandling(async ({ locals, params, request }) => {
 	const principal = locals.apiKey;
 	if (!principal) return unauthorized();
@@ -207,8 +221,14 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 
 	// Read the raw body ONCE (for the §16.6 fingerprint) and parse it. Unparseable →
 	// JsonBodyError → 400 (mapped by the wrapper). The parsed value is handed to the
-	// service VERBATIM as the full internal input.
-	const { raw, value: input } = await readRawJsonBody(request);
+	// service VERBATIM as the full internal input — save for the display-code →
+	// currency-key translation below (§7.5.2), which leaves `raw` untouched.
+	const { raw, value: body } = await readRawJsonBody(request);
+
+	// Display code → internal currency key, resolved against THIS group (ADR-0014
+	// decision 8). Runs before the service so `buildTransactionSchema` sees a key and
+	// an unresolvable code is the ordinary `UNSUPPORTED_CURRENCY_MESSAGE` 422.
+	const input = await resolveWriteCurrency(gid, body);
 
 	// The create (service call → 422/404 via the wrapper; settlement currency loaded
 	// server-side from the group) + the 201 DTO re-read (§16.4). Wrapped so a repeated

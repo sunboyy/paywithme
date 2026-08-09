@@ -81,6 +81,11 @@ const ROUTES: RouteEntry[] = [
 		load: () => import('../../src/routes/api/v1/groups/[gid]/balances/+server')
 	},
 	{
+		pattern: /^\/api\/v1\/groups\/([^/]+)\/currencies$/,
+		names: ['gid'],
+		load: () => import('../../src/routes/api/v1/groups/[gid]/currencies/+server')
+	},
+	{
 		pattern: /^\/api\/v1\/groups\/([^/]+)$/,
 		names: ['gid'],
 		load: () => import('../../src/routes/api/v1/groups/[gid]/+server')

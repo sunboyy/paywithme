@@ -81,6 +81,23 @@ vi.mock('$lib/server/api/idempotency', async (importOriginal) => {
 const { requireRateLimit } = vi.hoisted(() => ({ requireRateLimit: vi.fn() }));
 vi.mock('$lib/server/api/rate-limit', () => ({ requireRateLimit }));
 
+// The `currencies` table, stubbed with a thenable query chain (the same shape
+// `entry-currency.test.ts` uses). The REAL display-code translation therefore runs
+// in these tests — only the rows it reads are faked. `state.currencyRows` is this
+// group's CUSTOM rows; the seeded 29 are compiled in and need no stub.
+const { select, state } = vi.hoisted(() => {
+	const state = { currencyRows: [] as Record<string, unknown>[] };
+	const select = vi.fn(() => {
+		const chain: Record<string, unknown> = {};
+		chain.from = () => chain;
+		chain.where = () => chain;
+		chain.then = (resolve: (v: unknown) => unknown) => resolve(state.currencyRows);
+		return chain;
+	});
+	return { select, state };
+});
+vi.mock('$lib/server/db', () => ({ db: { select } }));
+
 import { GET, POST } from './+server';
 import { rateLimited } from '$lib/server/api/errors';
 import {
@@ -89,6 +106,8 @@ import {
 	TransactionCursorError,
 	TransactionValidationError
 } from '$lib/server/transactions';
+import { buildEntryCurrencySchema, UNSUPPORTED_CURRENCY_MESSAGE } from '$lib/schemas/currency';
+import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
 const principal: ApiKeyPrincipal = {
@@ -192,6 +211,7 @@ function items(n: number) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	memoryStore.rows.clear();
+	state.currencyRows = [];
 	requireRateLimit.mockResolvedValue(null);
 });
 
@@ -529,6 +549,141 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			await read((await POST(makePostEvent(validInput))) as Response);
 			await read((await POST(makePostEvent(validInput))) as Response);
 			expect(createTransaction).toHaveBeenCalledTimes(2);
+		});
+	});
+
+	// ── The write vocabulary is the DISPLAY code (issue #68; ADR-0014 decision 8) ──
+	//
+	// The service is mocked here, so "was the body accepted?" cannot be observed from
+	// its behaviour. Instead each case checks the FORWARDED `currency` against the very
+	// gate the real service builds — `buildEntryCurrencySchema` over this group's set —
+	// which is what `createTransaction` validates it with (`transactions.ts`). That
+	// makes these tests bite: with the translation removed, `BEER` would be forwarded
+	// raw and fail the gate, and `cur_beer` would be forwarded raw and PASS it.
+	describe('currency vocabulary (§7.5.2 "REST surface")', () => {
+		/** This group's own custom row: a 0-decimal `BEER`, stored under an opaque key. */
+		const BEER_ROW = {
+			code: 'cur_beer',
+			displayCode: 'BEER',
+			name: 'Bottle of beer',
+			exponent: 0,
+			symbol: '🍺'
+		};
+
+		/** The group's allowed entry-currency set, exactly as the service assembles it. */
+		function groupGate() {
+			return buildEntryCurrencySchema([...SEEDED_CURRENCY_DESCRIPTORS, BEER_ROW]);
+		}
+
+		/** The `currency` the route handed the service. */
+		function forwardedCurrency(): unknown {
+			return (createTransaction.mock.calls[0][0].input as { currency: unknown }).currency;
+		}
+
+		/** A body in BEER: 3 beers @ 250 THB, so the §7.6 settlement total is 75000. */
+		const beerInput = {
+			...validInput,
+			title: 'Three beers',
+			amountTotal: 3,
+			currency: 'BEER',
+			exchangeRate: '250',
+			amountTotalSettlement: 75000,
+			payers: [{ memberId: 'm1', amountPaid: 3 }]
+		};
+
+		beforeEach(() => {
+			createTransaction.mockResolvedValue('t_new');
+			getTransactionDetail.mockResolvedValue(createdDetail);
+		});
+
+		it('a group-defined DISPLAY code is translated to the internal key the ledger stores', async () => {
+			state.currencyRows = [BEER_ROW];
+
+			const { status } = await read((await POST(makePostEvent(beerInput))) as Response);
+			expect(status).toBe(201);
+
+			// Translated — and the gate the service builds accepts what it was handed.
+			expect(forwardedCurrency()).toBe('cur_beer');
+			expect(groupGate().safeParse(forwardedCurrency()).success).toBe(true);
+			// Nothing else about the body moved: this is the ONE documented substitution.
+			expect(createTransaction.mock.calls[0][0].input).toEqual({
+				...beerInput,
+				currency: 'cur_beer'
+			});
+		});
+
+		it('the OPAQUE key is rejected, even though it names a real row in this group', async () => {
+			// The load-bearing case. Accepting both vocabularies would quietly make the
+			// internal identifier part of the contract, which decision 8 refuses. Note the
+			// row IS present — this fails on vocabulary, not on existence.
+			state.currencyRows = [BEER_ROW];
+
+			await read((await POST(makePostEvent({ ...beerInput, currency: 'cur_beer' }))) as Response);
+
+			expect(forwardedCurrency()).not.toBe('cur_beer');
+			const gated = groupGate().safeParse(forwardedCurrency());
+			expect(gated.success).toBe(false);
+			expect(gated.error?.issues[0].message).toBe(UNSUPPORTED_CURRENCY_MESSAGE);
+		});
+
+		it("another group's display code fails identically to an unknown one", async () => {
+			// This group has no custom rows; `BEER` exists only somewhere else. Both must
+			// produce the SAME forwarded value, so nothing leaks about what exists elsewhere.
+			state.currencyRows = [];
+
+			await read((await POST(makePostEvent(beerInput))) as Response);
+			const other = forwardedCurrency();
+
+			createTransaction.mockClear();
+			await read((await POST(makePostEvent({ ...beerInput, currency: 'XXX' }))) as Response);
+			const unknown = forwardedCurrency();
+
+			expect(other).toEqual(unknown);
+			expect(groupGate().safeParse(other).success).toBe(false);
+		});
+
+		it('an unresolvable code surfaces as the ordinary 422 on `currency`, not a new error', async () => {
+			// End-to-end shape of the failure: the service rejects the substituted value
+			// through the shared schema, and the wrapper renders the usual envelope.
+			state.currencyRows = [];
+			createTransaction.mockRejectedValue(
+				new TransactionValidationError([
+					{ code: 'custom', path: ['currency'], message: UNSUPPORTED_CURRENCY_MESSAGE } as never
+				])
+			);
+
+			const { status, body } = await read((await POST(makePostEvent(beerInput))) as Response);
+			expect(status).toBe(422);
+			expect(body.error.code).toBe('validation_error');
+			expect(body.error.details.fieldErrors.currency).toEqual([UNSUPPORTED_CURRENCY_MESSAGE]);
+		});
+
+		it('a SEEDED body is forwarded byte-for-byte and reads no `currencies` rows', async () => {
+			// The regression that matters most: every client that existed before #68 keeps
+			// working unchanged, and pays nothing for the feature (`code == display_code`).
+			await read((await POST(makePostEvent(validInput))) as Response);
+
+			expect(forwardedCurrency()).toBe('THB');
+			expect(createTransaction.mock.calls[0][0].input).toEqual(validInput);
+			expect(select).not.toHaveBeenCalled();
+		});
+
+		it('replay is fingerprinted on the RAW body, so a custom-currency retry still replays', async () => {
+			// §16.6: the fingerprint is taken from the request bytes BEFORE translation, so
+			// it depends on what the client sent and not on server state. A same-body retry
+			// must therefore replay the stored 201 rather than create a second transaction.
+			state.currencyRows = [BEER_ROW];
+
+			const first = await read(
+				(await POST(makePostEvent(beerInput, { idempotencyKey: 'beer-1' }))) as Response
+			);
+			const second = await read(
+				(await POST(makePostEvent(beerInput, { idempotencyKey: 'beer-1' }))) as Response
+			);
+
+			expect(first.status).toBe(201);
+			expect(second.body).toEqual(first.body);
+			expect(createTransaction).toHaveBeenCalledTimes(1);
 		});
 	});
 });

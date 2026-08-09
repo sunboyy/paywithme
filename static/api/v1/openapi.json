@@ -4,7 +4,7 @@
 		"title": "Pay with me API",
 		"version": "1.0.0",
 		"summary": "Read and write a user's shared-expense groups, transactions and balances.",
-		"description": "A versioned REST/JSON API over Pay with me's shared-expense engine, meant for\nscripts and AI agents acting on a user's behalf.\n\n- **Auth**: `Authorization: Bearer <api-key>` on every request. Keys are minted\n  in the app under Settings → API keys. A key sees exactly the groups its owner\n  sees; there is no separate API identity.\n- **Scopes**: `read` keys may call every `GET`; write operations additionally\n  require a `write` key (otherwise `403 forbidden_scope`).\n- **JSON only**: every request and response body is `application/json`.\n- **Money**: every monetary value is a self-describing\n  `{ \"amount\": <integer minor units>, \"currency\": \"<ISO code>\" }` object. Never a\n  float, never a formatted string. Discover each currency's minor-unit exponent\n  and symbol once via `GET /currencies`.\n- **Errors**: every error is `{ \"error\": { \"code\", \"message\", \"details\"? } }`.\n- **CORS is closed** — this API is server-to-server; it is not callable from a\n  browser page.\n\nGroup, member and invite management are **not** exposed in v1: use the web app.\n",
+		"description": "A versioned REST/JSON API over Pay with me's shared-expense engine, meant for\nscripts and AI agents acting on a user's behalf.\n\n- **Auth**: `Authorization: Bearer <api-key>` on every request. Keys are minted\n  in the app under Settings → API keys. A key sees exactly the groups its owner\n  sees; there is no separate API identity.\n- **Scopes**: `read` keys may call every `GET`; write operations additionally\n  require a `write` key (otherwise `403 forbidden_scope`).\n- **JSON only**: every request and response body is `application/json`.\n- **Money**: every monetary value is a self-describing\n  `{ \"amount\": <integer minor units>, \"currency\": \"<ISO code>\" }` object. Never a\n  float, never a formatted string. Discover each currency's minor-unit exponent\n  and symbol once via `GET /currencies` — or, for a group that defined a currency\n  of its own, `GET /groups/{gid}/currencies`.\n- **Errors**: every error is `{ \"error\": { \"code\", \"message\", \"details\"? } }`.\n- **CORS is closed** — this API is server-to-server; it is not callable from a\n  browser page.\n\nGroup, member and invite management are **not** exposed in v1: use the web app.\n",
 		"contact": {
 			"name": "Pay with me",
 			"url": "/docs/api"
@@ -257,6 +257,63 @@
 											"amount": -45000,
 											"currency": "THB"
 										}
+									}
+								]
+							}
+						}
+					},
+					"401": {
+						"$ref": "#/components/responses/Unauthorized"
+					},
+					"404": {
+						"$ref": "#/components/responses/NotFound"
+					},
+					"429": {
+						"$ref": "#/components/responses/RateLimited"
+					},
+					"500": {
+						"$ref": "#/components/responses/InternalError"
+					}
+				}
+			}
+		},
+		"/groups/{gid}/currencies": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/GroupId"
+				}
+			],
+			"get": {
+				"tags": ["Groups"],
+				"operationId": "listGroupCurrencies",
+				"summary": "List the currencies this group can record in",
+				"description": "Every currency a transaction in this group may be entered in: the currencies from\n`GET /currencies`, plus any this group has defined for itself (an unlisted national\ncurrency, or a unit that was never money, like `BEER`). Each is keyed by its\n**display code** — the same code transactions report and the code you send back in\na write body.\n\nUse this to discover a group-defined currency you have not already seen on a\ntransaction, and to get its `exponent` and `symbol` — the global `GET /currencies`\nis a static table and does not list them. A group-defined code means nothing\noutside its own group. Unpaginated.\n",
+				"responses": {
+					"200": {
+						"description": "The currencies this group can record in.",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/GroupCurrency"
+									}
+								},
+								"example": [
+									{
+										"code": "THB",
+										"exponent": 2,
+										"symbol": "฿"
+									},
+									{
+										"code": "JPY",
+										"exponent": 0,
+										"symbol": "¥"
+									},
+									{
+										"code": "BEER",
+										"exponent": 0,
+										"symbol": "🍺"
 									}
 								]
 							}
@@ -862,7 +919,7 @@
 				"minLength": 1,
 				"maxLength": 8,
 				"pattern": "^\\S+$",
-				"description": "The code an amount is **shown by**.\n\nAn ISO-4217 code from `GET /currencies` in almost every case — and ALWAYS for a\nsettlement amount, since a group settles only in a listed currency. A group may\nadditionally define its own **entry** currency (an unlisted national one, or a\nunit that was never money, like `BEER`), and a transaction entered in one carries\nthe short code that group chose.\n\nA group-defined code is meaningful **only inside its own group**: two groups may\neach define the same code for unrelated units, and `GET /currencies` — a global\ntable — does not list them, so their `exponent` and `symbol` cannot be resolved\nfrom it. Never treat such a code as ISO-4217 and never carry it between groups.\n",
+				"description": "The code an amount is **shown by**.\n\nAn ISO-4217 code from `GET /currencies` in almost every case — and ALWAYS for a\nsettlement amount, since a group settles only in a listed currency. A group may\nadditionally define its own **entry** currency (an unlisted national one, or a\nunit that was never money, like `BEER`), and a transaction entered in one carries\nthe short code that group chose.\n\nThis is the vocabulary in **both** directions: the code a transaction reports is\nthe code you send back when you write one.\n\nA group-defined code is meaningful **only inside its own group**: two groups may\neach define the same code for unrelated units, and `GET /currencies` — a global\ntable — does not list them. Resolve their `exponent` and `symbol` from\n`GET /groups/{gid}/currencies` instead. Never treat such a code as ISO-4217 and\nnever carry it between groups.\n",
 				"examples": ["THB", "JPY", "BEER"]
 			},
 			"Money": {
@@ -903,6 +960,26 @@
 					"symbol": {
 						"type": "string",
 						"description": "The display symbol, e.g. `฿`."
+					}
+				}
+			},
+			"GroupCurrency": {
+				"type": "object",
+				"description": "One currency a specific group can record a transaction in, and how to format it.\nThe same triple as `Currency`, with one difference: `code` is a **display code**,\nso it is an ISO-4217 code for a listed currency and the group's own short code\n(`BEER`) for one that group defined. Only the group-scoped\n`GET /groups/{gid}/currencies` serves these; the global `GET /currencies` stays\nstrictly ISO-4217.\n",
+				"required": ["code", "exponent", "symbol"],
+				"additionalProperties": false,
+				"properties": {
+					"code": {
+						"$ref": "#/components/schemas/DisplayCurrencyCode"
+					},
+					"exponent": {
+						"type": "integer",
+						"minimum": 0,
+						"description": "Minor units per major unit, as a power of ten. `2` for `THB`, `0` for `BEER`."
+					},
+					"symbol": {
+						"type": "string",
+						"description": "The display symbol, e.g. `฿` — chosen by a member for a group-defined currency."
 					}
 				}
 			},
@@ -1458,10 +1535,10 @@
 					"currency": {
 						"allOf": [
 							{
-								"$ref": "#/components/schemas/CurrencyCode"
+								"$ref": "#/components/schemas/DisplayCurrencyCode"
 							}
 						],
-						"description": "The **entry** currency — what was actually spent. May differ from the group's\nsettlement currency, but must be one of the ISO-4217 codes from `GET /currencies`.\n\nA currency a group defined for itself cannot be named here, because this API never\ndiscloses the internal identifier such a currency is stored under (see\n`DisplayCurrencyCode`). Since this body is a FULL replacement, a transaction entered\nin one is therefore **not editable through this API in v1** — read it, delete it and\nrestore it here; edit it in the app.\n"
+						"description": "The **entry** currency — what was actually spent, named by its **display code**:\nthe same code a transaction reports on the way out. May differ from the group's\nsettlement currency.\n\nOne of the ISO-4217 codes from `GET /currencies`, or a code this group defined for\nitself (see `GET /groups/{gid}/currencies`). It is resolved against the group in\nthe path, so a code belonging to another group is rejected exactly like an unknown\none — a `422 validation_error` naming `currency`. A transaction entered in a\ngroup-defined currency therefore round-trips: `PUT` back the `currency` a `GET`\nserved you.\n"
 					},
 					"exchangeRate": {
 						"type": "string",
