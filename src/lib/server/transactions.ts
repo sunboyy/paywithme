@@ -186,6 +186,7 @@ export async function createTransaction({
 	groupId,
 	input,
 	settlementCurrency,
+	expectedDisplayCode,
 	via,
 	now = () => new Date()
 }: {
@@ -199,6 +200,16 @@ export async function createTransaction({
 	 * tests can omit it; production callers always pass it.
 	 */
 	settlementCurrency?: SeededCurrencyCode;
+	/**
+	 * The DISPLAY code the caller named, re-verified inside this write's transaction
+	 * (issue #69 finding 3). Passed ONLY by `/api/v1`, which speaks display codes and
+	 * translates them to the internal key at the route boundary, outside this
+	 * transaction; a rename that commits in that gap makes the write name a currency
+	 * the client never asked for. OPTIONAL because the web UI and the Connector
+	 * submit the internal key and have nothing to assert. A mismatch fails as the
+	 * ordinary entry-currency 422 — see {@link gateByExpectedDisplayCode}.
+	 */
+	expectedDisplayCode?: string;
 	/**
 	 * API-key provenance (PLAN §16.2) — passed ONLY by the `/api/v1` handlers. The
 	 * audit row then gains the "(via API key '<name>')" summary suffix +
@@ -222,9 +233,13 @@ export async function createTransaction({
 		// member allow-list rejects payers/beneficiaries outside the group.
 		const memberIds = await activeMemberIds(groupId, tx);
 		// The ENTRY-currency allow-list is group context too (PLAN §7.5.2): the seeded
-		// 29 plus THIS group's custom rows, resolved on the same handle so it is part
-		// of the same unit of work as the write it gates.
-		const entryCurrencies = await resolveEntryCurrencies(groupId, input, tx);
+		// 29 plus THIS group's custom rows, resolved on the same handle (and under the
+		// `FOR SHARE` that freezes them) so it is part of the same unit of work as the
+		// write it gates, then narrowed to the display code the caller asserted.
+		const entryCurrencies = gateByExpectedDisplayCode(
+			await resolveEntryCurrencies(groupId, input, tx),
+			expectedDisplayCode
+		);
 		const schema = buildTransactionSchema({
 			settlementCurrency: currency,
 			memberIds,
@@ -596,6 +611,38 @@ async function deleteTransactionChildren(exec: DbExecutor, transactionId: string
  *
  * Runs on the caller's executor, so the allow-list is read in the same transaction
  * as the write it gates.
+ *
+ * ── Why the custom read takes `FOR SHARE` (issue #69 finding 1) ──────────────
+ * The exponent this returns is what every amount below is computed with, and the
+ * `transactions` row that pins it down is inserted MUCH later in the same
+ * transaction. `updateCustomCurrency`'s freeze (ADR-0014 decision 5) is built on
+ * its `FOR UPDATE` conflicting with the FK's `FOR KEY SHARE` at OUR insert — but
+ * an UNLOCKED read leaves a window before that insert in which the editor takes an
+ * UNCONTENDED `FOR UPDATE`, sees no referencing transaction, and commits a new
+ * exponent. We would then store amounts entered at exponent 2 under exponent 0 —
+ * precisely the outcome the freeze exists to prevent.
+ *
+ * `FOR SHARE` closes it: it is taken HERE, at the read, and held to the end of the
+ * enclosing `db.transaction`, so the editor's `FOR UPDATE` must wait for us and
+ * then sees our row. The STRENGTH is deliberate — `FOR SHARE` is the WEAKEST lock
+ * that conflicts with `FOR UPDATE`. It stays compatible with the `FOR KEY SHARE`
+ * our own insert takes through the FK, and with every other reader of the row, so
+ * nothing is excluded except the edit this has to exclude.
+ *
+ * This locks EVERY custom row the group has, not just the submitted one, because
+ * that is the set the allow-list is read from. The cost is that an edit of one of a
+ * group's currencies briefly waits behind a create in another — bounded by one short
+ * write transaction, and already implied within a group by the ADR-0013 rounding
+ * counter, which serialises every create in a group anyway.
+ *
+ * The `ORDER BY code` makes the multi-row lock acquisition deterministic. Two
+ * readers never conflict (share/share), so it cannot matter today; it is here so a
+ * future caller that upgrades the strength inherits a stable order rather than a
+ * lock-ordering deadlock.
+ *
+ * The seeded fast path above is untouched: it returns before the query, so it
+ * takes NO lock and issues NO statement — a group that never defined a custom
+ * currency behaves exactly as it did before this feature.
  */
 async function resolveEntryCurrencies(
 	groupId: string,
@@ -620,9 +667,41 @@ async function resolveEntryCurrencies(
 			symbol: currencies.symbol
 		})
 		.from(currencies)
-		.where(eq(currencies.groupId, groupId));
+		.where(eq(currencies.groupId, groupId))
+		.orderBy(currencies.code)
+		.for('share');
 
 	return [...SEEDED_CURRENCY_DESCRIPTORS, ...rows];
+}
+
+/**
+ * Narrow the entry-currency allow-list to the currency the CALLER SAID it was
+ * naming (issue #69 finding 3; ADR-0014 decision 8 + amendment).
+ *
+ * `/api/v1` speaks DISPLAY codes, so its routes translate `BEER` → the opaque key
+ * before calling the service — and that translation happens OUTSIDE this write's
+ * transaction. `display_code` only freezes once a transaction references the row,
+ * which is exactly not the case for the currency being referenced for the first
+ * time, so a rename can commit in the gap and the write would be recorded under a
+ * display code the client never named.
+ *
+ * Re-verifying INSIDE the transaction closes that: the allow-list was read under
+ * the `FOR SHARE` taken above, so the display code it carries can no longer move,
+ * and dropping every descriptor that does not match the caller's assertion makes a
+ * renamed currency simply ABSENT from the set. The schema then rejects it as the
+ * ordinary `UNSUPPORTED_CURRENCY_MESSAGE` on `currency` — byte-identical to an
+ * unknown code, another group's code, or an opaque key, so nothing leaks about what
+ * exists elsewhere (PLAN §7.5.2 "REST surface").
+ *
+ * `expected === undefined` is the WEB and CONNECTOR path: they submit the internal
+ * key and have no display code to assert, so the set is returned untouched.
+ */
+function gateByExpectedDisplayCode(
+	allowed: readonly CurrencyDescriptor[],
+	expected: string | undefined
+): readonly CurrencyDescriptor[] {
+	if (expected === undefined) return allowed;
+	return allowed.filter((c) => c.displayCode === expected);
 }
 
 /**
@@ -1470,6 +1549,7 @@ export async function updateTransaction({
 	input,
 	actorUserId,
 	settlementCurrency,
+	expectedDisplayCode,
 	via,
 	now = () => new Date()
 }: {
@@ -1482,6 +1562,8 @@ export async function updateTransaction({
 	actorUserId?: string;
 	/** Group settlement currency (trusted group context, NEVER the payload). */
 	settlementCurrency?: SeededCurrencyCode;
+	/** `/api/v1`'s display-code assertion — see {@link createTransaction}. */
+	expectedDisplayCode?: string;
 	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
 	via?: AuditVia;
 	/** Injectable clock (tests). */
@@ -1501,8 +1583,12 @@ export async function updateTransaction({
 		const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, tx));
 
 		const memberIds = await activeMemberIds(groupId, tx);
-		// Group-scoped entry-currency allow-list — see `createTransaction`.
-		const entryCurrencies = await resolveEntryCurrencies(groupId, input, tx);
+		// Group-scoped entry-currency allow-list, locked + display-code gated — see
+		// `createTransaction`.
+		const entryCurrencies = gateByExpectedDisplayCode(
+			await resolveEntryCurrencies(groupId, input, tx),
+			expectedDisplayCode
+		);
 		const schema = buildTransactionSchema({
 			settlementCurrency: currency,
 			memberIds,

@@ -232,17 +232,32 @@ describe('resolveWriteCurrency — the write body', () => {
 
 	it('substitutes the internal key and leaves every other field untouched', async () => {
 		state.rows = [BEER];
-		const translated = (await resolveWriteCurrency('grp_1', body)) as Record<string, unknown>;
+		const { input } = await resolveWriteCurrency('grp_1', body);
 
-		expect(translated).toEqual({ ...body, currency: 'cur_beer' });
+		expect(input).toEqual({ ...body, currency: 'cur_beer' });
 		// The input is not mutated — the raw body a caller may still fingerprint (§16.6)
 		// keeps saying what the client said.
 		expect(body.currency).toBe('BEER');
 	});
 
+	it('carries the SUBMITTED display code back for the service to re-verify', async () => {
+		// Issue #69 finding 3: this lookup is not atomic with the write, and a display
+		// code is only frozen once a transaction references its row — so the service has
+		// to re-check the assertion under the lock it takes. That is only possible if the
+		// code the client actually named travels with the translated body.
+		state.rows = [BEER];
+		const { expectedDisplayCode } = await resolveWriteCurrency('grp_1', body);
+		expect(expectedDisplayCode).toBe('BEER');
+	});
+
 	it('forwards a seeded-currency body AS THE SAME OBJECT (no copy, no change)', async () => {
 		const seeded = { ...body, currency: 'THB' };
-		expect(await resolveWriteCurrency('grp_1', seeded)).toBe(seeded);
+		const { input, expectedDisplayCode } = await resolveWriteCurrency('grp_1', seeded);
+		expect(input).toBe(seeded);
+		// The assertion travels for a seeded code too — it can never fail (a seeded row's
+		// `display_code` IS its `code` and is not editable), so the write path has one
+		// rule instead of one with an exception.
+		expect(expectedDisplayCode).toBe('THB');
 		expect(select).not.toHaveBeenCalled();
 	});
 
@@ -250,22 +265,24 @@ describe('resolveWriteCurrency — the write body', () => {
 		// It must not pass the original through: the service builds its gate from the
 		// group's rows keyed by `code`, so an opaque key left intact would VALIDATE.
 		state.rows = [BEER];
-		const translated = (await resolveWriteCurrency('grp_1', {
+		const { input, expectedDisplayCode } = await resolveWriteCurrency('grp_1', {
 			...body,
 			currency: 'cur_beer'
-		})) as Record<string, unknown>;
-		expect(translated.currency).toBe('');
+		});
+		expect((input as Record<string, unknown>).currency).toBe('');
+		expect(expectedDisplayCode).toBe('cur_beer');
 	});
 
 	it('passes through a body with no string `currency` for the schema to reject', async () => {
 		// Nothing to translate, and the shared schema already answers these with the same
 		// message — inventing a second rejection path here would only add a way to differ.
+		// With nothing translated there is also nothing to assert, so no display code.
 		const missing = { type: 'spending' };
-		expect(await resolveWriteCurrency('grp_1', missing)).toBe(missing);
+		expect(await resolveWriteCurrency('grp_1', missing)).toEqual({ input: missing });
 		const wrongType = { currency: 42 };
-		expect(await resolveWriteCurrency('grp_1', wrongType)).toBe(wrongType);
-		expect(await resolveWriteCurrency('grp_1', null)).toBeNull();
-		expect(await resolveWriteCurrency('grp_1', 'nonsense')).toBe('nonsense');
+		expect(await resolveWriteCurrency('grp_1', wrongType)).toEqual({ input: wrongType });
+		expect(await resolveWriteCurrency('grp_1', null)).toEqual({ input: null });
+		expect(await resolveWriteCurrency('grp_1', 'nonsense')).toEqual({ input: 'nonsense' });
 		expect(select).not.toHaveBeenCalled();
 	});
 });

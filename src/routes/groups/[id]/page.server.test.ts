@@ -23,6 +23,23 @@ vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/transactions', () => ({ listTransactions }));
 vi.mock('$lib/server/activity', () => ({ listGroupActivity }));
 
+// `$lib/server/entry-currency` is deliberately NOT mocked — its SEEDED FAST PATH is
+// half of what these tests assert (an all-seeded page must issue no query at all),
+// and a stub would assert nothing about it. Only the rows it would read are faked:
+// `state.currencyRows` stands in for this group's CUSTOM `currencies` rows.
+const { select, state } = vi.hoisted(() => {
+	const state = { currencyRows: [] as Record<string, unknown>[] };
+	const select = vi.fn(() => {
+		const chain: Record<string, unknown> = {};
+		chain.from = () => chain;
+		chain.where = () => chain;
+		chain.then = (resolve: (v: unknown) => unknown) => resolve(state.currencyRows);
+		return chain;
+	});
+	return { select, state };
+});
+vi.mock('$lib/server/db', () => ({ db: { select } }));
+
 import { load } from './+page.server';
 import { GroupAccessError } from '$lib/server/groups';
 
@@ -86,6 +103,12 @@ type LoadResult = {
 	summary: Summary;
 	balances: BalanceRow[];
 	recentTransactions: typeof TRANSACTIONS;
+	recentCurrencies: {
+		code: string;
+		displayCode: string;
+		symbol: string;
+		exponent: number;
+	}[];
 	recentActivity: typeof ACTIVITY;
 };
 
@@ -112,6 +135,9 @@ beforeEach(() => {
 	listMembers.mockResolvedValue(MEMBERS);
 	listTransactions.mockResolvedValue(TRANSACTIONS);
 	listGroupActivity.mockResolvedValue(ACTIVITY);
+
+	select.mockClear();
+	state.currencyRows = [];
 });
 
 describe('/groups/[id] overview load', () => {
@@ -175,6 +201,82 @@ describe('/groups/[id] overview load', () => {
 		const result = (await load(makeLoadEvent())) as LoadResult;
 		const unknown = result.balances.find((b) => b.memberId === 'mX');
 		expect(unknown?.displayName).toBe('mX');
+	});
+});
+
+// ── Entry currencies for the recent rows (issue #69 finding 2; PLAN §7.5.2) ───
+// The card shows each row's ORIGINAL amount, and a custom entry currency exists
+// only as a `currencies` row — `formatAmount` throws on the bare `cur_…` code by
+// design. Without descriptors reaching the page the whole overview 500s on
+// ordinary use of the feature, so the loader owes the page one descriptor per
+// distinct code.
+describe('/groups/[id] overview — recent-row entry currencies', () => {
+	/** This group's own custom currency: opaque PK, member-typed display code, 0-dp. */
+	const BEER_ROW = {
+		code: 'cur_beer',
+		displayCode: 'BEER',
+		name: 'Bottle of beer',
+		exponent: 0,
+		symbol: '🍺',
+		createdBy: 'u1'
+	};
+
+	/** 3 BEER @ ฿250 = ฿750.00 — always foreign (ADR-0014 decision 6). */
+	const BEER_TXN = {
+		...TRANSACTIONS[0],
+		id: 't-beer',
+		title: 'Round of beers',
+		amountTotal: 3,
+		currency: 'cur_beer',
+		amountTotalSettlement: 75_000,
+		isForeign: true
+	};
+
+	it('resolves a descriptor for a CUSTOM-currency recent row', async () => {
+		state.currencyRows = [BEER_ROW];
+		listTransactions.mockResolvedValue([BEER_TXN]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		// Everything `formatAmount` needs: the exponent that scales the amount and the
+		// display code that is the only code a user may ever read.
+		expect(result.recentCurrencies).toEqual([
+			{ code: 'cur_beer', displayCode: 'BEER', symbol: '🍺', exponent: 0 }
+		]);
+	});
+
+	it('resolves DISTINCT codes only once, whatever the row count', async () => {
+		state.currencyRows = [BEER_ROW];
+		listTransactions.mockResolvedValue([
+			BEER_TXN,
+			{ ...BEER_TXN, id: 't-beer-2' },
+			TRANSACTIONS[0]
+		]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.recentCurrencies.map((c) => c.code).sort()).toEqual(['THB', 'cur_beer']);
+		// One query for the whole card, not one per row.
+		expect(select).toHaveBeenCalledTimes(1);
+	});
+
+	it('an ALL-SEEDED card issues NO currencies query (regression)', async () => {
+		// The seeded fast path is why this uses `resolveEntryCurrencies` rather than
+		// `listCurrenciesForGroup`: every group that never opened the custom-currency UI
+		// must pay nothing for this fix.
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(select).not.toHaveBeenCalled();
+		expect(result.recentCurrencies).toEqual([
+			{ code: 'THB', displayCode: 'THB', symbol: '฿', exponent: 2 }
+		]);
+	});
+
+	it('an EMPTY card issues no query and returns no descriptors', async () => {
+		listTransactions.mockResolvedValue([]);
+		const result = (await load(makeLoadEvent())) as LoadResult;
+		expect(select).not.toHaveBeenCalled();
+		expect(result.recentCurrencies).toEqual([]);
 	});
 });
 

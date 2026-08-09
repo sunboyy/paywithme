@@ -206,6 +206,9 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 			groupId: 'g1',
 			txnId: 't1',
 			input: validInput,
+			// The display code the client named, re-verified inside the write's own
+			// transaction (issue #69 finding 3). For a seeded code it is the identity.
+			expectedDisplayCode: 'THB',
 			actorUserId: 'user_1',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
 			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
@@ -319,6 +322,16 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 			});
 			// 4. And the response still speaks display code.
 			expect(put.body.amount).toEqual({ amount: 3, currency: 'BEER' });
+		});
+
+		it('carries the SUBMITTED display code to the service for re-verification', async () => {
+			// Issue #69 finding 3, on the PUT path. The translation runs outside the
+			// write's transaction, so the assertion has to travel with the body and be
+			// re-checked under the lock the service takes.
+			await read(
+				(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'BEER' }))) as Response
+			);
+			expect(updateTransaction.mock.calls[0][0].expectedDisplayCode).toBe('BEER');
 		});
 
 		it('the OPAQUE key is REJECTED on the way in, even though it is the stored value', async () => {
