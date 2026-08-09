@@ -17,6 +17,7 @@ import {
 	softDeleteTransaction
 } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
+import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withReadErrorHandling } from '$lib/server/api/read';
 import { withWriteErrorHandling, parseJsonBody } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
@@ -41,7 +42,10 @@ export const GET = withReadErrorHandling(async ({ locals, params }) => {
 		groupId: gid,
 		txnId: txid
 	});
-	return json(toTransactionDetailDto(detail));
+	// Resolve the ENTRY currency so a transaction recorded in a currency the group
+	// defined itself is served by its `display_code`, never by the opaque row key the
+	// column stores (PLAN §7.5.2; ADR-0014 decision 7). Costs no query for the seeded 29.
+	return json(toTransactionDetailDto(detail, await resolveEntryCurrency(gid, detail.currency)));
 });
 
 // PUT /api/v1/groups/{gid}/transactions/{txid} — FULL REPLACE of a transaction
@@ -86,7 +90,10 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 		groupId: gid,
 		txnId: txid
 	});
-	return json(toTransactionDetailDto(detail));
+	// Resolve the ENTRY currency so a transaction recorded in a currency the group
+	// defined itself is served by its `display_code`, never by the opaque row key the
+	// column stores (PLAN §7.5.2; ADR-0014 decision 7). Costs no query for the seeded 29.
+	return json(toTransactionDetailDto(detail, await resolveEntryCurrency(gid, detail.currency)));
 });
 
 // DELETE /api/v1/groups/{gid}/transactions/{txid} — SOFT delete (PLAN §16.4, §9).
@@ -123,5 +130,8 @@ export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
 		groupId: gid,
 		txnId: txid
 	});
-	return json(toTransactionDetailDto(detail));
+	// Resolve the ENTRY currency so a transaction recorded in a currency the group
+	// defined itself is served by its `display_code`, never by the opaque row key the
+	// column stores (PLAN §7.5.2; ADR-0014 decision 7). Costs no query for the seeded 29.
+	return json(toTransactionDetailDto(detail, await resolveEntryCurrency(gid, detail.currency)));
 });

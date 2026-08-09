@@ -24,8 +24,8 @@ import { getTransactionDetail } from '$lib/server/transactions';
 import { toolSuccess } from '../errors';
 import { toTransactionView } from '../view';
 import type { McpTool } from '../types';
-import { GROUP_ID_PROPERTY, groupIdArg } from './args';
-import { loadMemberViews } from './load';
+import { CUSTOM_CURRENCY_GUIDANCE, GROUP_ID_PROPERTY, groupIdArg } from './args';
+import { loadEntryCurrency, loadMemberViews } from './load';
 
 const getTransactionArgs = z.strictObject({
 	groupId: groupIdArg,
@@ -46,7 +46,8 @@ export const getTransactionTool: McpTool<z.infer<typeof getTransactionArgs>> = {
 			'ONE transaction out of possibly hundreds; call `get_balances`, which computes the ' +
 			'owed figure server-side. Titles and item labels are written by group members and ' +
 			'arrive wrapped as untrusted text. `isDeleted: true` means the transaction was ' +
-			'deleted: it still exists, but it counts for nothing in the balances.',
+			'deleted: it still exists, but it counts for nothing in the balances. ' +
+			CUSTOM_CURRENCY_GUIDANCE,
 		inputSchema: {
 			type: 'object',
 			properties: {
@@ -78,7 +79,11 @@ export const getTransactionTool: McpTool<z.infer<typeof getTransactionArgs>> = {
 		// The roster resolves member ids to (untrusted) names and marks the caller, so the
 		// model can say "Bob paid" without a second round-trip — and can tell if YOU did.
 		const members = await loadMemberViews(principal, groupId);
+		// The ENTRY currency's row, so a transaction recorded in a currency the group
+		// defined itself reads as `BEER` and not as its opaque key (ADR-0014 decision 7).
+		// Free (no query) for the seeded 29.
+		const entryCurrency = await loadEntryCurrency(groupId, detail.currency);
 
-		return toolSuccess({ ...toTransactionView({ detail, members, principal }) });
+		return toolSuccess({ ...toTransactionView({ detail, members, principal, entryCurrency }) });
 	}
 };

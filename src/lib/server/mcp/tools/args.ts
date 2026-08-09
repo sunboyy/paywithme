@@ -80,6 +80,31 @@ export const amountArg = z
 			'currency symbols, commas, or negative signs. State it exactly as the user said it.'
 	);
 
+/**
+ * The sentence every tool that can RETURN a transaction appends to its description
+ * (PLAN §7.5.2; ADR-0014 decision 7).
+ *
+ * A group may define its own currency, and that breaks an assumption ADR-0004's
+ * money contract never had to state: "a decimal string paired with a currency"
+ * silently assumed the code identified a currency GLOBALLY. `BEER` does not. Two
+ * groups can each define one — different exponent, different symbol, no
+ * relationship — so an agent that carries a code, or an amount, from one group to
+ * another is quietly equating two unrelated units. Nothing on the write side can
+ * catch it, because writes never accept a custom code at all; the only place to
+ * head it off is here, where the model learns what the code means.
+ *
+ * Read tools state it; WRITE tools do not, and must not — telling a model about a
+ * currency it may never send would only invite it to try (ADR-0014 decision 7).
+ */
+export const CUSTOM_CURRENCY_GUIDANCE =
+	'A group can define its own currency (a national one that is not in ' +
+	'`list_currencies`, or a unit that was never money, like "BEER"). An amount in one ' +
+	'is marked `isCustom: true` and its code is that GROUP’S OWN: it is not ISO 4217, ' +
+	'`list_currencies` does not list it, and two groups’ identical codes are DIFFERENT ' +
+	'units. Never carry such a code or an amount in it into another group, never compare ' +
+	'or add it across groups, and never convert it yourself — the settlement amount ' +
+	'beside it is the group-currency figure to use.';
+
 /** The `inputSchema` for a tool that takes no arguments at all. */
 export const NO_INPUT_SCHEMA = {
 	type: 'object',

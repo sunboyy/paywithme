@@ -35,6 +35,7 @@ vi.mock('./tools/load', () => ({ loadGroupView, loadMemberViews }));
 
 // Imported AFTER the mocks are registered.
 import { MCP_TOOLS, dispatchToolCall, filterToolsByScope, findTool, registerTool } from './tools';
+import { NO_INPUT_SCHEMA } from './tools/args';
 import type { McpToolResult, RegisteredTool } from './types';
 
 /** A principal holding a key of the given scope. */
@@ -425,6 +426,39 @@ describe('the shipped registry (#28 + #29)', () => {
 
 	it('`get_transaction` points any owed question BACK at `get_balances` (ADR-0008)', () => {
 		expect(findTool('get_transaction')?.definition.description).toMatch(/get_balances/);
+	});
+
+	// ── The group-scoping decision (issue #64; PLAN §7.5.2; ADR-0014 decision 7) ──
+	// A custom currency breaks an assumption the MCP money contract never had to
+	// state: that a code identifies a currency GLOBALLY. Two groups can each define
+	// `BEER`. Nothing on the write side can catch a model that carries one between
+	// groups — writes never accept a custom code at all — so the only place to head
+	// it off is the description of the tools that RETURN one.
+	it.each(['get_transaction', 'list_transactions'])(
+		'`%s` says a custom currency code is GROUP-SCOPED and must not travel',
+		(name) => {
+			const description = findTool(name)?.definition.description ?? '';
+			expect(description).toMatch(/define its own currency/i);
+			expect(description).toMatch(/two groups[’'] identical codes are DIFFERENT units/i);
+			expect(description).toMatch(/never carry such a code .* into another group/i);
+		}
+	);
+
+	it('the WRITE tools stay silent about custom currencies — they can never accept one', () => {
+		// ADR-0014 decision 7: assistant writes are settlement-currency-only. Describing
+		// a currency the model may not send would only invite it to try.
+		for (const name of ['create_transaction', 'update_transaction', 'settle_up']) {
+			expect(findTool(name)?.definition.description, name).not.toMatch(/define its own currency/i);
+		}
+	});
+
+	it('`list_currencies` is UNCHANGED: the global seeded table, no group argument', () => {
+		// A regression guard, not a new feature. `list_currencies` deliberately did NOT
+		// become group-aware (ADR-0014 decision 7) — it stays the global reference table,
+		// so it keeps taking no arguments at all.
+		const tool = findTool('list_currencies');
+		expect(tool?.definition.inputSchema).toEqual(NO_INPUT_SCHEMA);
+		expect(tool?.definition.description).not.toMatch(/define its own currency/i);
 	});
 });
 

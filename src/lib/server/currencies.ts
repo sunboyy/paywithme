@@ -5,7 +5,9 @@
 // This is the SERVER-SIDE SERVICE LAYER only — NOT routes/pages. The create/edit
 // UI is #62, wiring the group's allowed entry-currency set into the transaction
 // form is #63, and mapping `display_code` onto the API / agent read surfaces is
-// #64. Mirrors `groups.ts` / `members.ts`: an acting `userId` on every operation,
+// #64 (`lib/server/entry-currency.ts`, which resolves a transaction's stored code
+// for those surfaces without going through this module's access-checked list).
+// Mirrors `groups.ts` / `members.ts`: an acting `userId` on every operation,
 // `db.transaction(...)` around every mutation, `writeAuditLog(tx, …)` through the
 // SAME handle.
 //

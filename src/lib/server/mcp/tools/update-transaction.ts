@@ -70,7 +70,7 @@ import {
 } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadGroupView, loadMemberViews } from './load';
+import { loadEntryCurrencyLookup, loadGroupView, loadMemberViews } from './load';
 import {
 	AMOUNT_BENEFICIARIES_PROPERTY,
 	CHARGE_PROPERTY,
@@ -327,7 +327,21 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// group (§16.5). It is also the source of every default below, and of the echo's
 		// "it WAS" half — read BEFORE the update, because after it the old values are gone.
 		const before = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const beforeView = toTransactionView({ detail: before, members, principal });
+		// The BEFORE state may be denominated in a currency the group defined itself — a
+		// web-app entry this tool cannot produce but must still describe honestly, by its
+		// `display_code` and never by the opaque row key (ADR-0014 decision 7). The AFTER
+		// state is always the settlement currency (the guard above), so one lookup covers
+		// both and costs no query unless the before-state really is custom.
+		const entryCurrencies = await loadEntryCurrencyLookup(groupId, [
+			before.currency,
+			settlementCurrency
+		]);
+		const beforeView = toTransactionView({
+			detail: before,
+			members,
+			principal,
+			entryCurrency: entryCurrencies(before.currency)
+		});
 
 		// A soft-deleted txn cannot be edited (the service throws `TransactionDeletedError`
 		// → `validation_error`, mapped in `../errors`). Caught here first only to say which
@@ -344,11 +358,17 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// These arguments can express exactly one shape: a single-payer, equal-split,
 		// settlement-currency transaction. Anything else would be FLATTENED — silently, and
 		// with no restore to undo it. Refuse, and say where the edit can actually be made.
+		// The currency named here is the DISPLAY code off the resolved row above, never
+		// `before.currency` (the raw column, which is an opaque `cur_…` for a
+		// group-defined currency). This branch is exactly where a custom currency lands:
+		// one is ALWAYS foreign (ADR-0014 decision 6), so every attempt to correct such a
+		// transaction reaches this sentence, and the opaque key must not be in it.
 		const unsupported =
 			before.payers.length !== 1
 				? 'it has more than one payer'
 				: before.isForeign
-					? `it was entered in ${before.currency}, not the group's settlement currency`
+					? `it was entered in ${entryCurrencies(before.currency).displayCode}, not the ` +
+						"group's settlement currency"
 					: null;
 		if (unsupported !== null) {
 			return toolError(
@@ -401,7 +421,12 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// job is to state what the ledger now HOLDS (a re-resolved split lands here, not in
 		// our `input`), and the diff is computed between two views of real rows.
 		const after = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const afterView = toTransactionView({ detail: after, members, principal });
+		const afterView = toTransactionView({
+			detail: after,
+			members,
+			principal,
+			entryCurrency: entryCurrencies(after.currency)
+		});
 		const changed = changedFields({ before: beforeView, after: afterView });
 
 		return toolSuccess({

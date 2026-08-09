@@ -11,6 +11,7 @@
 // `isForeign` is kept (it's genuine resource data — whether the two currencies
 // differ), as are the category fields; nothing here is UI-only.
 
+import type { CurrencyDescriptor } from '$lib/money';
 import type { TransactionListItem } from '$lib/server/transactions';
 import { money, type Money } from './money';
 
@@ -36,8 +37,18 @@ export interface TransactionListItemDto {
  * Map an internal {@link TransactionListItem} to its wire
  * {@link TransactionListItemDto}. PURE: object → object, no DB/IO. Nests both
  * amounts as self-describing money (entry vs settlement currency).
+ *
+ * `entryCurrency` is the RESOLVED `currencies` row for `item.currency`, so a row
+ * recorded in a currency the group defined itself is labelled with its
+ * `displayCode` and never with the opaque row key (ADR-0014 decision 7). The route
+ * resolves the WHOLE PAGE's currencies in one pass — see
+ * `lib/server/entry-currency.ts` — so this stays one query per request, not one per
+ * row. Omit it only for a provably seeded currency, where the two codes are equal.
  */
-export function toTransactionListItemDto(item: TransactionListItem): TransactionListItemDto {
+export function toTransactionListItemDto(
+	item: TransactionListItem,
+	entryCurrency?: CurrencyDescriptor
+): TransactionListItemDto {
 	return {
 		id: item.id,
 		type: item.type,
@@ -45,7 +56,7 @@ export function toTransactionListItemDto(item: TransactionListItem): Transaction
 		categoryId: item.categoryId,
 		categoryName: item.categoryName,
 		categoryIcon: item.categoryIcon,
-		amount: money(item.amountTotal, item.currency),
+		amount: money(item.amountTotal, entryCurrency?.displayCode ?? item.currency),
 		settlementAmount: money(item.amountTotalSettlement, item.settlementCurrency),
 		isForeign: item.isForeign,
 		createdAt: item.createdAt

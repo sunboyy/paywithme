@@ -441,6 +441,18 @@ describe('update_transaction — the transaction it writes', () => {
 		expect(updateTransaction).not.toHaveBeenCalled();
 	});
 
+	it('a CUSTOM currency code is refused by the same guard (ADR-0014 decision 7)', async () => {
+		// Regression for issue #64: the READ surfaces learned to resolve `display_code`,
+		// and the write path must NOT have learned anything. A group-defined code — the
+		// display code a model could copy out of `get_transaction` — is still just "not
+		// the settlement currency", and gets the existing, self-correctable error.
+		const envelope = await runExpectingError({ ...CORRECT_THE_AMOUNT, currency: 'BEER' });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.message).toContain('THB');
+		expect(updateTransaction).not.toHaveBeenCalled();
+	});
+
 	it('a group the caller cannot see THROWS the conflated not_found — no existence oracle', async () => {
 		getGroupForUser.mockResolvedValue(null);
 

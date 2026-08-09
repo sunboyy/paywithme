@@ -52,10 +52,12 @@ export {
 	type EditableItemView,
 	type EditableChargeView,
 	type EditableTransactionView,
+	type CustomCurrencyView,
 	type TransactionView,
 	type TransactionListItemView,
 	TRANSACTION_NOTE,
 	LIST_TRANSACTIONS_NOTE,
+	CUSTOM_CURRENCY_NOTE,
 	toTransactionView,
 	toTransactionListItemView
 } from './transaction';

@@ -74,6 +74,19 @@ describe('GET /api/v1/currencies', () => {
 		}
 	});
 
+	// ── Regression: the reference table stayed GLOBAL (issue #64, ADR-0014 #7) ──
+	it('serves the SEEDED table only — a group-defined currency never appears here', async () => {
+		// §16.4 pins this endpoint to the static §7.5.1 table, and ADR-0014 decision 7
+		// deliberately left it alone: a custom currency is group-scoped and this route
+		// takes no group. It reads no group, no session member list and no `currencies`
+		// rows — the whole payload is derived from the compiled-in constant.
+		const { body } = await read((await GET(makeEvent())) as Response);
+
+		expect(body.map((row: { code: string }) => row.code)).toEqual(CURRENCIES.map((c) => c.code));
+		// No opaque row key can be here, because no row is read.
+		expect(JSON.stringify(body)).not.toContain('cur_');
+	});
+
 	it('429 rate_limited (tier-2 read) short-circuits before serving the reference table', async () => {
 		requireRateLimit.mockResolvedValueOnce(
 			rateLimited(

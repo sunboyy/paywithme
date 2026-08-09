@@ -223,6 +223,49 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 		]);
 	});
 
+	// ── The GET → PUT round trip for a CUSTOM-currency transaction (issue #64) ──
+	// A DELIBERATE, DOCUMENTED LIMIT of v1, pinned here so it is a decision rather
+	// than an emergent surprise.
+	//
+	// `TransactionInput.currency` is validated against the group's allowed set, keyed
+	// on the `currencies` PRIMARY KEY — which for a group-defined row is the opaque
+	// `cur_…`. Reads now emit only `display_code` (ADR-0014 decision 7, and the whole
+	// point of this task), and no v1 endpoint lists a group's own currencies
+	// (`GET /currencies` is the static global table by §16.4). So a client has no way
+	// to name a custom currency in a write body, and `PUT` is FULL REPLACEMENT, so it
+	// cannot simply omit the field either: a custom-currency transaction is not
+	// editable through this API in v1 and must be edited in the app.
+	//
+	// The fix is NOT to accept `display_code` on the write path or to add a
+	// per-group currencies endpoint — either is a design change beyond ADR-0014
+	// decision 7's "writes are unchanged", and is filed for a recorded decision.
+	//
+	// That the DISPLAY code genuinely fails validation is proved where the rule lives
+	// (`lib/schemas/transaction.test.ts`, "rejects the display code — only the primary
+	// key identifies a row"); this pins how the boundary REPORTS it.
+	it('a PUT naming a custom currency by its DISPLAY code → 422 (not editable in v1)', async () => {
+		updateTransaction.mockRejectedValue(
+			new TransactionValidationError([
+				{
+					code: 'custom',
+					path: ['currency'],
+					message: 'Currency is not available for this group'
+				} as never
+			])
+		);
+		const { status, body } = await read(
+			(await PUT(makeMutationEvent('PUT', { ...validInput, currency: 'BEER' }))) as Response
+		);
+		expect(status).toBe(422);
+		expect(body.error.code).toBe('validation_error');
+		expect(body.error.details.fieldErrors.currency).toEqual([
+			'Currency is not available for this group'
+		]);
+		// And the response says nothing the client could retry WITH — no opaque code is
+		// handed back as a consolation. That is the leak this task closed.
+		expect(JSON.stringify(body)).not.toContain('cur_');
+	});
+
 	it('editing a soft-deleted txn (TransactionDeletedError) → 422 validation_error', async () => {
 		updateTransaction.mockRejectedValue(new TransactionDeletedError());
 		const { status, body } = await read(

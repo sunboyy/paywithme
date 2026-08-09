@@ -11,6 +11,7 @@
 import { json } from '@sveltejs/kit';
 import { getTransactionDetail, restoreTransaction } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
+import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withWriteErrorHandling } from '$lib/server/api/write';
 import { requireWriteScope } from '$lib/server/api/scope';
 import { auditVia } from '$lib/server/api/provenance';
@@ -47,5 +48,6 @@ export const POST = withWriteErrorHandling(async ({ locals, params }) => {
 		groupId: gid,
 		txnId: txid
 	});
-	return json(toTransactionDetailDto(detail));
+	// `display_code`, never the opaque row key of a group-defined currency (ADR-0014 #7).
+	return json(toTransactionDetailDto(detail, await resolveEntryCurrency(gid, detail.currency)));
 });

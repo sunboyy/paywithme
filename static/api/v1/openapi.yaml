@@ -581,6 +581,26 @@ components:
       description: An ISO-4217 code from `GET /currencies`.
       examples: ['THB', 'JPY']
 
+    DisplayCurrencyCode:
+      type: string
+      minLength: 1
+      maxLength: 8
+      pattern: '^\S+$'
+      description: |
+        The code an amount is **shown by**.
+
+        An ISO-4217 code from `GET /currencies` in almost every case — and ALWAYS for a
+        settlement amount, since a group settles only in a listed currency. A group may
+        additionally define its own **entry** currency (an unlisted national one, or a
+        unit that was never money, like `BEER`), and a transaction entered in one carries
+        the short code that group chose.
+
+        A group-defined code is meaningful **only inside its own group**: two groups may
+        each define the same code for unrelated units, and `GET /currencies` — a global
+        table — does not list them, so their `exponent` and `symbol` cannot be resolved
+        from it. Never treat such a code as ISO-4217 and never carry it between groups.
+      examples: ['THB', 'JPY', 'BEER']
+
     Money:
       type: object
       description: |
@@ -588,13 +608,17 @@ components:
         float, never a formatted string. `฿450.00` is `{ "amount": 45000, "currency": "THB" }`;
         `¥3600` (a 0-exponent currency) is `{ "amount": 3600, "currency": "JPY" }`. Get each
         currency's `exponent` from `GET /currencies`.
+
+        `currency` is a display code, so a transaction entered in a currency its group
+        defined itself reports that group's code (see `DisplayCurrencyCode`). Settlement
+        amounts are always ISO-4217.
       required: [amount, currency]
       additionalProperties: false
       properties:
         amount:
           type: integer
           description: The value in `currency`'s minor units. May be negative (e.g. a balance).
-        currency: { $ref: '#/components/schemas/CurrencyCode' }
+        currency: { $ref: '#/components/schemas/DisplayCurrencyCode' }
       examples:
         - { amount: 45000, currency: 'THB' }
 
@@ -967,7 +991,15 @@ components:
           description: The total in `currency`'s minor units. Must be greater than zero unless `itemized`.
         currency:
           allOf: [{ $ref: '#/components/schemas/CurrencyCode' }]
-          description: The **entry** currency — what was actually spent. May differ from the group's settlement currency.
+          description: |
+            The **entry** currency — what was actually spent. May differ from the group's
+            settlement currency, but must be one of the ISO-4217 codes from `GET /currencies`.
+
+            A currency a group defined for itself cannot be named here, because this API never
+            discloses the internal identifier such a currency is stored under (see
+            `DisplayCurrencyCode`). Since this body is a FULL replacement, a transaction entered
+            in one is therefore **not editable through this API in v1** — read it, delete it and
+            restore it here; edit it in the app.
         exchangeRate:
           type: string
           pattern: '^\d{1,12}(?:\.\d{1,6})?$'

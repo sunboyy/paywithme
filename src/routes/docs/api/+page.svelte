@@ -233,6 +233,27 @@
 					<code class="font-mono text-xs">GET {data.basePath}/currencies</code>.
 				</p>
 				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
+					A group can also define a currency of its own — an unlisted national one, or a unit that
+					was never money. A transaction entered in one reports that group's short code (say
+					<code class="font-mono text-xs">BEER</code>) as its
+					<code class="font-mono text-xs">currency</code>. Such a code is
+					<strong class="font-medium text-foreground">meaningful only inside that group</strong>:
+					two groups may use the same one for unrelated units, and
+					<code class="font-mono text-xs">GET {data.basePath}/currencies</code> — a global table — does
+					not list it. Settlement amounts are never affected; they are always one of the listed currencies.
+				</p>
+				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
+					One consequence, stated plainly: a transaction entered in a group-defined currency is
+					<strong class="font-medium text-foreground">not editable through this API in v1</strong>.
+					You can read it, and you can <code class="font-mono text-xs">DELETE</code> and restore it,
+					but
+					<code class="font-mono text-xs">PUT</code> is a full replacement and no value you can put
+					in
+					<code class="font-mono text-xs">currency</code> will validate — the API never discloses the
+					internal identifier such a currency is stored under. Edit those transactions in the paywithme
+					app.
+				</p>
+				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
 					Each group has a <strong class="font-medium text-foreground">settlement currency</strong>:
 					balances and shares are always in it. A transaction may be entered in another currency, in
 					which case you must supply the conversion — the exchange rate as a
