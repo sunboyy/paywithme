@@ -750,12 +750,28 @@ descriptor rather than a bare code, and prefixes `display_code` (never the opaqu
 `code`). A custom currency **always** disambiguates its symbol: a user-chosen
 symbol can't be assumed unique, or assumed not to collide with `$`.
 
-**Agent / API surface.** Writes are unchanged — assistant writes are already
-settlement-currency-only, so no write path accepts a custom code and
-`GET /currencies` / `list_currencies` stay the global seeded table. **Reads** must
-resolve `display_code` instead of emitting the opaque `code`, and `display_code` /
-`name` / `symbol` are **member-authored text** — wrapped wherever they reach an
-agent (ADR-0003, ADR-0004).
+**Agent surface.** Assistant writes are unchanged — they are already
+settlement-currency-only, so `create_transaction` / `update_transaction` /
+`settle_up` never accept a custom code and `list_currencies` stays the global
+seeded table. **Reads** must resolve `display_code` instead of emitting the opaque
+`code`, and `display_code` / `name` / `symbol` are **member-authored text** —
+wrapped wherever they reach an agent (ADR-0003, ADR-0004).
+
+**REST surface (`/api/v1`).** Unlike the Connector, `/api/v1` has no
+settlement-only write restriction, so it speaks `display_code` in **both**
+directions and the opaque `code` never appears on the wire (ADR-0014 decision 8):
+
+- A transaction write body carries the **display code**, resolved server-side
+  against the `{gid}` already in the URL path. Resolution is unambiguous —
+  `(group_id, display_code)` is unique and a display code may not shadow a seeded
+  code — and stable, because `display_code` is frozen for any currency a
+  transaction references.
+- **`GET /groups/{gid}/currencies`** lists the currencies that group may record
+  in (the seeded 29 plus its own custom rows) so a client can discover one it has
+  not already seen on a transaction. The global `GET /currencies` is unchanged and
+  stays the static §7.5.1 seeded table.
+- An unknown or another group's display code fails exactly as an unknown code
+  does, with the one shared message — nothing leaks about what exists elsewhere.
 
 ### 7.6 Multi-currency & manual FX
 
@@ -1234,7 +1250,11 @@ the change.
   transaction references the row and permitted before; a custom-currency
   transaction still converts to seeded-currency shares that sum to
   `amount_total_settlement`; the formatter prefixes `display_code` and never the
-  opaque `code`, including when the symbol collides with a seeded one.
+  opaque `code`, including when the symbol collides with a seeded one. **REST
+  round-trip (§16):** a custom-currency transaction read from `GET` can be written
+  back by `PUT` unchanged; a write naming another group's display code is refused
+  with the same message as an unknown one; the opaque `code` appears in no request
+  or response body, and is rejected if a client sends it.
 - **Integration:** transaction create/edit with payer/share invariants, incl.
   itemized with charges + discounts (round-trip edit fidelity). **Audit log:**
   each create/edit/delete/restore writes exactly one entry in the same DB
@@ -1432,11 +1452,17 @@ updateApiKey,deleteApiKey,listApiKeys,deleteAllExpiredApiKeys}` server API.
   **dropping UI-only / internal fields** — notably `TransactionDetail.input` (the
   edit-form seed) and `Group.deletedAt`. The `/v1/` promise is meaningless if the
   payload is an unversioned internal type; this seam enforces "smallest surface."
-- **Money on the wire = `{ amount: <int minor units>, currency: <ISO code> }`** —
-  no per-value `exponent`, no pre-formatted `display`. Exponent/symbol discovery is
-  via the `GET /api/v1/currencies` reference endpoint (the static §7.5.1 table).
+- **Money on the wire = `{ amount: <int minor units>, currency: <display code> }`**
+  — no per-value `exponent`, no pre-formatted `display`. The code is the ISO code
+  for a seeded currency and the group's `display_code` for a custom one (§7.5.2);
+  the opaque `currencies.code` never appears in a payload, in either direction.
+  Exponent/symbol discovery is via `GET /api/v1/currencies` (the static §7.5.1
+  table) for seeded currencies, and `GET /api/v1/groups/{gid}/currencies` for a
+  group that has defined its own.
 - **Write payload = the full internal `TransactionInput` verbatim** (reuse
-  `buildTransactionSchema` — no separate write DTO). Consequence:
+  `buildTransactionSchema` — no separate write DTO), with the **one** documented
+  substitution that `currency` is a display code, translated to the internal
+  currency key at the route boundary before the schema runs (§7.5.2). Consequence:
   `amountTotalSettlement` is a **caller-supplied required field**, validated to
   equal the round-half-up §7.6 conversion of `amountTotal`; a mismatch is a
   **`422`** (docs publish the exact §7.6 formula). Same-currency stays trivial
@@ -1465,6 +1491,7 @@ key. **R** = any valid key; **W** = requires `write` scope. `{gid}` = group id,
 | GET    | `/groups/{gid}`                             | R     | `getGroupForUser`              | 200     | `Group`                                                     |
 | GET    | `/groups/{gid}/members`                     | R     | `listMembers`                  | 200     | `Member[]`                                                  |
 | GET    | `/groups/{gid}/balances`                    | R     | `getGroupBalances`             | 200     | `Balance[]` `{memberId,balance,currency}`                   |
+| GET    | `/groups/{gid}/currencies`                  | R     | `listCurrenciesForGroup`       | 200     | `Currency[]` (seeded + group's own, by display code)        |
 | GET    | `/groups/{gid}/transactions`                | R     | `listTransactions`             | 200     | `{ data: TransactionListItem[], nextCursor: string\|null }` |
 | GET    | `/groups/{gid}/transactions/{txid}`         | R     | `getTransactionDetail`         | 200     | `TransactionDetail` (minus `input`)                         |
 | POST   | `/groups/{gid}/transactions`                | W     | `createTransaction`            | 201     | `TransactionDetail`                                         |
