@@ -394,6 +394,9 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			userId: 'user_1',
 			groupId: 'g1',
 			input: validInput,
+			// The display code the client named, re-verified inside the write's own
+			// transaction (issue #69 finding 3). For a seeded code it is the identity.
+			expectedDisplayCode: 'THB',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
 			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
 		});
@@ -656,6 +659,20 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			expect(status).toBe(422);
 			expect(body.error.code).toBe('validation_error');
 			expect(body.error.details.fieldErrors.currency).toEqual([UNSUPPORTED_CURRENCY_MESSAGE]);
+		});
+
+		it('carries the SUBMITTED display code to the service for re-verification', async () => {
+			// Issue #69 finding 3. The translation above runs OUTSIDE the write's
+			// transaction, and `display_code` is only frozen once a transaction references
+			// the row — so an unreferenced currency can be renamed in the gap and the write
+			// would be filed under a code the client never named. The route cannot close
+			// that window; it can only hand the assertion to the service, which re-checks it
+			// under the row lock it already takes.
+			state.currencyRows = [BEER_ROW];
+
+			await read((await POST(makePostEvent(beerInput))) as Response);
+
+			expect(createTransaction.mock.calls[0][0].expectedDisplayCode).toBe('BEER');
 		});
 
 		it('a SEEDED body is forwarded byte-for-byte and reads no `currencies` rows', async () => {

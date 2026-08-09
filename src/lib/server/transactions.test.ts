@@ -23,6 +23,7 @@ const {
 	deletes,
 	updateReturningQueue,
 	groupRoundingSeq,
+	selectLocks,
 	makeDb,
 	lastTxHandle
 } = vi.hoisted(() => {
@@ -42,6 +43,8 @@ const {
 	// transaction's rounding ordinal by incrementing this and reading it back, so
 	// the mock has to behave like a counter, not like a rows-affected result.
 	const groupRoundingSeq = { current: 0 };
+	// Every row-lock strength requested via `.for(...)`, in order.
+	const selectLocks: string[] = [];
 
 	function nextSelectRows(): unknown[] {
 		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
@@ -52,6 +55,14 @@ const {
 		const chain: Record<string, unknown> = {};
 		const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
 		for (const m of methods) chain[m] = () => chain;
+		// `.for(strength)` = the `SELECT … FOR UPDATE/SHARE` row lock. Recorded rather
+		// than ignored: the exponent freeze (issue #69 finding 1) IS the lock the
+		// entry-currency read takes, so a test has to be able to see it — and to see
+		// that the seeded fast path takes none.
+		chain.for = (strength: string) => {
+			selectLocks.push(strength);
+			return chain;
+		};
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
 		return chain;
 	}
@@ -126,6 +137,7 @@ const {
 		deletes,
 		updateReturningQueue,
 		groupRoundingSeq,
+		selectLocks,
 		makeDb: () => db,
 		lastTxHandle
 	};
@@ -177,6 +189,7 @@ import {
 	type TransactionCursorKey
 } from './transactions';
 import { GroupAccessError } from './groups';
+import { UNSUPPORTED_CURRENCY_MESSAGE } from '$lib/schemas/currency';
 import { resolveShares, resolveItemizedWithCharges } from '$lib/transactions/resolve';
 import {
 	applyCharges,
@@ -223,6 +236,7 @@ beforeEach(() => {
 	deletes.length = 0;
 	updateReturningQueue.length = 0;
 	selectQueue.length = 0;
+	selectLocks.length = 0;
 	lastTxHandle.current = null;
 	groupRoundingSeq.current = 0;
 });
@@ -2059,6 +2073,149 @@ describe('createTransaction — a group-defined CUSTOM entry currency (§7.5.2)'
 		expect(row.currency).toBe('THB');
 		expect(row.amountTotalSettlement).toBe(9000);
 	});
+
+	it('a SEEDED currency takes NO row lock (regression, issue #69)', async () => {
+		// The other half of "the seeded fast path survives the exponent freeze": not
+		// just no extra query, but no extra LOCK either. A group that never defined a
+		// custom currency must not start serialising against anything.
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(selectLocks).toEqual([]);
+	});
+
+	it('LOCKS the custom rows `FOR SHARE` while it reads them (issue #69 finding 1)', async () => {
+		// The exponent this read returns is what every amount below is computed with,
+		// and the referencing row is inserted much later in the SAME transaction. An
+		// unlocked read lets `updateCustomCurrency` take an uncontended `FOR UPDATE` in
+		// the gap, see no reference, and commit a new exponent — so the amounts land at
+		// a scale they were never entered under. `FOR SHARE` is what makes the editor's
+		// `FOR UPDATE` wait for us; SHARED because that is the WEAKEST strength that
+		// conflicts with `FOR UPDATE`, so nothing else is excluded needlessly.
+		queueCustomSelects();
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(selectLocks).toEqual(['share']);
+	});
+});
+
+/**
+ * Run a write expected to fail validation and return the Zod issues it carried —
+ * the exact material the §16.5 422 body is flattened from, so comparing two of
+ * these is comparing two response bodies.
+ */
+async function issuesOf(run: () => Promise<unknown>) {
+	try {
+		await run();
+	} catch (e) {
+		if (e instanceof TransactionValidationError) return e.issues;
+		throw e;
+	}
+	throw new Error('expected the write to be rejected, but it succeeded');
+}
+
+describe('createTransaction — the display-code assertion (issue #69 finding 3)', () => {
+	function queueCustomSelects(currencyRows: unknown[] = [BEER_ROW]) {
+		queueSelects(ACCESS_OK, THREE_MEMBERS, currencyRows, CATEGORY_ROW);
+	}
+
+	it('accepts the write when the row still carries the display code the caller named', async () => {
+		queueCustomSelects();
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB',
+			expectedDisplayCode: 'BEER'
+		});
+		expect(typeof id).toBe('string');
+		expect(insertsTo('transactions')[0].values.currency).toBe(BEER_ROW.code);
+	});
+
+	it('REJECTS the write when the display code moved between translation and the write', async () => {
+		// `/api/v1` translated `BEER` → `cur_beer` at the route boundary, outside this
+		// transaction. `display_code` only freezes once a transaction references the row
+		// — which is exactly what this write would be doing for the first time — so a
+		// rename can commit in the gap. Recording it anyway would file the transaction
+		// under a code the client never named.
+		queueCustomSelects([{ ...BEER_ROW, displayCode: 'PINT' }]);
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: beerInput(),
+				settlementCurrency: 'THB',
+				expectedDisplayCode: 'BEER'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('fails a renamed code EXACTLY as an unknown code fails — same issue, nothing leaks', async () => {
+		// PLAN §7.5.2: an unknown code, another group's code, an opaque key and now a
+		// renamed one must be ONE indistinguishable outcome. Compare the carried Zod
+		// issues, which are what the 422 body is flattened from.
+		queueCustomSelects([{ ...BEER_ROW, displayCode: 'PINT' }]);
+		const renamed = await issuesOf(() =>
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: beerInput(),
+				settlementCurrency: 'THB',
+				expectedDisplayCode: 'BEER'
+			})
+		);
+
+		// The reference: the code names nothing in this group at all.
+		queueCustomSelects([]);
+		const unknown = await issuesOf(() =>
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: beerInput(),
+				settlementCurrency: 'THB'
+			})
+		);
+
+		expect(JSON.stringify(renamed)).toBe(JSON.stringify(unknown));
+		expect(renamed[0].path).toEqual(['currency']);
+		expect(renamed[0].message).toBe(UNSUPPORTED_CURRENCY_MESSAGE);
+	});
+
+	it('a WEB write (no expected display code) is unaffected by a rename', async () => {
+		// The web UI submits the opaque key and has no display code to assert, so the
+		// parameter is absent and the allow-list is used untouched. This is the reason
+		// the parameter must stay optional.
+		queueCustomSelects([{ ...BEER_ROW, displayCode: 'PINT' }]);
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(typeof id).toBe('string');
+	});
+
+	it('a SEEDED code asserts its own display code and still issues no currencies read', async () => {
+		queueSelects(ACCESS_OK, ACTIVE_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB',
+			expectedDisplayCode: 'THB'
+		});
+		expect(insertsTo('transactions')[0].values.currency).toBe('THB');
+		expect(selectLocks).toEqual([]);
+	});
 });
 
 describe('updateTransaction — re-editing a CUSTOM-currency transaction (§7.5.2 / §7.6)', () => {
@@ -2090,6 +2247,50 @@ describe('updateTransaction — re-editing a CUSTOM-currency transaction (§7.5.
 
 		const owed = insertsTo('transaction_shares').map((i) => i.values.amountOwed as number);
 		expect(owed.reduce((a, b) => a + b, 0)).toBe(182_000);
+	});
+
+	it('LOCKS the custom rows `FOR SHARE` on the edit path too (issue #69 finding 1)', async () => {
+		// An edit recomputes every settlement amount from the exponent it reads here,
+		// so it needs the same freeze the create path does.
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Beers', deletedAt: null, roundingSeq: 2 }],
+			THREE_MEMBERS,
+			[BEER_ROW],
+			CATEGORY_ROW,
+			[]
+		);
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: beerInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(selectLocks).toEqual(['share']);
+	});
+
+	it('rejects an edit whose display code moved between translation and the write', async () => {
+		// Issue #69 finding 3, on the PUT path: same window, same answer.
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Beers', deletedAt: null, roundingSeq: 0 }],
+			THREE_MEMBERS,
+			[{ ...BEER_ROW, displayCode: 'PINT' }],
+			CATEGORY_ROW,
+			[]
+		);
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: beerInput(),
+				settlementCurrency: 'THB',
+				expectedDisplayCode: 'BEER'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(updatesTo('transactions')).toHaveLength(0);
 	});
 
 	it("rejects an edit that moves the transaction to another group's custom code", async () => {

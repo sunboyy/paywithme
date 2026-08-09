@@ -17,12 +17,40 @@ import { GroupAccessError } from '$lib/server/groups';
 import { getGroupBalances } from '$lib/server/balances';
 import { listMembers } from '$lib/server/members';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
+import { resolveEntryCurrencies } from '$lib/server/entry-currency';
 import { listGroupActivity, type ActivityEntry } from '$lib/server/activity';
 import { orderByWhoShouldPay, type MemberBalance } from '$lib/transactions/balances';
 import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
 
 const RECENT_LIMIT = 5;
+
+/** What the page needs to format one row's original amount — a `CurrencyDescriptor`. */
+export interface RecentEntryCurrency {
+	code: string;
+	displayCode: string;
+	symbol: string;
+	exponent: number;
+}
+
+/**
+ * Resolve the entry-currency descriptor of every DISTINCT code among the recent
+ * rows (PLAN §7.5.2 / ADR-0014 decision 4). One lookup for the whole list, and none
+ * at all when every code is seeded — see the call site for why the page cannot
+ * format from the bare code.
+ */
+async function resolveRecentCurrencies(
+	groupId: string,
+	rows: readonly TransactionListItem[]
+): Promise<RecentEntryCurrency[]> {
+	const codes = [...new Set(rows.map((t) => t.currency))];
+	if (codes.length === 0) return [];
+	const lookup = await resolveEntryCurrencies(groupId, codes);
+	return codes.map((code) => {
+		const c = lookup(code);
+		return { code: c.code, displayCode: c.displayCode, symbol: c.symbol, exponent: c.exponent };
+	});
+}
 
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard: anonymous → /login; no-access/not-found → 404. THROWS
@@ -63,6 +91,26 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			return [] as ActivityEntry[];
 		})
 	]);
+
+	// ── The ENTRY currency of each recent row (PLAN §7.5.2; issue #69 finding 2) ──
+	// A row shows its ORIGINAL amount in the currency it was RECORDED in (§7.6
+	// "Display"), and that may be one this group defined itself — which exists only as
+	// a `currencies` row. `formatAmount` is given a bare code here, and a custom code
+	// resolves to nothing in the compiled-in seeded constant, so it THROWS by design
+	// (guessing an exponent would render every amount at the wrong scale). Without
+	// these descriptors the whole overview 500s the moment a custom-currency
+	// transaction is among the five most recent — ordinary use of the feature.
+	//
+	// `resolveEntryCurrencies` (not `listCurrenciesForGroup`) because of its seeded
+	// fast path: when every recent row is denominated in one of the 29 — every group
+	// that never opened the custom-currency UI — it issues NO query at all.
+	//
+	// NOT degraded to an empty list on failure, for the same reason the transaction
+	// list page does not: a missing descriptor does not make the page render one
+	// section less, it makes the component throw anyway, later and with a worse
+	// message. Access is already established, and the codes come from rows we just
+	// read behind a foreign key, so a failure here is a real fault.
+	const recentCurrencies = await resolveRecentCurrencies(params.id, recentTransactions);
 
 	// Build display-name + active-status maps from the full roster (deactivated
 	// members can still carry balances, so we use the full roster, not active-only).
@@ -125,6 +173,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },
 		balances: balanceRows,
 		recentTransactions,
+		// One descriptor per DISTINCT entry currency among the rows above; the page
+		// indexes them by `code` to format each row's original amount.
+		recentCurrencies,
 		recentActivity
 	};
 };

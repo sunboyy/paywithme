@@ -221,21 +221,37 @@ async function isReferencedByTransaction(code: string, executor: DbExecutor): Pr
  * exactly the outcome the rule exists to prevent: a stored amount interpreted with
  * an exponent it was never entered under.
  *
- * How the atomic version closes it. The caller has already taken `FOR UPDATE` on
- * the `currencies` row (see {@link getGroupCurrencyForUpdate}), in the SAME
- * transaction as the write. Inserting a `transactions` row takes a `FOR KEY SHARE`
- * lock on its referenced parent currency row (that is how Postgres enforces the
- * `transactions.currency → currencies.code` foreign key), and `FOR UPDATE`
- * CONFLICTS with `FOR KEY SHARE`. So:
- *   - if the concurrent insert got there first, our `FOR UPDATE` BLOCKS until it
+ * How this half closes it. The caller has already taken `FOR UPDATE` on the
+ * `currencies` row (see {@link getGroupCurrencyForUpdate}), in the SAME transaction
+ * as the write, and the reference read below runs while that lock is held. An
+ * explicit `FOR UPDATE` is REQUIRED: updating only `exponent` / `display_code`
+ * touches no key column, so the update's own row lock would be `FOR NO KEY UPDATE`,
+ * which does NOT conflict with the `FOR KEY SHARE` an inserting transaction takes
+ * on the parent currency row through the `transactions.currency → currencies.code`
+ * foreign key — the two could then commit concurrently.
+ *
+ * ── The half that is NOT ours (issue #69 finding 1) ───────────────────────────
+ * This docstring used to argue the race was fully closed HERE, by `FOR UPDATE`
+ * conflicting with the FK's `FOR KEY SHARE` at the inserter's insert. That analysis
+ * assumed the inserter's READ of the exponent and its INSERT were atomic, and they
+ * are not: the exponent is read when the write transaction resolves its
+ * entry-currency allow-list, and the referencing row is inserted much later in the
+ * same transaction. With an UNLOCKED read the interleaving
+ *   T1 reads exponent 2 → T2 takes an UNCONTENDED `FOR UPDATE`, sees no reference,
+ *   commits exponent 0 → T1 inserts (its `FOR KEY SHARE` now conflicts with nothing)
+ * commits both, and the amount is stored at a scale it was never entered under.
+ *
+ * The fix is on the READER's side and lives in `transactions.ts`:
+ * `resolveEntryCurrencies` takes `FOR SHARE` when it reads the group's custom rows,
+ * in the write's own transaction, and holds it through the insert. THAT is what our
+ * `FOR UPDATE` conflicts with, and only together do the two guarantee:
+ *   - if the write got its `FOR SHARE` first, our `FOR UPDATE` BLOCKS until it
  *     commits or rolls back; when it commits, the read below (a fresh statement
- *     snapshot under READ COMMITTED) SEES it and we refuse the edit;
- *   - if we got there first, the insert blocks on us and lands after our edit is
- *     committed — the amount is then entered under the exponent it will be read
- *     with.
- * An explicit `FOR UPDATE` is REQUIRED for this: updating only `exponent` /
- * `display_code` touches no key column, so the update's own lock would NOT conflict
- * with the FK's key-share lock and the two could commit concurrently.
+ *     snapshot under READ COMMITTED) SEES its row and we refuse the edit;
+ *   - if we got there first, the write's `FOR SHARE` blocks on us and it reads the
+ *     exponent we committed — the amount is entered under the exponent it will be
+ *     read with.
+ * Weakening either lock re-opens the window; they are one mechanism in two files.
  */
 async function assertNotReferenced(
 	row: CurrencyRow,

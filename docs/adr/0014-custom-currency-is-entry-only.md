@@ -188,6 +188,19 @@ for any transaction that exists in a custom currency, the code it was read under
 cannot subsequently move. The only mutable window belongs to a currency no
 transaction references — and naming it in a write body is what freezes it.
 
+> **Corrected 2026-08-09 (issue #69).** That last sentence was wrong. Naming a
+> currency in a write body freezes it only once the write's `transactions` row is
+> _inserted_, and the translation runs at the route boundary, **outside** the
+> write's transaction — so a rename of a still-unreferenced currency can commit in
+> between, and the transaction is recorded under a display code the client never
+> named. The translation therefore carries the submitted display code into the
+> service as an optional `expectedDisplayCode`, and the service re-verifies it
+> against the row it has locked; a mismatch is the ordinary
+> `UNSUPPORTED_CURRENCY_MESSAGE` 422 on `currency`, indistinguishable from an
+> unknown code. This is the one service-signature change #68 said it would not
+> need; it stays optional, because the web UI submits the internal key and has
+> nothing to assert.
+
 **Why not leave it (app-only editing).** Read-then-write round-tripping is the
 defining property of a full-replacement `PUT` resource. Serving a representation
 the same endpoint will not accept back is a broken resource regardless of what

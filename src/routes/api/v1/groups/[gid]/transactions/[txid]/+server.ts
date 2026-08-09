@@ -79,8 +79,11 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 	// Unparseable body → 400. The parsed value is the full internal input verbatim,
 	// save for the ONE documented substitution (§16.4): `currency` arrives as a
 	// display code and is translated to the internal key against THIS group.
+	// `expectedDisplayCode` travels with the translated body so the service re-checks
+	// the code the client named inside its own transaction (issue #69 finding 3) —
+	// this lookup is not atomic with the write.
 	const body = await parseJsonBody(request);
-	const input = await resolveWriteCurrency(gid, body);
+	const { input, expectedDisplayCode } = await resolveWriteCurrency(gid, body);
 
 	// Throws TransactionValidationError (→ 422), TransactionDeletedError (→ 422),
 	// GroupAccessError / TransactionNotFoundError (→ 404) — all mapped by the wrapper.
@@ -89,6 +92,7 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 		groupId: gid,
 		txnId: txid,
 		input,
+		expectedDisplayCode,
 		actorUserId: principal.userId,
 		// §16.2 audit provenance: actor stays the user; the key is recorded as
 		// `{viaKey,keyName}` metadata + a "(via API key '…')" summary suffix.

@@ -14,7 +14,7 @@
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
-	import { formatAmount, type SeededCurrencyCode } from '$lib/money';
+	import { asEntryCurrencyCode, formatAmount, type SeededCurrencyCode } from '$lib/money';
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import { dayLabel } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -25,6 +25,26 @@
 	let { data }: { data: PageData } = $props();
 
 	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
+
+	// Entry-currency descriptors by code (PLAN §7.5.2), mirroring the full transaction
+	// list. A recent row's ORIGINAL amount is denominated in the currency it was
+	// RECORDED in, which may be one this group defined itself — that one exists only as
+	// a `currencies` row, so `formatAmount` must be handed the row rather than the code
+	// it would throw on (and the row is what carries `display_code`, the only code a
+	// user may ever see).
+	const entryCurrencies = $derived(new Map(data.recentCurrencies.map((c) => [c.code, c])));
+
+	/**
+	 * Format a recent row's ORIGINAL total in its OWN entry currency. A seeded code
+	 * with no descriptor falls back to the code itself, which `formatAmount` resolves
+	 * through the compiled-in constant exactly as before.
+	 */
+	function entryAmount(minor: number, code: string, isForeign: boolean): string {
+		const descriptor = entryCurrencies.get(code);
+		return descriptor
+			? formatAmount(minor, descriptor, { code: isForeign })
+			: formatAmount(minor, asEntryCurrencyCode(code), { code: isForeign });
+	}
 </script>
 
 <svelte:head>
@@ -236,7 +256,7 @@
 											<!-- Settlement-currency amounts render bare ("¥3,200"); a FOREIGN amount
 									     keeps its ISO code so the two are never confusable. -->
 											<span class="block text-sm font-medium tabular-nums">
-												{formatAmount(txn.amountTotal, txn.currency, { code: txn.isForeign })}
+												{entryAmount(txn.amountTotal, txn.currency, txn.isForeign)}
 											</span>
 											{#if txn.isForeign}
 												<span class="block text-xs text-muted-foreground tabular-nums">

@@ -27,11 +27,19 @@
 //   WRITE  a body's `currency` (a display code)          → `currencies.code`
 //
 // The write direction lives here, next to the read one, so the two halves of one
-// translation can never drift. It is a ROUTE-BOUNDARY concern: nothing in
-// `lib/server/transactions.ts` changes — `createTransaction` / `updateTransaction`
-// already build their entry-currency gate from the group's own set — so the routes
-// translate BEFORE calling the service and the service keeps seeing internal keys
-// only. The Connector does not call it (decision 1 stands).
+// translation can never drift. The routes translate BEFORE calling the service and
+// the service keeps seeing internal keys only. The Connector does not call it
+// (decision 1 stands).
+//
+// This module first claimed the translation was PURELY a route-boundary concern and
+// that `lib/server/transactions.ts` needed no change. That was wrong (issue #69
+// finding 3): the lookup runs outside the write's transaction, and a display code is
+// only frozen once a transaction references its row — so a rename can land in the
+// gap and the write is recorded under a code the client never named. The translation
+// therefore hands back the SUBMITTED display code alongside the translated body, and
+// the service re-verifies it under the row lock it already takes. That is one
+// OPTIONAL service parameter (`expectedDisplayCode`); callers with nothing to assert
+// — the web UI, which submits the internal key — pass nothing and are unaffected.
 //
 // ── Why this is not an N+1 ───────────────────────────────────────────────────
 // `list_transactions` / `GET …/transactions` serve up to 100 rows, so a
@@ -221,9 +229,15 @@ const UNRESOLVABLE_ENTRY_CURRENCY = '';
  * Resolution is unambiguous because both properties it needs are already enforced
  * (#61): `(group_id, display_code)` is unique, AND a display code may not shadow one
  * of the seeded 29 — so within one group a display code names EXACTLY ONE currency.
- * It is also stable: `display_code` freezes the moment a transaction references the
- * row (decision 5), so the code a client read a transaction under cannot move
- * underneath it before the client writes it back.
+ *
+ * It is NOT, on its own, stable. `display_code` freezes only once a transaction
+ * references the row (decision 5), so for a currency nothing references yet — the
+ * case of the very write that is about to reference it — a rename can commit
+ * between this query and the write it feeds (issue #69 finding 3). This function
+ * runs at the route boundary, outside the write's transaction, and therefore cannot
+ * close that window itself. The caller must carry the SUBMITTED display code into
+ * the service (`expectedDisplayCode`), which re-verifies it against the row it
+ * locked; see {@link resolveWriteCurrency}.
  *
  * Returns {@link UNRESOLVABLE_ENTRY_CURRENCY} when the code names nothing this group
  * may record in — including the opaque `cur_…` key itself, which is REJECTED on
@@ -255,37 +269,70 @@ export async function resolveWriteCurrencyCode(
 }
 
 /**
+ * The result of translating a write body: what to hand the service, plus what the
+ * service must RE-VERIFY once it holds the row lock.
+ */
+export interface WriteCurrencyTranslation {
+	/** The body to hand `createTransaction` / `updateTransaction`. */
+	readonly input: unknown;
+	/**
+	 * The display code the client actually named, to be passed straight through as
+	 * the service's `expectedDisplayCode`. `undefined` when there was nothing to
+	 * translate (a non-object body, or a `currency` that is not a string) — the
+	 * shared schema rejects those on its own and there is no assertion to make.
+	 */
+	readonly expectedDisplayCode?: string;
+}
+
+/**
  * Translate a `/api/v1` transaction WRITE BODY's `currency` from the display code
  * the client speaks to the internal key the ledger stores (ADR-0014 decision 8).
  *
  * Call this at the route boundary, with the `{gid}` already in the URL path, BEFORE
  * handing the body to `createTransaction` / `updateTransaction`: the service then
  * validates the translated key against the group's own set exactly as it always
- * has, so a bad code is the ordinary 422 and no service signature changes.
+ * has, so a bad code is the ordinary 422.
+ *
+ * ── The translation is not atomic with the write, so the service re-checks ────
+ * This runs OUTSIDE the write's transaction, and `display_code` is only frozen once
+ * a transaction references the row (ADR-0014 decision 5) — so for a currency that
+ * nothing references yet, a rename can commit between the lookup here and the
+ * insert there, and the write would be recorded under a display code the client
+ * never named (issue #69 finding 3). That is why the returned
+ * {@link WriteCurrencyTranslation.expectedDisplayCode} must be forwarded to the
+ * service: it re-verifies the assertion against the row it locked, and a mismatch
+ * surfaces as the ordinary `UNSUPPORTED_CURRENCY_MESSAGE` 422 on `currency` —
+ * indistinguishable from an unknown code, so nothing leaks.
  *
  * Everything else about the body is passed through untouched — this is the ONE
  * documented substitution §16.4 allows on the "write payload = the full internal
  * `TransactionInput` verbatim" rule.
  *
  * A body that is not an object, or whose `currency` is not a string, is returned
- * AS-IS: there is nothing to translate, and the shared schema already rejects it
- * with the same message.
+ * AS-IS with no assertion: there is nothing to translate, and the shared schema
+ * already rejects it with the same message.
  *
  * NOTE for the caller: the §16.6 idempotency fingerprint is taken from the RAW
  * REQUEST BYTES, before this runs, and must stay that way — a fingerprint computed
  * after translation would depend on server state rather than on what the client
  * sent.
  */
-export async function resolveWriteCurrency(groupId: string, input: unknown): Promise<unknown> {
-	if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+export async function resolveWriteCurrency(
+	groupId: string,
+	input: unknown
+): Promise<WriteCurrencyTranslation> {
+	if (typeof input !== 'object' || input === null || Array.isArray(input)) return { input };
 
 	const submitted = (input as { currency?: unknown }).currency;
-	if (typeof submitted !== 'string') return input;
+	if (typeof submitted !== 'string') return { input };
 
 	const code = await resolveWriteCurrencyCode(groupId, submitted);
 	// Seeded (the overwhelmingly common case): the translation is the identity, so
-	// hand the service the very object the client sent rather than a copy of it.
-	if (code === submitted) return input;
+	// hand the service the very object the client sent rather than a copy of it. The
+	// assertion still travels — a seeded row's `display_code` equals its `code` and
+	// is not editable, so it can only ever hold, but the write path then has ONE
+	// rule rather than one-with-an-exception.
+	if (code === submitted) return { input, expectedDisplayCode: submitted };
 
-	return { ...input, currency: code };
+	return { input: { ...input, currency: code }, expectedDisplayCode: submitted };
 }

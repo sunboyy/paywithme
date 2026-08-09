@@ -228,7 +228,10 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	// Display code → internal currency key, resolved against THIS group (ADR-0014
 	// decision 8). Runs before the service so `buildTransactionSchema` sees a key and
 	// an unresolvable code is the ordinary `UNSUPPORTED_CURRENCY_MESSAGE` 422.
-	const input = await resolveWriteCurrency(gid, body);
+	// `expectedDisplayCode` travels with it so the service can re-verify the code the
+	// client named INSIDE its transaction — this lookup is not atomic with the write,
+	// and an unreferenced currency can still be renamed in between (issue #69).
+	const { input, expectedDisplayCode } = await resolveWriteCurrency(gid, body);
 
 	// The create (service call → 422/404 via the wrapper; settlement currency loaded
 	// server-side from the group) + the 201 DTO re-read (§16.4). Wrapped so a repeated
@@ -238,6 +241,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			userId: principal.userId,
 			groupId: gid,
 			input,
+			expectedDisplayCode,
 			// §16.2 audit provenance: the actor stays the USER; the key is recorded as
 			// `{viaKey,keyName}` metadata + a "(via API key '…')" summary suffix on the
 			// audit row written in the SAME transaction as the create (no schema change).
