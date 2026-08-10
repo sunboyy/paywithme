@@ -3,9 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Unit tests for the custom-currency USAGE read (issue #62; PLAN §7.5.2;
 // ADR-0014 decision 5).
 //
-// STRATEGY: no real DB. `listCurrenciesForGroup` (the #61 service) and the `db`
-// handle are both stubbed, so what these tests pin down is this module's own
-// contract:
+// STRATEGY: no real DB. `listCurrenciesForGroup` (the #61 service) and the shared
+// reference helper are both stubbed, so what these tests pin down is this module's
+// own contract:
 //   - only the group's OWN custom rows come back (never the seeded 29);
 //   - each is flagged with whether a transaction already references it;
 //   - the reference lookup is ONE query over all of the group's codes, and is
@@ -13,28 +13,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //   - a `GroupAccessError` from the access-checked list is propagated, not
 //     swallowed (§12 — the route turns it into a 404).
 
-const { listCurrenciesForGroup, selectDistinct, state } = vi.hoisted(() => {
-	const state = {
-		/** Rows the next `selectDistinct(...)` resolves to. */
-		referencedRows: [] as { currency: string }[],
-		/** Codes passed to the `inArray(...)` filter, recorded per call. */
-		whereCalls: [] as unknown[]
+const { findReferencedCurrencyCodes, listCurrenciesForGroup } = vi.hoisted(() => {
+	return {
+		findReferencedCurrencyCodes: vi.fn(),
+		listCurrenciesForGroup: vi.fn()
 	};
-	const selectDistinct = vi.fn(() => {
-		const chain: Record<string, unknown> = {};
-		chain.from = () => chain;
-		chain.where = (w: unknown) => {
-			state.whereCalls.push(w);
-			return chain;
-		};
-		chain.then = (resolve: (v: unknown) => unknown) => resolve(state.referencedRows);
-		return chain;
-	});
-	return { listCurrenciesForGroup: vi.fn(), selectDistinct, state };
 });
 
-vi.mock('./db', () => ({ db: { selectDistinct } }));
-vi.mock('./currencies', () => ({ listCurrenciesForGroup }));
+vi.mock('./currencies', () => ({ findReferencedCurrencyCodes, listCurrenciesForGroup }));
 
 import { listCustomCurrenciesWithUsage } from './currency-usage';
 
@@ -59,9 +45,8 @@ const ROUND = row('cur_round', 'ROUND', true);
 
 beforeEach(() => {
 	listCurrenciesForGroup.mockReset();
-	selectDistinct.mockClear();
-	state.referencedRows = [];
-	state.whereCalls = [];
+	findReferencedCurrencyCodes.mockReset();
+	findReferencedCurrencyCodes.mockResolvedValue(new Set());
 });
 
 describe('listCustomCurrenciesWithUsage', () => {
@@ -75,7 +60,7 @@ describe('listCustomCurrenciesWithUsage', () => {
 
 	it('flags the referenced rows and only those', async () => {
 		listCurrenciesForGroup.mockResolvedValue([SEEDED, BEER, ROUND]);
-		state.referencedRows = [{ currency: 'cur_beer' }];
+		findReferencedCurrencyCodes.mockResolvedValue(new Set(['cur_beer']));
 
 		const result = await listCustomCurrenciesWithUsage({ userId: 'u1', groupId: 'g1' });
 
@@ -83,12 +68,13 @@ describe('listCustomCurrenciesWithUsage', () => {
 		expect(result.find((c) => c.displayCode === 'ROUND')?.isReferenced).toBe(false);
 	});
 
-	it('asks the database once, not once per currency', async () => {
+	it('asks the shared helper once, not once per currency', async () => {
 		listCurrenciesForGroup.mockResolvedValue([BEER, ROUND]);
 
 		await listCustomCurrenciesWithUsage({ userId: 'u1', groupId: 'g1' });
 
-		expect(selectDistinct).toHaveBeenCalledTimes(1);
+		expect(findReferencedCurrencyCodes).toHaveBeenCalledOnce();
+		expect(findReferencedCurrencyCodes).toHaveBeenCalledWith(['cur_beer', 'cur_round']);
 	});
 
 	it('skips the reference query entirely when the group has no custom currencies', async () => {
@@ -97,7 +83,7 @@ describe('listCustomCurrenciesWithUsage', () => {
 		const result = await listCustomCurrenciesWithUsage({ userId: 'u1', groupId: 'g1' });
 
 		expect(result).toEqual([]);
-		expect(selectDistinct).not.toHaveBeenCalled();
+		expect(findReferencedCurrencyCodes).not.toHaveBeenCalled();
 	});
 
 	it('propagates the access failure from the access-checked list (§12)', async () => {
@@ -107,6 +93,6 @@ describe('listCustomCurrenciesWithUsage', () => {
 		await expect(listCustomCurrenciesWithUsage({ userId: 'u1', groupId: 'g1' })).rejects.toThrow(
 			GroupAccessError
 		);
-		expect(selectDistinct).not.toHaveBeenCalled();
+		expect(findReferencedCurrencyCodes).not.toHaveBeenCalled();
 	});
 });

@@ -1079,6 +1079,9 @@ Indexes: `members(group_id)`, `members(user_id)`, `invites(token)`,
 /groups/[id]/transactions/[txid]  View/edit transaction
 /groups/[id]/settle       Debt summary + suggested settlements + settle action
 /groups/[id]/activity     Audit log: who did what & when (newest first) (§12.1)
+/groups/[id]/settings     Group settings
+/groups/[id]/settings/currencies  Manage the group's custom currencies (§7.5.2,
+                          ADR-0014)
 /settings                 Manage passkeys (add/remove additional devices); email
 /invite/[token]           Accept an invite link (link an existing member or
                           create a new one; grant access)

@@ -41,7 +41,7 @@
 // `userHasGroupAccess` primitive and throw `GroupAccessError` (→ 404) on no access.
 // Mutations assert on the SAME `tx` they then write on.
 
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or } from 'drizzle-orm';
 import { db } from './db';
 import { currencies, generateCustomCurrencyCode } from './db/currencies-schema';
 import { transactions } from './db/transactions-schema';
@@ -198,17 +198,37 @@ async function getGroupCurrencyForUpdate(
 }
 
 /**
- * Is ANY transaction recorded against this currency? Includes SOFT-DELETED ones on
- * purpose: a soft-deleted transaction still stores amounts in this currency and can
- * be restored (PLAN §9), so its exponent must keep meaning what it meant.
+ * Return the requested currency codes referenced by ANY transaction.
+ *
+ * This is the one shared definition used by both the mutation lock below and the
+ * advisory settings read in `currency-usage.ts`. It deliberately has no
+ * `deleted_at IS NULL` filter: a soft-deleted transaction still stores amounts in
+ * this currency and can be restored (PLAN §9), so its exponent must keep meaning
+ * what it meant. The caller chooses the strength: mutations pass their open
+ * transaction after locking the currency row; the UI read uses the default DB
+ * handle and remains advisory.
+ *
+ * One grouped query handles every requested code, avoiding a query per custom
+ * currency on the settings page.
  */
-async function isReferencedByTransaction(code: string, executor: DbExecutor): Promise<boolean> {
+export async function findReferencedCurrencyCodes(
+	codes: readonly string[],
+	executor: DbExecutor = db
+): Promise<Set<string>> {
+	if (codes.length === 0) return new Set();
+
 	const rows = await executor
-		.select({ id: transactions.id })
+		.select({ currency: transactions.currency })
 		.from(transactions)
-		.where(eq(transactions.currency, code))
-		.limit(1);
-	return rows.length > 0;
+		.where(inArray(transactions.currency, codes))
+		.groupBy(transactions.currency);
+
+	return new Set(rows.map((row) => row.currency));
+}
+
+/** Is this one currency referenced, using the shared definition above? */
+async function isReferencedByTransaction(code: string, executor: DbExecutor): Promise<boolean> {
+	return (await findReferencedCurrencyCodes([code], executor)).size > 0;
 }
 
 /**

@@ -20,10 +20,11 @@
 //
 // Business logic in `lib/server/` (CLAUDE.md), so it is testable without a route.
 
-import { inArray } from 'drizzle-orm';
-import { db } from './db';
-import { transactions } from './db/transactions-schema';
-import { listCurrenciesForGroup, type GroupCurrency } from './currencies';
+import {
+	findReferencedCurrencyCodes,
+	listCurrenciesForGroup,
+	type GroupCurrency
+} from './currencies';
 
 /**
  * A group's own custom currency, plus whether any transaction already references
@@ -42,11 +43,9 @@ export type CustomCurrencyUsage = GroupCurrency & {
  * Access-checked through `listCurrenciesForGroup`, so a non-member gets the same
  * `GroupAccessError` (→ 404) as everywhere else — no second, divergent §12 check.
  *
- * Soft-deleted transactions COUNT as references, matching the service's own
- * `isReferencedByTransaction`: a deleted transaction still stores amounts in this
- * currency and can be restored (PLAN §9), so its exponent must keep meaning what
- * it meant. The two rules must agree, or the screen would offer a Delete button
- * the server then refuses.
+ * Soft-deleted transactions COUNT as references: both this advisory read and the
+ * authoritative mutation lock call `findReferencedCurrencyCodes`, so the screen
+ * cannot drift into offering a Delete button the server then refuses.
  */
 export async function listCustomCurrenciesWithUsage({
 	userId,
@@ -61,17 +60,6 @@ export async function listCustomCurrenciesWithUsage({
 		return [];
 	}
 
-	// One `IN (…)` over this group's codes rather than a query per row.
-	const referenced = await db
-		.selectDistinct({ currency: transactions.currency })
-		.from(transactions)
-		.where(
-			inArray(
-				transactions.currency,
-				custom.map((c) => c.code)
-			)
-		);
-
-	const inUse = new Set(referenced.map((r) => r.currency));
+	const inUse = await findReferencedCurrencyCodes(custom.map((c) => c.code));
 	return custom.map((c) => ({ ...c, isReferenced: inUse.has(c.code) }));
 }
