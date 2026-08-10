@@ -57,7 +57,7 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 		const chain: Record<string, unknown> = {};
 		let table: unknown;
 		let locked = false;
-		for (const m of ['innerJoin', 'where', 'limit', 'orderBy']) chain[m] = () => chain;
+		for (const m of ['innerJoin', 'where', 'limit', 'orderBy', 'groupBy']) chain[m] = () => chain;
 		chain.from = (t: unknown) => {
 			table = t;
 			return chain;
@@ -147,6 +147,7 @@ import {
 	createCustomCurrency,
 	updateCustomCurrency,
 	deleteCustomCurrency,
+	findReferencedCurrencyCodes,
 	listCurrenciesForGroup,
 	CurrencyImmutableError,
 	CurrencyInUseError,
@@ -198,6 +199,22 @@ function customRow(overrides: Partial<CurrencyRow> = {}): CurrencyRow {
 		...overrides
 	};
 }
+
+describe('findReferencedCurrencyCodes', () => {
+	it('returns all referenced codes in one query', async () => {
+		programSelects(transactions, [{ currency: 'cur_beer' }, { currency: 'cur_round' }]);
+
+		const result = await findReferencedCurrencyCodes(['cur_beer', 'cur_round']);
+
+		expect(result).toEqual(new Set(['cur_beer', 'cur_round']));
+		expect(calls.log).toEqual(['select:transactions']);
+	});
+
+	it('skips the database for an empty code list', async () => {
+		expect(await findReferencedCurrencyCodes([])).toEqual(new Set());
+		expect(calls.log).toEqual([]);
+	});
+});
 
 const VALID_INPUT = { displayCode: 'BEER', name: 'Bottle of beer', symbol: '🍺', exponent: 0 };
 
