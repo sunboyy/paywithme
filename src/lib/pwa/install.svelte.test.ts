@@ -4,10 +4,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // in the jsdom ("client") project so `window` + `navigator` exist and runes
 // (`$state`) work. We synthesize Chromium's `beforeinstallprompt` (with a
 // `prompt()` + `userChoice`) and the `appinstalled` event and assert the reactive
-// flips, single-use semantics, SSR no-op, and idempotent start + teardown.
+// flips, single-use semantics, and idempotent start + teardown. The SSR no-op
+// lives in install.ssr.svelte.test.ts so its environment mock cannot race this
+// file's browser mock during the full multi-project unit run.
 //
 // `$app/environment` is mocked to `browser: true` so `startInstallWatch` wires
-// listeners; one test re-mocks it to `false` to prove the SSR no-op.
+// listeners.
 
 vi.mock('$app/environment', () => ({ browser: true }));
 
@@ -33,9 +35,6 @@ function makeBip(outcome: Choice = 'accepted') {
 beforeEach(() => {
 	vi.resetModules();
 	vi.unstubAllGlobals();
-	// Re-assert the browser mock every test: the SSR test below uses `vi.doMock`
-	// to flip it to `false`, which persists across `resetModules` until restored.
-	vi.doMock('$app/environment', () => ({ browser: true }));
 	// Default UA / standalone state: a generic non-iOS, non-standalone browser.
 	Object.defineProperty(navigator, 'userAgent', {
 		value: 'Mozilla/5.0 (X11; Linux x86_64) Chrome/120',
@@ -121,20 +120,6 @@ describe('install module (PLAN §11)', () => {
 		// A subsequent prompt held after install is suppressed (already installed).
 		window.dispatchEvent(makeBip());
 		expect(mod.install.available).toBe(false);
-		stop();
-	});
-
-	it('is a safe no-op during SSR (browser === false)', async () => {
-		vi.doMock('$app/environment', () => ({ browser: false }));
-		vi.resetModules();
-		const mod = await import('./install.svelte');
-		const stop = mod.startInstallWatch();
-
-		window.dispatchEvent(makeBip());
-		expect(mod.install.available).toBe(false);
-		expect(await mod.promptInstall()).toBeNull();
-		expect(mod.isIosInstallable()).toBe(false);
-		expect(typeof stop).toBe('function');
 		stop();
 	});
 
