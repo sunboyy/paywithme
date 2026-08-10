@@ -86,17 +86,25 @@ export type MemberListItem = {
  * the cross-group guard: a member id is only ever acted on after confirming it
  * belongs to the group whose access was just asserted (PLAN §12 — never act
  * cross-group). Runs on the passed executor so it shares the mutation's tx.
+ *
+ * `lock: true` takes `FOR UPDATE` on the row — see {@link removeMember}, the one
+ * caller that needs it. The default is unlocked: rename / reactivate only ever
+ * write the member row itself, so they have no check-then-act window to close and
+ * should not serialize against concurrent ledger writes.
  */
 async function getGroupMemberOrThrow(
 	groupId: string,
 	memberId: string,
-	executor: DbExecutor = db
+	executor: DbExecutor = db,
+	lock = false
 ): Promise<Member> {
-	const [row] = await executor
+	const query = executor
 		.select()
 		.from(members)
 		.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
 		.limit(1);
+
+	const [row] = await (lock ? query.for('update') : query);
 
 	if (!row) {
 		throw new MemberNotFoundError();
@@ -305,8 +313,14 @@ export type RemoveMemberResult = { action: 'soft_deactivate' | 'hard_delete' };
  *
  * The activity check is INJECTABLE (defaulting to the real `memberHasActivity`),
  * matching the codebase's optional-`executor` idiom — production callers are
- * unchanged, but both removal branches are testable now and task 4.2 can pass
- * the real transactions-backed predicate without touching this signature.
+ * unchanged, but both removal branches are testable by injecting a stub.
+ *
+ * The predicate RECEIVES THE EXECUTOR rather than closing over one, so the real
+ * check runs on the SAME `tx` as the delete it guards. Passing the global `db`
+ * here would read the ledger OUTSIDE this transaction — an inconsistent read
+ * against the access check and member lookup that precede it, and a doc comment
+ * (`memberHasActivity`: "shares the caller's transaction") that would be false at
+ * the only production call site.
  */
 export async function removeMember(
 	{
@@ -319,15 +333,38 @@ export async function removeMember(
 		memberId: string;
 	},
 	// Seam: the activity check is injectable so both removal branches are testable
-	// now and 4.2 can pass the real transactions-backed predicate. Defaults to the
-	// (currently deferred) module-private `memberHasActivity`.
-	hasActivity: (memberId: string) => Promise<boolean> = (id) => memberHasActivity(id, db)
+	// with a stub. It takes the EXECUTOR as its second argument so the production
+	// default runs inside the caller's transaction (see the note above); a test
+	// stub can ignore it. Defaults to the module-private `memberHasActivity`.
+	hasActivity: (memberId: string, executor: DbExecutor) => Promise<boolean> = memberHasActivity
 ): Promise<RemoveMemberResult> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
-		const target = await getGroupMemberOrThrow(groupId, memberId, tx);
+		// LOCK THE MEMBER ROW BEFORE PROBING (`FOR UPDATE`). Without it this is a
+		// check-then-act race with a concurrent `createTransaction`: the probes could
+		// return empty, a create could commit payer/share rows for this member, and the
+		// hard delete would then cascade those brand-new rows away — the exact silent
+		// ledger loss this branch exists to prevent. Running the probes on `tx` narrows
+		// nothing on its own; under READ COMMITTED each statement takes a fresh
+		// snapshot, so a row committed after the probe is still invisible to it.
+		//
+		// `FOR UPDATE` closes it using the lock the FOREIGN KEY already takes: inserting
+		// a `transaction_payers` / `transaction_shares` row acquires `FOR KEY SHARE` on
+		// the `members` row it references, and `FOR UPDATE` CONFLICTS with `FOR KEY
+		// SHARE`. So the two operations are mutually exclusive, both ways round:
+		//   - we win the lock  → the create blocks; we probe (empty), hard-delete, and
+		//     commit; the create then fails its FK, which is correct — you cannot record
+		//     a transaction for a member that was just removed.
+		//   - the create wins  → we block until it commits, and only THEN probe — so we
+		//     see its rows and take the soft-deactivate branch.
+		// Same mechanism as the issue #69 currency freeze (`transactions.ts`), which
+		// reasons about these same FK-induced `FOR KEY SHARE` locks.
+		//
+		// Deadlock risk is negligible: this path locks exactly ONE member row, so it can
+		// never be half of a lock cycle.
+		const target = await getGroupMemberOrThrow(groupId, memberId, tx, true);
 
-		const decision = decideMemberRemoval(await hasActivity(memberId));
+		const decision = decideMemberRemoval(await hasActivity(memberId, tx));
 
 		if (decision === 'soft_deactivate') {
 			// Soft-deactivate: keep the ledger intact. Idempotent via the `isNull`
