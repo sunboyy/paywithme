@@ -9,8 +9,7 @@ implement → review → test → commit loop.
   checkpoints. Follow it exactly.
 - **Progress:** **GitHub Issues** — a map/spec issue with sub-issues (native
   `blocked_by` edges) is the single source of truth for task status. See
-  `docs/agents/issue-tracker.md`. (`TASKS.md` is retired; it remains only as a
-  historical record of earlier phases and is no longer read by the loop.)
+  `docs/agents/issue-tracker.md`.
 
 Run (or resume) the build with:
 

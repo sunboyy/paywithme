@@ -1,14 +1,14 @@
 # Autonomous build — protocol & operations
 
-The canonical, **project-agnostic** contract for building an app hands-off from
+The canonical, project-agnostic contract for building an app hands-off from
 `PLAN.md` via an implement → review → test → commit loop. The single source of
 truth for _how_ the build runs.
 
 **Reusing this harness:** copy `.claude/agents/`, `scripts/`, and this file, then
 write a fresh `PLAN.md` (spec) and `CLAUDE.md` (conventions + a pointer here).
 Decompose the spec into a **map issue + sub-issues** on the tracker (e.g. via
-`/to-spec` then `/to-tickets`) rather than a `TASKS.md` file — see _Task tracker_
-below. The protocol is otherwise unchanged between projects.
+`/to-spec` then `/to-tickets`) — see _Task tracker_ below. The protocol is
+otherwise unchanged between projects.
 
 ## Components
 
@@ -27,16 +27,14 @@ below. The protocol is otherwise unchanged between projects.
 
 Progress lives in **GitHub Issues**, managed via `gh` (see
 `docs/agents/issue-tracker.md` › _Wayfinding operations_ for the exact commands).
-The loop no longer reads **`TASKS.md`** (any such file is retired to a historical
-record of earlier phases) — the three things a task file used to encode each map
-to a native GitHub primitive:
+The work breakdown maps onto native GitHub primitives:
 
-| Old (`TASKS.md`)            | Now (GitHub)                                                       |
-| --------------------------- | ------------------------------------------------------------------ |
-| A **phase** (`## Phase N`)  | A **map/spec issue** with its tasks linked as **sub-issues**       |
-| A **task** (checkbox + tag) | A **sub-issue** of that map                                        |
-| `deps:` between tasks       | Native **`blocked_by`** dependency edges                           |
-| The `§` a task cites        | Cited in the **sub-issue body** (the orchestrator slices those §s) |
+| Concept              | Represented as                                                     |
+| -------------------- | ------------------------------------------------------------------ |
+| A **phase**          | A **map/spec issue** with its tasks linked as **sub-issues**       |
+| A **task**           | A **sub-issue** of that map                                        |
+| Dependencies         | Native **`blocked_by`** dependency edges                           |
+| The `§` a task cites | Cited in the **sub-issue body** (the orchestrator slices those §s) |
 
 **Status encoding** — a sub-issue's state _is_ its status; no separate marker:
 
@@ -57,8 +55,8 @@ order wins. **The current map** is the earliest one with an open sub-issue.
 enabled (they are on GitHub by default).
 
 > **Concurrency = single worker (v1).** At most **one** sub-issue is claimed
-> (assigned) at a time — a faithful port of the old "at most one `in-progress`"
-> invariant, just stored on GitHub. The claim lock (`--add-assignee`) and native
+> (assigned) at a time — the "at most one `in-progress`" invariant, stored on
+> GitHub. The claim lock (`--add-assignee`) and native
 > dependencies are already the primitives a parallel pool needs; lifting the
 > single-claim invariant to N workers is the **only** additional change (see
 > _Parallel mode (future)_). Storage, frontier query, and close-on-commit are
@@ -95,9 +93,12 @@ The loop commits its work as it goes; `gh` infers the repo from the git remote.
 4. **Implement.** Spawn the **`implementer`** (Opus) with the sub-issue body and
    the **text of the `PLAN.md` sections it cites** — not the whole file (see
    _Context scoping_). It writes code **and** tests.
-5. **Fast gate.** Run `scripts/gate.sh` (lint + prettier + typecheck + unit). If
-   red, hand failures back to the implementer (draws from the shared 3-round
-   budget, step 7); do not review until green.
+5. **Fast gate — trust the implementer's run.** The implementer already ran
+   `scripts/gate.sh` and reports its result; that run is authoritative. Do **not**
+   re-run it here. If the implementer reports **red**, hand the failures straight
+   back (draws from the shared 3-round budget, step 7); do not review until it
+   reports green. The gate is verified for real exactly once per task, at commit
+   (step 8) — see _Gate discipline_.
 6. **Review.** Add `status:in-review` (`gh issue edit <n> --add-label status:in-review`).
    Spawn the **`reviewer`** (Sonnet) with the sub-issue body, the **same cited
    `PLAN.md` sections** passed in step 4 (see _Context scoping_), and the full
@@ -110,9 +111,12 @@ The loop commits its work as it goes; `gh` infers the repo from the git remote.
    unapproved → mark the sub-issue `blocked` (`--add-label status:blocked` + a
    comment with the reviewer notes, or failing gate output if review was never
    reached) and continue with other tasks.
-8. **Commit & close.** On APPROVE **and** green fast gate: commit (see _Commit
-   format_), then **close the issue** (`gh issue close <n>`) — closing
-   automatically unblocks its dependents via native dependencies.
+8. **Commit & close.** On APPROVE, run `scripts/gate.sh` **once** — this is the
+   orchestrator's single verification, and the only gate run it owns. If green:
+   commit (see _Commit format_), then **close the issue** (`gh issue close <n>`) —
+   closing automatically unblocks its dependents via native dependencies. If red
+   (the implementer misreported, or review-driven edits broke it), do not commit —
+   hand the failure back per step 7.
 9. **Reschedule** the loop and repeat.
 
 The orchestrator never writes feature code — it only manages issue status
@@ -160,6 +164,29 @@ the blocker is resolved and **closed**.
 - Both no-op cleanly before Phase 1 scaffolds `package.json`. After scaffold, the
   implementer wires these `package.json` scripts so the gate has teeth: `lint`,
   `format:check`, `check`, `test:unit`, `test:e2e`.
+
+### Gate discipline
+
+`scripts/gate.sh` takes time on a project this size, so who runs it is a real
+cost. **Per round it runs exactly twice**, and only once with the orchestrator's
+authority:
+
+| Who          | When                           | Runs it?                                   |
+| ------------ | ------------------------------ | ------------------------------------------ |
+| Implementer  | before reporting (step 4)      | ✅ its result is what the loop advances on |
+| Orchestrator | after the implementer (step 5) | ❌ trusts the report                       |
+| Reviewer     | during review (step 6)         | ❌ reads the tests instead                 |
+| Orchestrator | before commit (step 8)         | ✅ the one verification with teeth         |
+
+The safety property is unchanged: **nothing is ever committed on a red gate**,
+because step 8 verifies for real. Dropping the other two runs only means a
+misreported green is caught at commit rather than before review — which costs one
+round, the same as reporting red honestly. The implementer is told this
+explicitly, so the incentive points at accurate reporting.
+
+Exception: on **resume** (see _Resume contract_) the orchestrator runs the gate
+itself, because there is no implementer report for a working tree it did not just
+delegate.
 
 ## Commit format
 

@@ -28,7 +28,12 @@ fully and correctly, including tests.
    validation (covering the edge cases the plan's testing section calls out),
    integration/e2e tests where the task is a flow.
 4. Run the fast gate yourself: `bash scripts/gate.sh`. Fix lint, formatting, type,
-   and unit-test failures until green.
+   and unit-test failures until green. **Your run is the authoritative one** —
+   nobody re-runs it before review, so the loop advances on the result you report.
+   Report it exactly: green only if `gate.sh` exited 0 on the tree as you left it.
+   If you end red, say so and paste the failing output — a red gate reported
+   honestly costs one round; a green gate reported wrongly is caught at commit and
+   costs the same round plus the whole review.
 5. If the task (or part of it) needs a real secret/asset the human must supply
    (these are tracked with the `needs-info` label): build the
    **local-dev path**, leave a `// TODO NEEDS-INPUT:` note, and report that part

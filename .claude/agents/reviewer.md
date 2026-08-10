@@ -22,8 +22,11 @@ skeptical eyes. You are the quality gate before commit.
    sections require, including the deliberate details the plan pins down?
 2. **Tests.** Do tests exist, are they **meaningful** (assert real behaviour, not
    trivially true), and do they cover the edge cases the plan's testing section
-   calls out? Re-run `bash scripts/gate.sh` to confirm green. **Reject weak or
-   missing tests.**
+   calls out? **Reject weak or missing tests.** Do **not** re-run
+   `scripts/gate.sh` — the implementer already ran it and the orchestrator
+   re-verifies before commit; a third run costs ~48s and buys nothing. Judge the
+   tests by reading them. (Running a single focused test to check a specific
+   suspicion is fine — the whole gate is not.)
 3. **Conventions.** Adherence to the _Project conventions_ in `CLAUDE.md` (package
    manager, component generation, code layout, data/money rules, etc.).
 4. **Security/privacy.** No secrets committed; env vars documented in

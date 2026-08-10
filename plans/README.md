@@ -7,7 +7,7 @@ row when done.
 
 Context: PayWithMe is a SvelteKit 2 + Svelte 5 (runes) + Drizzle/Postgres
 bill-splitting PWA, built autonomously from `PLAN.md`. The build is complete
-(all 8 phases in `TASKS.md` are `@done`). Verification baseline at plan time:
+(all 8 phases done). Verification baseline at plan time:
 `pnpm check` → 0 errors; `pnpm test:unit` → 724 passing. These plans are
 incremental improvements, not part of the original build loop.
 
