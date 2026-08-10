@@ -172,10 +172,21 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		memberIds: formMembers.map((m) => m.id),
 		entryCurrencies
 	});
-	const form = await superValidate(detail.input, zod4(schema), {
-		// Don't surface validation errors on first paint — it's a faithful round-trip.
-		errors: false
-	});
+	// THIS transaction's own entry currency, resolved — what the read-only view formats
+	// with, and the scale the seeded edit form starts from.
+	const entryCurrency = resolveEntryCurrency(entryCurrencies, detail.currency);
+	const form = await superValidate(
+		// The reconstructed input carries amounts but not the SCALE they are in — that
+		// lives on the currency row, not on the transaction (§7.5.2). Seed it so the
+		// edit form starts valid and a save that changes only the title still states the
+		// scale it re-submitted the amounts at.
+		{ ...detail.input, currencyExponent: entryCurrency.exponent },
+		zod4(schema),
+		{
+			// Don't surface validation errors on first paint — it's a faithful round-trip.
+			errors: false
+		}
+	);
 
 	return {
 		form,
@@ -200,7 +211,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				},
 		// THIS transaction's own entry currency, resolved — what the read-only view
 		// formats `amountTotal`, payer amounts and item amounts with (§7.6 Display).
-		entryCurrency: resolveEntryCurrency(entryCurrencies, detail.currency),
+		entryCurrency,
 		currencies: entryCurrencies.map((c) => ({
 			code: c.code,
 			displayCode: c.displayCode,

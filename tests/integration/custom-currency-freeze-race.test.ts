@@ -179,6 +179,11 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 			date: '2026-08-09',
 			amountTotal: 300,
 			currency: beerCode,
+			// The scale these 300 minor units were parsed at. The service compares it to
+			// the row it locks, so a create that succeeds proves the row was still at
+			// exponent 2 — the same thing the settlement total proves here, stated
+			// directly rather than inferred from the arithmetic.
+			currencyExponent: 2,
 			exchangeRate: '1.5',
 			amountTotalSettlement: 450,
 			splitMode: 'equal' as const,
@@ -326,6 +331,104 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 		expect(typeof id).toBe('string');
 
 		await holder.query('commit');
+	});
+
+	// ── Finding 1, the CROSS-REQUEST half: the scale the caller parsed at ────────
+	//
+	// The lock above closes the window between this write's READ of the exponent and
+	// its INSERT. It cannot close the bigger one: the caller parsed its amounts in an
+	// EARLIER REQUEST, against a definition it read then, and a group-defined currency
+	// stays re-scalable until something references it. No interleaving trickery is
+	// needed for these — the edit commits first, completely, exactly as it would while
+	// a member has the add-transaction form open.
+
+	it('refuses amounts parsed at an exponent the currency no longer has', async () => {
+		// The form was opened while BEER was 2-dp; 3.00 BEER was typed (300 minor units);
+		// someone re-scaled BEER to 0-dp before Save. Those 300 units are now 300 beers.
+		await updateCustomCurrency({
+			userId: user.id,
+			groupId: group.id,
+			code: beerCode,
+			input: { exponent: 0 }
+		});
+
+		const stale = await settle(
+			createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				input: beerInput(`${IT_PREFIX}stale-exponent`),
+				settlementCurrency: 'THB'
+			})
+		);
+
+		expect(stale.ok).toBe(false);
+		expect((stale as { error: unknown }).error).toBeInstanceOf(TransactionValidationError);
+		const rows = await db.select().from(transactions).where(eq(transactions.groupId, group.id));
+		expect(rows).toHaveLength(0);
+	});
+
+	it('refuses it even when the SETTLEMENT TOTAL cannot tell the two scales apart', async () => {
+		// The case the §7.6 equality is blind to, and the reason the assertion exists.
+		// `amountTotalSettlement` is a ROUNDING of the conversion, and for a small enough
+		// amount × rate it is 0 at BOTH exponents:
+		//   0.01 BEER (exp 2) @ 0.000001 → ฿0.000001 → 0
+		//   1    BEER (exp 0) @ 0.000001 → ฿0.0001   → 0
+		// So the server used to recompute the total, agree at 0, and commit — storing
+		// `1` against a 0-dp row: ONE beer where the member entered a hundredth of one.
+		const parsedAtExponent2 = {
+			...beerInput(`${IT_PREFIX}rounds-to-zero`),
+			amountTotal: 1,
+			currencyExponent: 2,
+			exchangeRate: '0.000001',
+			amountTotalSettlement: 0,
+			payers: [{ memberId, amountPaid: 1 }]
+		};
+
+		await updateCustomCurrency({
+			userId: user.id,
+			groupId: group.id,
+			code: beerCode,
+			input: { exponent: 0 }
+		});
+
+		const stale = await settle(
+			createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				input: parsedAtExponent2,
+				settlementCurrency: 'THB'
+			})
+		);
+
+		expect(stale.ok).toBe(false);
+		expect((stale as { error: unknown }).error).toBeInstanceOf(TransactionValidationError);
+		const rows = await db.select().from(transactions).where(eq(transactions.groupId, group.id));
+		expect(rows).toHaveLength(0);
+	});
+
+	it('accepts the write once the caller states the scale the row is ACTUALLY at', async () => {
+		// The refusal is about the mismatch, not about the currency: re-entering the
+		// amount against the current definition succeeds. 3 BEER (0-dp) @ ฿1.50 = ฿4.50.
+		await updateCustomCurrency({
+			userId: user.id,
+			groupId: group.id,
+			code: beerCode,
+			input: { exponent: 0 }
+		});
+
+		const id = await createTransaction({
+			userId: user.id,
+			groupId: group.id,
+			input: {
+				...beerInput(`${IT_PREFIX}re-entered`),
+				amountTotal: 3,
+				currencyExponent: 0,
+				amountTotalSettlement: 450,
+				payers: [{ memberId, amountPaid: 3 }]
+			},
+			settlementCurrency: 'THB'
+		});
+		expect(typeof id).toBe('string');
 	});
 
 	// ── Finding 3: the display code the caller named, re-checked under the lock ──

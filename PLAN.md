@@ -740,6 +740,17 @@ and two entries both reading `USD` would be unresolvable.
 every stored amount recorded against it (the §6.4 hazard, same remedy). `name` and
 `symbol` stay editable.
 
+**Every write states the scale it was entered at.** The freeze protects amounts
+already stored; an amount still in flight was parsed against a definition the
+client read in an _earlier request_, and until the row is referenced that
+definition can still move. So a transaction write carries `currency_exponent` —
+the exponent its minor units were parsed at — which the service checks against the
+row it has locked, and **requires** when the entry currency is group-defined (a
+seeded exponent can never move, so those writes assert nothing). A mismatch is a
+422 on `currency`: re-enter the amount, never re-interpret it. The §7.6 settlement
+total does not cover this — it compares two roundings of one conversion, and both
+round to zero for a small enough amount × rate (ADR-0014 decision 9).
+
 **Always foreign, so a rate is always required.** A custom currency can never equal
 the settlement currency, so §7.6's rate-1 same-currency seam never applies and the
 FX field is always shown. A unit with no meaningful rate therefore can't be
@@ -770,6 +781,10 @@ directions and the opaque `code` never appears on the wire (ADR-0014 decision 8)
   in (the seeded 29 plus its own custom rows) so a client can discover one it has
   not already seen on a transaction. The global `GET /currencies` is unchanged and
   stays the static §7.5.1 seeded table.
+- A write in a group-defined currency also sends **`currency_exponent`**, the
+  `exponent` that endpoint served alongside the code — the scale its minor units
+  are in (see "Every write states the scale it was entered at" above). Not needed
+  for a seeded code.
 - An unknown or another group's display code fails exactly as an unknown code
   does, with the one shared message — nothing leaks about what exists elsewhere.
 

@@ -305,6 +305,10 @@ paths:
         - Same-currency is the trivial case: `exchangeRate: "1"` and
           `amountTotalSettlement == amountTotal`.
         - `Σ payers[].amountPaid` must equal `amountTotal`.
+        - Recording in a currency the group defined for itself? Send `currencyExponent`
+          too — the `exponent` you read for that code. It pins the scale your minor units
+          are in, which a group-defined currency can still change until its first
+          transaction exists.
 
         Send an `Idempotency-Key` header (strongly recommended): a retry with the same
         key and the same body replays the original response instead of creating a second
@@ -1013,6 +1017,8 @@ components:
         - `Σ payers[].amountPaid == amountTotal`;
         - `amountTotalSettlement == round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`;
         - `exchangeRate` must be exactly `"1"` when `currency` is the group's settlement currency;
+        - `currencyExponent`, when sent, must equal `currency`'s current `exponent` — and it
+          must be sent when `currency` is one the group defined for itself;
         - `amount` split → `Σ rawAmount == amountTotal`; `share` split → `Σ shareWeight > 0`;
         - `itemized` requires at least one item and is **spending only**;
         - every `memberId` must be an active member of the group;
@@ -1050,6 +1056,23 @@ components:
           type: integer
           minimum: 0
           description: The total in `currency`'s minor units. Must be greater than zero unless `itemized`.
+        currencyExponent:
+          type: integer
+          minimum: 0
+          maximum: 3
+          description: |
+            The `exponent` of `currency` **as you read it** — the scale every minor-unit
+            amount in this body was computed at. **Required when `currency` is a code the
+            group defined for itself**; optional (but still checked) for an ISO-4217 one.
+
+            A group-defined currency's `exponent` can still be changed until the first
+            transaction is recorded in it, so `amountTotal: 1` means `0.01 BEER` at
+            exponent `2` and `1 BEER` at exponent `0` — and nothing else in this body says
+            which you meant. Send the `exponent` that `GET /groups/{gid}/currencies`
+            returned alongside the code, and the server refuses the write if the currency
+            was re-scaled in between (a `422 validation_error` naming `currency`) rather
+            than storing your amounts at a scale you did not use. ISO-4217 exponents never
+            change, so nothing is required for them.
         currency:
           allOf: [{ $ref: '#/components/schemas/DisplayCurrencyCode' }]
           description: |

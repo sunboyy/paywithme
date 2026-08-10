@@ -240,6 +240,15 @@ export async function createTransaction({
 			await resolveEntryCurrencies(groupId, input, tx),
 			expectedDisplayCode
 		);
+		// Validating against THOSE descriptors is what binds the caller's minor units to
+		// a scale. The payload's `currencyExponent` states the exponent it parsed at, and
+		// the schema compares it against the row we hold `FOR SHARE`. Without that
+		// comparison the freeze is only half a guarantee: it stops the exponent moving
+		// between our READ and our INSERT, but the caller parsed its amounts in an EARLIER
+		// REQUEST, and a group-defined currency stays re-scalable until something
+		// references it (ADR-0014 decision 5). The §7.6 settlement equality catches most of
+		// that gap incidentally — but not the case where both scales round the settlement
+		// total to 0, which is why the assertion has to be on the scale itself.
 		const schema = buildTransactionSchema({
 			settlementCurrency: currency,
 			memberIds,
@@ -1589,6 +1598,9 @@ export async function updateTransaction({
 			await resolveEntryCurrencies(groupId, input, tx),
 			expectedDisplayCode
 		);
+		// The same scale binding as `createTransaction`: `currencyExponent` is checked
+		// against the row locked above, so an edit can no more be recorded at a scale it
+		// was not entered at than a create can.
 		const schema = buildTransactionSchema({
 			settlementCurrency: currency,
 			memberIds,
