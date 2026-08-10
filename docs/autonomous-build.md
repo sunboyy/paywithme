@@ -22,7 +22,6 @@ below. The protocol is otherwise unchanged between projects.
 | Spec          | `PLAN.md`                                                | _What_ to build                                           | ❌ per project        |
 | Task tracker  | **GitHub Issues** (map issue + sub-issues, `blocked_by`) | Progress source-of-truth                                  | ✅ (issue-tracker.md) |
 | Project guide | `CLAUDE.md`                                              | Project conventions + pointer here                        | ❌ per project        |
-| Build branch  | `impl/autonomous-build`                                  | Where the loop commits                                    | ✅                    |
 
 ## Task tracker: GitHub Issues
 
@@ -74,8 +73,7 @@ Driven by the `/loop` skill in an interactive session; the main agent is the
 /loop continue the autonomous build per docs/autonomous-build.md
 ```
 
-The build commits to **`impl/autonomous-build`**. `main` advances only when the
-human merges at phase boundaries. `gh` infers the repo from the git remote.
+The loop commits its work as it goes; `gh` infers the repo from the git remote.
 
 ## Orchestrator loop (each tick)
 
@@ -172,30 +170,25 @@ One commit per completed task. Conventional commits, referencing the **issue**:
 
 <what/why, 1–3 lines>
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
 Commit only when the fast gate is green **and** the reviewer approved, then
 `gh issue close <n>` (step 8). Do **not** rely on a `Closes #n` keyword to
-auto-close: the loop commits to `impl/autonomous-build`, and GitHub only
-auto-closes on merge to the **default** branch — so close explicitly at commit
-time (the merge to `main` then reconciles cleanly).
+auto-close — GitHub only fires that on merge to the **default** branch, which the
+loop does not do. Close explicitly at commit time; any later integration then
+reconciles cleanly.
 
 ## Phase boundary (human checkpoint)
 
 When the current map has no actionable sub-issue left (all closed, or the only
 open ones are `status:blocked`) and the full gate is green, the loop stops and
 reports the phase status — **fully done** or **done-with-blocks** (listing each
-blocked sub-issue and reason) per loop step 3 — then asks the human to:
+blocked sub-issue and reason) per loop step 3 — and hands back to the human,
+naming exactly what was committed so it can be reviewed and integrated.
 
-```
-git checkout main
-git merge --no-ff impl/autonomous-build
-git checkout impl/autonomous-build   # continue next phase here
-```
-
-Then restart the loop. The loop **never auto-merges to `main`** — that's the
-human's per-phase checkpoint.
+The human restarts the loop for the next phase. The loop **never integrates or
+publishes its own work** — that is the human's per-phase checkpoint.
 
 ## Resume contract (continuable across token-out / API error)
 
@@ -236,7 +229,7 @@ close-on-commit are already parallel-safe. To lift it:
   workers can never grab the same issue.
 - **Isolate the tree.** Parallel workers cannot share one working tree (gate runs
   and commits collide) — give each a **git worktree** (or branch-per-issue) and
-  merge each into `impl/autonomous-build` on its own commit + close.
+  fold each back into the build's line of work on its own commit + close.
 - **Re-fan on completion.** Each close unblocks dependents; re-run the frontier
   query and claim the newly-open issues. The graph drains itself (e.g. closing the
   write-endpoints issue opens the idempotency/rate-limit/audit/docs fan-out).
@@ -251,4 +244,4 @@ boundary — is unchanged. Adopt when token budget allows.
 - Implementer never commits, and never changes issue status.
 - Reviewer never edits files.
 - No secrets in git.
-- The loop never auto-merges to `main`.
+- The loop never merges or pushes — integration is the human's checkpoint.
