@@ -301,6 +301,38 @@ describe('removeMember (PLAN §6.3 — soft-deactivate vs hard-delete)', () => {
 		expect((updateCalls[0].set as Record<string, unknown>).deactivatedAt).toBeInstanceOf(Date);
 		expect(deleteCalls).toHaveLength(0);
 	});
+
+	it('soft-deactivates when the DEFAULT predicate finds a payer row', async () => {
+		// No second argument: drives the REAL `memberHasActivity`, not the seam.
+		// SELECT order: access check, member lookup, transaction_payers probe.
+		queueSelects(ACCESS_OK, TARGET_MEMBER, [{ memberId: 'm1' }]);
+		const result = await removeMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
+
+		expect(result.action).toBe('soft_deactivate');
+		expect(updateCalls).toHaveLength(1);
+		expect(deleteCalls).toHaveLength(0);
+	});
+
+	it('hard-deletes when the DEFAULT predicate finds no payer and no share row', async () => {
+		// SELECT order: access check, member lookup, empty payers probe, empty
+		// shares probe.
+		queueSelects(ACCESS_OK, TARGET_MEMBER, [], []);
+		const result = await removeMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
+
+		expect(result.action).toBe('hard_delete');
+		expect(deleteCalls).toHaveLength(1);
+		expect(updateCalls).toHaveLength(0);
+	});
+
+	it('soft-deactivates when the DEFAULT predicate finds only a share row', async () => {
+		// Payer probe empty, share probe finds a row.
+		queueSelects(ACCESS_OK, TARGET_MEMBER, [], [{ memberId: 'm1' }]);
+		const result = await removeMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' });
+
+		expect(result.action).toBe('soft_deactivate');
+		expect(updateCalls).toHaveLength(1);
+		expect(deleteCalls).toHaveLength(0);
+	});
 });
 
 describe('reactivateMember (PLAN §6.3 — flag flip)', () => {
