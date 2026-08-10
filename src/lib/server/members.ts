@@ -31,6 +31,7 @@
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { members } from './db/groups-schema';
+import { transactionPayers, transactionShares } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog } from './audit';
 
@@ -104,23 +105,40 @@ async function getGroupMemberOrThrow(
 }
 
 /**
- * Does this member have any ledger activity (a payer/share row in any
- * transaction)? The transaction payer/share tables are Phase 4 (task 4.2) and do
- * NOT exist yet, so this currently always returns `false`. Wiring it later is a
- * one-line change.
+ * Does this member have any ledger activity — a payer row or a share row in ANY
+ * transaction (PLAN §6.3)? This is what decides soft-deactivate vs hard-delete:
+ * `members.id` is referenced with ON DELETE CASCADE from `transaction_payers`,
+ * `transaction_shares` and `transaction_item_beneficiaries`, so hard-deleting a
+ * member with activity would silently erase their rows from the ledger and shift
+ * every other member's balance.
+ *
+ * SOFT-DELETED TRANSACTIONS COUNT. A soft-deleted transaction can be restored
+ * (PLAN §9) and still stores this member's amounts, so we deliberately do NOT
+ * join to `transactions` to filter on `deleted_at` — the same rule
+ * `currency-usage.ts` applies to currency references.
+ *
+ * PAYERS ∪ SHARES IS COMPLETE. An itemized split aggregates every item
+ * beneficiary into a per-member `transaction_shares` row
+ * (`lib/transactions/resolve.ts`), so a member reachable via
+ * `transaction_item_beneficiaries` always has a share row too. Two probes, not
+ * three.
+ *
+ * Runs on the passed executor so it shares the caller's transaction.
  */
 async function memberHasActivity(memberId: string, executor: DbExecutor = db): Promise<boolean> {
-	// TODO(4.2): true if any transaction_payers/transaction_shares row references
-	// this member, e.g.
-	//   const rows = await executor
-	//     .select({ id: transactionShares.id })
-	//     .from(transactionShares)
-	//     .where(eq(transactionShares.memberId, memberId))
-	//     .limit(1);
-	//   return rows.length > 0;   // (union with transaction_payers)
-	void memberId;
-	void executor;
-	return false;
+	const payerRows = await executor
+		.select({ memberId: transactionPayers.memberId })
+		.from(transactionPayers)
+		.where(eq(transactionPayers.memberId, memberId))
+		.limit(1);
+	if (payerRows.length > 0) return true;
+
+	const shareRows = await executor
+		.select({ memberId: transactionShares.memberId })
+		.from(transactionShares)
+		.where(eq(transactionShares.memberId, memberId))
+		.limit(1);
+	return shareRows.length > 0;
 }
 
 /**
