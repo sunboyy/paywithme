@@ -186,6 +186,10 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				categoryId: prefill.categoryId,
 				amountTotal: prefill.amount,
 				currency: settlementCurrency,
+				// The scale the amounts are expressed at (§7.5.2) — the settlement
+				// currency's here, since that is what the picker defaults to. The form
+				// keeps it in step with the picker; seeding it makes the no-JS POST valid.
+				currencyExponent: currency?.exponent ?? 2,
 				exchangeRate: '1',
 				amountTotalSettlement: prefill.amount,
 				splitMode: 'equal' as const,
@@ -206,6 +210,9 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				categoryId: defaultCategoryFor('spending'),
 				amountTotal: 0,
 				currency: settlementCurrency,
+				// See the prefill branch: the entry currency's exponent travels with the
+				// amounts it gives meaning to.
+				currencyExponent: currency?.exponent ?? 2,
 				exchangeRate: '1',
 				amountTotalSettlement: 0,
 				splitMode: 'equal' as const,

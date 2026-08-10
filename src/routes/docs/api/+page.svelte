@@ -258,6 +258,19 @@
 					stored under is never disclosed, and is not accepted either.
 				</p>
 				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
+					When you write in a group-defined currency, send its
+					<code class="font-mono text-xs">currencyExponent</code> along with the amounts — the
+					<code class="font-mono text-xs">exponent</code> you read for that code. Unlike a listed
+					currency, a group-defined one can still be
+					<strong class="font-medium text-foreground">re-scaled</strong> until its first transaction
+					exists, and
+					<code class="font-mono text-xs">{'{ "amountTotal": 1 }'}</code> is 0.01 at exponent 2 but
+					1 at exponent 0. Stating the scale you used lets the server refuse a write that would land
+					at a different one — a <code class="font-mono text-xs">422</code> naming
+					<code class="font-mono text-xs">currency</code> — instead of silently recording a hundred times
+					the amount. Listed currencies never move, so they need nothing.
+				</p>
+				<p class="max-w-prose text-sm text-pretty text-muted-foreground">
 					Each group has a <strong class="font-medium text-foreground">settlement currency</strong>:
 					balances and shares are always in it. A transaction may be entered in another currency, in
 					which case you must supply the conversion — the exchange rate as a

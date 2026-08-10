@@ -80,7 +80,10 @@ be `$`).
 **5. `exponent` and `display_code` freeze on first reference; `name` and `symbol`
 stay editable.** Once any transaction references the row, changing its exponent
 would silently reinterpret every stored minor-unit amount against it — the same
-hazard §6.4 locks the settlement currency against, and the same remedy.
+hazard §6.4 locks the settlement currency against, and the same remedy. (The freeze
+protects amounts already _stored_. Amounts still _in flight_ — parsed by a client
+against a definition it read in an earlier request — need the assertion in
+"Amendment: a write states the scale it was entered at" below.)
 
 **6. A custom currency is always foreign, so a rate is always required.** It can
 never equal the settlement currency, so §7.6's rate-1 same-currency seam never
@@ -215,6 +218,52 @@ re-introduces exactly what decision 7's read fix removed, and leaves the API
 speaking two different currency vocabularies depending on the endpoint. The
 display code is the identifier the domain already treats as public
 (`CONTEXT.md`, "Display code"); the opaque one exists to be invisible.
+
+## Amendment: a write states the scale it was entered at
+
+_2026-08-10, issue #69 follow-up. Adds decision 9._
+
+**9. Every write carries `currency_exponent` — the exponent the caller parsed its
+minor units at — and it is required when the entry currency is group-defined.**
+The service compares it against the row it holds `FOR SHARE` and refuses a
+mismatch, rather than storing the amounts at a scale nobody used.
+
+Decision 5's freeze, and the row locks added for issue #69 finding 1, both operate
+_inside_ one write transaction: together they guarantee the exponent cannot move
+between the service reading it and inserting the referencing row. The amounts,
+however, were parsed **in an earlier request** — a form loaded minutes ago, a REST
+client that read `GET /groups/{gid}/currencies` before composing its body. A
+currency nothing references yet is still re-scalable in that window, and
+`amount_total: 1` is `0.01 BEER` at exponent 2 and `1 BEER` at exponent 0. Nothing
+else in the payload records which was meant.
+
+The §7.6 settlement equality masks most of this by accident: the server recomputes
+`amount_total_settlement` from the resolved exponent, so a stale scale usually
+produces a mismatch and a 422. It is **not** a guarantee, because that check
+compares two _roundings_ of the same conversion, and both round to zero for a small
+enough amount × rate (`0.01 BEER` and `1 BEER` at rate `0.000001` are both `฿0.00`).
+The settlement total then agrees at 0 and the write commits with a 100× error in the
+entry-currency amount. A guard on a value _derived_ from the scale cannot protect
+the scale; the assertion has to name it.
+
+Required only for a group-defined currency: the seeded 29 are compiled in and their
+exponents cannot move, so a write in one has nothing to assert and every payload
+written before this field existed stays valid. Requiring it costs REST clients
+nothing they were not already doing — an integer minor-unit API cannot be consumed
+without fetching exponents in the first place (§16.4), so the client always has the
+number to echo. The web form fills it from the currency picker.
+
+**Why not freeze the exponent at creation instead.** It would close the whole class
+— an unreferenced currency can be deleted and re-created, so "edit the exponent" is
+never the only route to a fix — but it contradicts §7.5.2's editable-until-referenced
+rule for no gain the assertion does not already deliver, and it would make a typo in
+a brand-new currency unfixable in place.
+
+**Why not reject a settlement total of zero.** That closes the arithmetic collision
+(the only way two scales agree is at 0) without a new field, but it rejects
+legitimate writes — 1 VND in a THB group really does round to ฿0.00 — and it leaves
+the itemized `amount_total == 0` case (a 100%-off discount) open, where the item
+amounts are still mis-scaled. It treats a symptom of the missing binding.
 
 ## Consequences
 

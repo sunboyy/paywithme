@@ -336,6 +336,14 @@
 		// settle once the derived values match the form state.
 		if ($formData.amountTotal !== total) $formData.amountTotal = total;
 		if ($formData.currency !== entryCode) $formData.currency = entryCode;
+		// The SCALE every minor-unit field above was parsed at (§7.5.2). It travels with
+		// the amounts because it is the only thing that says what they mean: a
+		// group-defined currency can still be re-scaled until a transaction references
+		// it, and the server compares this against the row it stores against rather than
+		// reinterpreting the numbers (`currencyExponent` in the shared schema).
+		if ($formData.currencyExponent !== entryCurrency.exponent) {
+			$formData.currencyExponent = entryCurrency.exponent;
+		}
 		if ($formData.exchangeRate !== nextRate) $formData.exchangeRate = nextRate;
 		if ($formData.amountTotalSettlement !== nextSettlement) {
 			$formData.amountTotalSettlement = nextSettlement;
@@ -981,6 +989,10 @@
 	<input type="hidden" name="amountTotalSettlement" value={$formData.amountTotalSettlement} />
 	<input type="hidden" name="exchangeRate" value={$formData.exchangeRate} />
 	<input type="hidden" name="currency" value={$formData.currency} />
+	<!-- The scale the amounts above were parsed at (§7.5.2). Seeded from `load` so the
+	     no-JS POST carries it too — the effect that keeps it in sync with the picker
+	     only runs in the browser. -->
+	<input type="hidden" name="currencyExponent" value={$formData.currencyExponent} />
 	<input type="hidden" name="splitMode" value={$formData.splitMode} />
 	<input type="hidden" name="type" value={$formData.type} />
 	<input type="hidden" name="categoryId" value={$formData.categoryId} />

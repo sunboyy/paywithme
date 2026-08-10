@@ -30,6 +30,10 @@
 //       that group's own custom rows); rate==1 iff `currency` == settlement;
 //       rate>0 for a foreign currency; and the SCALAR
 //       `amount_total_settlement == convert(amount_total, rate)`.
+//   - The SCALE those minor units were parsed at (§7.5.2): `currency_exponent`, the
+//       caller's statement of the entry currency's exponent, must equal the resolved
+//       row's — and is REQUIRED for a group-defined currency, whose exponent can
+//       still move until a transaction references it (ADR-0014 decision 5).
 //
 // It DELIBERATELY DOES NOT do (out of scope for task 4.4 — noted at each rule):
 //   - **Split RESOLUTION** (equal/share/amount/itemized → per-member resolved
@@ -73,6 +77,7 @@
 
 import { z } from 'zod';
 import {
+	isCustomCurrency,
 	toCurrencyDescriptor,
 	SEEDED_CURRENCY_DESCRIPTORS,
 	type CurrencyDescriptor,
@@ -181,6 +186,48 @@ const exchangeRateField = z
 		message: 'Exchange rate must be a positive number with up to 6 decimal places'
 	})
 	.refine((s) => Number(s) > 0, { message: 'Exchange rate must be greater than 0' });
+
+/**
+ * `currency_exponent` — THE SCALE THE CALLER'S MINOR UNITS WERE PARSED AT
+ * (issue #69 finding 1, the cross-request half; PLAN §7.5.2 "Immutability").
+ *
+ * Every money field in this payload is an integer in the ENTRY CURRENCY's minor
+ * units, parsed from what the user typed by whoever built the request — so `1` means
+ * `0.01 BEER` at exponent 2 and `1 BEER` at exponent 0. NOTHING else in the payload
+ * records which of those was meant, and for a group-defined currency the exponent is
+ * only frozen once a transaction references the row (ADR-0014 decision 5). A currency
+ * that no transaction references yet can therefore be re-scaled between the moment a
+ * client read its exponent and the moment it submits, and the amounts arrive meaning
+ * something the sender never wrote. This field is the caller stating the scale it
+ * used, so the server can refuse rather than reinterpret; see the refinement in
+ * {@link buildTransactionSchema} for why the settlement-total check is not enough.
+ *
+ * Optional in SHAPE, required in the built schema for a group-defined currency —
+ * the seeded 29 are compiled in and their exponents never move, so a caller
+ * recording in `THB` has nothing to assert and pre-existing bodies stay valid.
+ */
+const currencyExponentField = z
+	.number({ message: 'A currency exponent is required' })
+	.int({ message: 'The currency exponent must be a whole number' })
+	.min(0, { message: 'The currency exponent must be between 0 and 3' })
+	.max(3, { message: 'The currency exponent must be between 0 and 3' })
+	.optional();
+
+/**
+ * The entry currency was re-scaled after the caller parsed its amounts, so the
+ * submitted minor units no longer mean what the sender wrote. Recoverable by
+ * re-entering the amount against the currency's current definition.
+ */
+export const STALE_CURRENCY_EXPONENT_MESSAGE =
+	"This currency's decimal places changed while the amount was being entered — check the amount and try again";
+
+/**
+ * A write in a group-defined currency arrived with no `currencyExponent` to check.
+ * Refused rather than assumed: the assumption we would have to make is exactly the
+ * one that silently mis-scales the amount.
+ */
+export const MISSING_CURRENCY_EXPONENT_MESSAGE =
+	'A transaction in a currency this group defined must state the currency exponent its amounts were entered at';
 
 /** Transaction type (PLAN §7.1). Drives which categories apply and whether itemized is allowed. */
 const transactionTypeSchema = z.enum(['spending', 'transfer'], {
@@ -637,6 +684,9 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 				// guards the group's SETTLEMENT currency, which a custom currency may
 				// never be (ADR-0014 decision 1).
 				currency: buildEntryCurrencySchema(entryCurrencies),
+				// The scale `amountTotal` (and every other minor-unit field) was parsed
+				// at — asserted against the resolved row below (PLAN §7.5.2).
+				currencyExponent: currencyExponentField,
 				exchangeRate: exchangeRateField,
 				// Canonical settlement total (settlement-currency minor units) — its
 				// equality to convert(amountTotal, rate) is checked below (§7.6 scalar).
@@ -763,6 +813,55 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 				},
 				{ message: 'The transaction total cannot be negative', path: ['amountTotal'] }
 			)
+			// ── The entry currency is at the SCALE the caller parsed at (§7.5.2). ────
+			//    Every minor-unit field in this payload is meaningless without an
+			//    exponent, and a group-defined currency's exponent may still MOVE until
+			//    a transaction references it (ADR-0014 decision 5). The submitted
+			//    `currencyExponent` is the caller's statement of the scale it used; here
+			//    it is compared against the row this write will actually be stored
+			//    against. On the server that row was read under the `FOR SHARE` the write
+			//    transaction holds (`lib/server/transactions.ts`), so a match means the
+			//    scale cannot move again before the insert — which is what turns "the
+			//    exponent was right when we read it" into "the exponent was right when we
+			//    stored it".
+			//
+			//    Why the §7.6 settlement equality below does NOT already cover this: it
+			//    compares two roundings of the same conversion, and both round to 0 for a
+			//    small enough amount × rate. A stale exponent then changes the recorded
+			//    amount by a factor of 10^n while the settlement total agrees at 0, and
+			//    the write commits — so the check has to be on the SCALE itself, not on
+			//    an amount derived from it.
+			.superRefine((tx, ctx) => {
+				const entry = entryOf(tx.currency);
+				// Unreachable from a successful parse (`currency` was validated against
+				// this very set); a bad code fails there, never twice here.
+				if (entry === undefined) return;
+
+				if (tx.currencyExponent === undefined) {
+					// Seeded currencies are compiled in and immutable, so there is nothing
+					// to assert and every pre-existing payload stays valid. A group-defined
+					// one MUST be asserted — see `currencyExponentField`.
+					if (isCustomCurrency(entry)) {
+						ctx.addIssue({
+							code: 'custom',
+							message: MISSING_CURRENCY_EXPONENT_MESSAGE,
+							path: ['currency']
+						});
+					}
+					return;
+				}
+
+				if (tx.currencyExponent !== entry.exponent) {
+					// Reported on `currency` (the rendered field), not on the hidden
+					// assertion: the currency is what changed, and that is where the form
+					// can show it.
+					ctx.addIssue({
+						code: 'custom',
+						message: STALE_CURRENCY_EXPONENT_MESSAGE,
+						path: ['currency']
+					});
+				}
+			})
 			// ── FX: rate == 1 iff currency == settlement (PLAN §7.6 / §7.4). ─────────
 			.refine((tx) => tx.currency !== settlementCurrency || Number(tx.exchangeRate) === 1, {
 				message: 'When the currency matches the group settlement currency the rate must be 1',
@@ -785,6 +884,11 @@ export function buildTransactionSchema(options: BuildTransactionSchemaOptions) {
 					if (entry === undefined) {
 						// Unreachable from a successful parse — `currency` was validated against
 						// this very set. Never fail twice for one cause.
+						return true;
+					}
+					// A stale exponent already failed above, and it is precisely what makes
+					// this equality fail — one cause, one issue.
+					if (tx.currencyExponent !== undefined && tx.currencyExponent !== entry.exponent) {
 						return true;
 					}
 					return (

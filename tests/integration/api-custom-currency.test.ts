@@ -27,9 +27,13 @@
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { createGroup } from '$lib/server/groups';
-import { createCustomCurrency } from '$lib/server/currencies';
+import { createCustomCurrency, updateCustomCurrency } from '$lib/server/currencies';
 import { transactions } from '$lib/server/db/transactions-schema';
 import { UNSUPPORTED_CURRENCY_MESSAGE } from '$lib/schemas/currency';
+import {
+	MISSING_CURRENCY_EXPONENT_MESSAGE,
+	STALE_CURRENCY_EXPONENT_MESSAGE
+} from '$lib/schemas/transaction';
 import { CURRENCIES } from '$lib/money';
 import { cleanupSuiteRows, createTestUser, db, describeIntegration, IT_PREFIX } from './helpers';
 import { apiCall, cleanupApiKeyRows, mintApiKey, type TestApiKey } from './api-client';
@@ -89,6 +93,12 @@ describeIntegration('integration: /api/v1 custom-currency vocabulary (issue #68)
 	 * A spending of `3 BEER` at 250 USD-cents each — so the §7.6 settlement total is
 	 * 750.00 in the group's settlement currency. `currency` is the DISPLAY code,
 	 * which is the only currency vocabulary a client of this API has.
+	 *
+	 * `currencyExponent` is the OTHER half of that vocabulary: `GET
+	 * /groups/{gid}/currencies` serves the code and its exponent together, and a write
+	 * in a group-defined currency has to echo the exponent it read — those `3` minor
+	 * units mean nothing without it, and the row can still be re-scaled until this very
+	 * transaction references it (§7.5.2).
 	 */
 	function beerBody(currency = 'BEER', title = 'Three beers') {
 		return {
@@ -97,6 +107,7 @@ describeIntegration('integration: /api/v1 custom-currency vocabulary (issue #68)
 			categoryId: SPENDING_CATEGORY,
 			amountTotal: 3,
 			currency,
+			currencyExponent: 0,
 			exchangeRate: '250',
 			amountTotalSettlement: 75000,
 			splitMode: 'equal' as const,
@@ -167,6 +178,55 @@ describeIntegration('integration: /api/v1 custom-currency vocabulary (issue #68)
 		expect(await storedCurrency(txnId)).toBe(beerCode);
 	});
 
+	// ── 2b. The SCALE those minor units are in (issue #69 finding 1, cross-request) ──
+
+	it('a write in a group-defined currency must state the exponent it used', async () => {
+		// `amountTotal: 3` is 3 beers or 0.03 beers depending on a number that lives on
+		// the currency row, not in the body — and that row is still re-scalable until this
+		// transaction exists. There is no safe assumption to make, so the write is refused.
+		const noExponent = { ...beerBody(), currencyExponent: undefined };
+		const res = await apiCall(`POST`, `/api/v1/groups/${s.group.id}/transactions`, {
+			key: s.writeKey.key,
+			body: noExponent
+		});
+
+		expect(res.status).toBe(422);
+		expect(res.body).toMatchObject({
+			error: {
+				code: 'validation_error',
+				details: { fieldErrors: { currency: [MISSING_CURRENCY_EXPONENT_MESSAGE] } }
+			}
+		});
+	});
+
+	it('a re-scale between reading the currency and writing it is refused, not reinterpreted', async () => {
+		// The client read BEER at exponent 0 (`GET /groups/{gid}/currencies`) and sized its
+		// amounts to it. Before the write lands, a member re-scales BEER to 2-dp — legal,
+		// because nothing references it yet. Those `3` minor units would now be 0.03 beers.
+		await updateCustomCurrency({
+			userId: s.user.id,
+			groupId: s.group.id,
+			code: beerCode,
+			input: { exponent: 2 }
+		});
+
+		const res = await apiCall(`POST`, `/api/v1/groups/${s.group.id}/transactions`, {
+			key: s.writeKey.key,
+			body: beerBody()
+		});
+
+		expect(res.status).toBe(422);
+		expect(res.body).toMatchObject({
+			error: {
+				code: 'validation_error',
+				details: { fieldErrors: { currency: [STALE_CURRENCY_EXPONENT_MESSAGE] } }
+			}
+		});
+		// Nothing was recorded at a scale the client never used.
+		const rows = await db.select().from(transactions).where(eq(transactions.groupId, s.group.id));
+		expect(rows).toHaveLength(0);
+	});
+
 	// ── 3. One indistinguishable failure for every bad code ─────────────────────
 
 	it('the OPAQUE row key is REJECTED on the write path, exactly like an unknown code', async () => {
@@ -234,6 +294,10 @@ describeIntegration('integration: /api/v1 custom-currency vocabulary (issue #68)
 					title: 'Dinner',
 					amountTotal: amount,
 					currency: s.group.settlementCurrency,
+					// Omitted, as a pre-#68 client would: a seeded currency's exponent is
+					// compiled in and cannot move, so there is nothing for a write in one to
+					// assert. `JSON.stringify` drops the key, so this body IS the old one.
+					currencyExponent: undefined,
 					exchangeRate: '1',
 					amountTotalSettlement: amount,
 					payers: [{ memberId: s.alice, amountPaid: amount }]

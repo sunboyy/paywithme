@@ -429,7 +429,7 @@
 				"tags": ["Transactions"],
 				"operationId": "createTransaction",
 				"summary": "Create a transaction",
-				"description": "Records a spending or a transfer. Requires a `write` key.\n\nThe body is the complete transaction input (the same payload the web app\nsubmits). Note in particular:\n\n- `amountTotal` is in **`currency`'s** minor units; `amountTotalSettlement` is\n  the same money expressed in the **group's settlement currency**, and you must\n  supply it. It is re-checked server-side and must equal exactly\n  `round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`,\n  where `exp_x` is the currency's `exponent` from `GET /currencies`. A mismatch\n  is a `422 validation_error` naming `amountTotalSettlement`.\n- Same-currency is the trivial case: `exchangeRate: \"1\"` and\n  `amountTotalSettlement == amountTotal`.\n- `Σ payers[].amountPaid` must equal `amountTotal`.\n\nSend an `Idempotency-Key` header (strongly recommended): a retry with the same\nkey and the same body replays the original response instead of creating a second\ntransaction.\n",
+				"description": "Records a spending or a transfer. Requires a `write` key.\n\nThe body is the complete transaction input (the same payload the web app\nsubmits). Note in particular:\n\n- `amountTotal` is in **`currency`'s** minor units; `amountTotalSettlement` is\n  the same money expressed in the **group's settlement currency**, and you must\n  supply it. It is re-checked server-side and must equal exactly\n  `round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`,\n  where `exp_x` is the currency's `exponent` from `GET /currencies`. A mismatch\n  is a `422 validation_error` naming `amountTotalSettlement`.\n- Same-currency is the trivial case: `exchangeRate: \"1\"` and\n  `amountTotalSettlement == amountTotal`.\n- `Σ payers[].amountPaid` must equal `amountTotal`.\n- Recording in a currency the group defined for itself? Send `currencyExponent`\n  too — the `exponent` you read for that code. It pins the scale your minor units\n  are in, which a group-defined currency can still change until its first\n  transaction exists.\n\nSend an `Idempotency-Key` header (strongly recommended): a retry with the same\nkey and the same body replays the original response instead of creating a second\ntransaction.\n",
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/IdempotencyKey"
@@ -1494,7 +1494,7 @@
 			},
 			"TransactionInput": {
 				"type": "object",
-				"description": "The complete transaction payload — the same body for a create (`POST`) and a full\nreplacement (`PUT`). Beyond the per-field rules, the server enforces:\n\n- `Σ payers[].amountPaid == amountTotal`;\n- `amountTotalSettlement == round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`;\n- `exchangeRate` must be exactly `\"1\"` when `currency` is the group's settlement currency;\n- `amount` split → `Σ rawAmount == amountTotal`; `share` split → `Σ shareWeight > 0`;\n- `itemized` requires at least one item and is **spending only**;\n- every `memberId` must be an active member of the group;\n- `categoryId` must exist and apply to `type`.\n\nA violation is a `422 validation_error` whose `details.fieldErrors` names the field.\n",
+				"description": "The complete transaction payload — the same body for a create (`POST`) and a full\nreplacement (`PUT`). Beyond the per-field rules, the server enforces:\n\n- `Σ payers[].amountPaid == amountTotal`;\n- `amountTotalSettlement == round_half_up(amountTotal × exchangeRate × 10^(exp_settlement − exp_currency))`;\n- `exchangeRate` must be exactly `\"1\"` when `currency` is the group's settlement currency;\n- `currencyExponent`, when sent, must equal `currency`'s current `exponent` — and it\n  must be sent when `currency` is one the group defined for itself;\n- `amount` split → `Σ rawAmount == amountTotal`; `share` split → `Σ shareWeight > 0`;\n- `itemized` requires at least one item and is **spending only**;\n- every `memberId` must be an active member of the group;\n- `categoryId` must exist and apply to `type`.\n\nA violation is a `422 validation_error` whose `details.fieldErrors` names the field.\n",
 				"required": [
 					"type",
 					"title",
@@ -1531,6 +1531,12 @@
 						"type": "integer",
 						"minimum": 0,
 						"description": "The total in `currency`'s minor units. Must be greater than zero unless `itemized`."
+					},
+					"currencyExponent": {
+						"type": "integer",
+						"minimum": 0,
+						"maximum": 3,
+						"description": "The `exponent` of `currency` **as you read it** — the scale every minor-unit\namount in this body was computed at. **Required when `currency` is a code the\ngroup defined for itself**; optional (but still checked) for an ISO-4217 one.\n\nA group-defined currency's `exponent` can still be changed until the first\ntransaction is recorded in it, so `amountTotal: 1` means `0.01 BEER` at\nexponent `2` and `1 BEER` at exponent `0` — and nothing else in this body says\nwhich you meant. Send the `exponent` that `GET /groups/{gid}/currencies`\nreturned alongside the code, and the server refuses the write if the currency\nwas re-scaled in between (a `422 validation_error` naming `currency`) rather\nthan storing your amounts at a scale you did not use. ISO-4217 exponents never\nchange, so nothing is required for them.\n"
 					},
 					"currency": {
 						"allOf": [

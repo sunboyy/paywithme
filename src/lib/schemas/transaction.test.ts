@@ -4,6 +4,8 @@ import {
 	applyCharges,
 	convertToSettlement,
 	MAX_PERCENT_BPS,
+	MISSING_CURRENCY_EXPONENT_MESSAGE,
+	STALE_CURRENCY_EXPONENT_MESSAGE,
 	type ChargeInput
 } from './transaction';
 import { asEntryCurrencyCode, SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
@@ -778,11 +780,18 @@ const beerSchema = buildTransactionSchema({
 	entryCurrencies: [...SEEDED_CURRENCY_DESCRIPTORS, BEER]
 });
 
-/** 3 BEER at ฿250 each = ฿750.00. */
+/**
+ * 3 BEER at ฿250 each = ฿750.00.
+ *
+ * Carries `currencyExponent` because BEER is GROUP-DEFINED: its exponent may still
+ * move until a transaction references it, so every write in it must state the scale
+ * its minor units were parsed at (see the stale-exponent suite below).
+ */
 function beerSpending(overrides: Record<string, unknown> = {}) {
 	return baseSpending({
 		amountTotal: 3,
 		currency: BEER.code,
+		currencyExponent: BEER.exponent,
 		exchangeRate: '250',
 		amountTotalSettlement: 75000,
 		payers: [{ memberId: 'm1', amountPaid: 3 }],
@@ -899,6 +908,117 @@ describe('buildTransactionSchema — a CUSTOM entry currency (§7.5.2 / ADR-0014
 		expect(second.data.amountTotalSettlement).toBe(
 			convertToSettlement(second.data.amountTotal, BEER, 'THB', second.data.exchangeRate)
 		);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The SCALE the amounts were parsed at (issue #69 finding 1, cross-request half).
+//
+// A group-defined currency's exponent is frozen only once a transaction references
+// the row (ADR-0014 decision 5), so between a client reading BEER at exponent 2 and
+// submitting `amountTotal: 1` ("0.01 BEER"), another member can re-scale BEER to
+// exponent 0 — and those same minor units then mean "1 BEER", a hundred times more.
+// Nothing else in the payload records which scale was meant.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildTransactionSchema — the entry-currency SCALE assertion (§7.5.2)', () => {
+	/** The same group, with BEER at exponent 2 — the definition a client read earlier. */
+	const beerAt2 = { ...BEER, exponent: 2 };
+	const beerAt2Schema = buildTransactionSchema({
+		settlementCurrency: 'THB',
+		entryCurrencies: [...SEEDED_CURRENCY_DESCRIPTORS, beerAt2]
+	});
+
+	it('rejects amounts parsed at an exponent the currency no longer has', () => {
+		// Parsed as 3.00 BEER at exponent 2 (300 minor units); the row now says 0-dp, so
+		// those 300 units would be recorded as 300 beers.
+		const res = beerSchema.safeParse(
+			beerSpending({
+				currencyExponent: 2,
+				amountTotal: 300,
+				payers: [{ memberId: 'm1', amountPaid: 300 }]
+			})
+		);
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			const issue = res.error.issues.find((i) => i.message === STALE_CURRENCY_EXPONENT_MESSAGE);
+			expect(issue).toBeDefined();
+			expect(issue?.path).toEqual(['currency']);
+			// ONE issue for one cause: the settlement equality fails for the same reason
+			// and must not pile a second, more confusing error on top of it.
+			expect(res.error.issues.some((i) => i.path.includes('amountTotalSettlement'))).toBe(false);
+		}
+	});
+
+	it('catches the re-scale the §7.6 settlement check CANNOT see (both round to 0)', () => {
+		// THE HOLE THIS FIELD EXISTS FOR. The settlement equality compares two roundings
+		// of one conversion, and for a small enough amount × rate BOTH round to zero — so
+		// it agrees at 0 whichever exponent is used, and a 100× mis-scaled amount commits.
+		const stale = {
+			currencyExponent: 2,
+			amountTotal: 1, // "0.01 BEER" as the client parsed it
+			exchangeRate: '0.000001',
+			amountTotalSettlement: 0,
+			payers: [{ memberId: 'm1', amountPaid: 1 }]
+		};
+		// The settlement check really is blind here: 0 at BOTH exponents.
+		expect(convertToSettlement(1, beerAt2, 'THB', '0.000001')).toBe(0);
+		expect(convertToSettlement(1, BEER, 'THB', '0.000001')).toBe(0);
+
+		// Valid against the definition the client read…
+		expect(beerAt2Schema.safeParse(beerSpending(stale)).success).toBe(true);
+		// …and refused against the row it would actually be stored against.
+		const res = beerSchema.safeParse(beerSpending(stale));
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			expect(res.error.issues.some((i) => i.message === STALE_CURRENCY_EXPONENT_MESSAGE)).toBe(
+				true
+			);
+		}
+	});
+
+	it('REQUIRES the assertion for a group-defined currency', () => {
+		const res = beerSchema.safeParse(beerSpending({ currencyExponent: undefined }));
+		expect(res.success).toBe(false);
+		if (!res.success) {
+			const issue = res.error.issues.find((i) => i.message === MISSING_CURRENCY_EXPONENT_MESSAGE);
+			expect(issue).toBeDefined();
+			expect(issue?.path).toEqual(['currency']);
+		}
+	});
+
+	it('does NOT require it for a seeded currency — those exponents never move', () => {
+		// The seeded 29 are compiled in and immutable, so there is nothing to assert and
+		// every payload written before this field existed stays valid.
+		expect(beerSchema.safeParse(baseSpending()).success).toBe(true);
+		expect(
+			beerSchema.safeParse(
+				baseSpending({
+					currency: 'CNY',
+					exchangeRate: '4.85',
+					amountTotal: 20000,
+					amountTotalSettlement: 97000,
+					payers: [{ memberId: 'm1', amountPaid: 20000 }]
+				})
+			).success
+		).toBe(true);
+	});
+
+	it('still CHECKS it for a seeded currency when one is supplied', () => {
+		// One rule, not one-with-an-exception: an asserted exponent is always compared.
+		const res = baseSpending({ currencyExponent: 0 }); // THB is 2-dp
+		expect(beerSchema.safeParse(res).success).toBe(false);
+	});
+
+	it('a matching assertion round-trips through a re-edit unchanged', () => {
+		const first = beerSchema.safeParse(beerSpending());
+		expect(first.success).toBe(true);
+		if (!first.success) return;
+		expect(first.data.currencyExponent).toBe(BEER.exponent);
+		const second = beerSchema.safeParse(first.data);
+		expect(second.success).toBe(true);
+		if (!second.success) return;
+		expect(second.data).toStrictEqual(first.data);
 	});
 });
 

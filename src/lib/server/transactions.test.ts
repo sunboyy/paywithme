@@ -1965,12 +1965,19 @@ describe('audit provenance — viaKey / keyName (PLAN §16.2)', () => {
 /** The group's own custom currency row, as `currencies` stores it (0-dp). */
 const BEER_ROW = { code: 'cur_beer', displayCode: 'BEER', exponent: 0, symbol: '🍺' };
 
-/** 7 BEER at ฿250 = ฿1,750.00, split equally between m1/m2/m3. */
+/**
+ * 7 BEER at ฿250 = ฿1,750.00, split equally between m1/m2/m3.
+ *
+ * `currencyExponent` states the scale those 7 minor units were parsed at — required
+ * for a group-defined currency, whose exponent can still move until a transaction
+ * references it (§7.5.2). The service checks it against the row it locked.
+ */
 function beerInput() {
 	return {
 		...equalInput(),
 		amountTotal: 7,
 		currency: BEER_ROW.code,
+		currencyExponent: BEER_ROW.exponent,
 		exchangeRate: '250',
 		amountTotalSettlement: 175_000,
 		payers: [{ memberId: 'm1', amountPaid: 7 }],
