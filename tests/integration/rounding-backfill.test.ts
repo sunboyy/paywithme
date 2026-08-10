@@ -17,18 +17,23 @@
 //     audit rows;
 //   - every rewritten transaction leaves an `audit_log` row (PLAN §12.1);
 //   - the split INPUTS (share weights / raw amounts) and `updated_at` are not
-//     touched — only resolved amounts move.
+//     touched — only resolved amounts move;
+//   - a history recorded in a GROUP-DEFINED entry currency (PLAN §7.5.2 / ADR-0014)
+//     is re-resolved at that currency's OWN exponent — the #63 widening, which
+//     before it existed threw on the first custom-currency transaction it met.
 
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { createGroup } from '$lib/server/groups';
 import { addMember } from '$lib/server/members';
 import { createTransaction } from '$lib/server/transactions';
+import { createCustomCurrency } from '$lib/server/currencies';
 import { getGroupBalances } from '$lib/server/balances';
 import { backfillRoundingRotation, resyncGroupCounters } from '$lib/server/rounding-backfill';
 import { distributeEqually } from '$lib/money';
+import { distributeToSettlement } from '$lib/transactions/resolve';
 import { categoriesFor } from '$lib/categories';
-import { createTestUser, cleanupSuiteRows, db, describeIntegration } from './helpers';
+import { createTestUser, cleanupSuiteRows, db, describeIntegration, IT_PREFIX } from './helpers';
 
 const SPENDING_CATEGORY = categoriesFor('spending')[0].id;
 
@@ -40,6 +45,18 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 	});
 
 	afterEach(async () => {
+		// Custom-currency rows are group-scoped, and a transaction's `currency` points
+		// at one — so both go before the groups do. (`cleanupSuiteRows` stops at
+		// invites/members/groups/users by design.)
+		await db.execute(sql`
+			delete from transactions
+			where group_id in (select id from groups where created_by like ${IT_PREFIX + '%'})
+		`);
+		await db.execute(sql`
+			delete from currencies
+			where created_by like ${IT_PREFIX + '%'}
+			   or group_id in (select id from groups where created_by like ${IT_PREFIX + '%'})
+		`);
 		await cleanupSuiteRows();
 	});
 
@@ -408,5 +425,240 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 
 		const balances = await getGroupBalances({ userId: userA.id, groupId: group.id });
 		expect(balances.reduce((sum, b) => sum + b.balance, 0)).toBe(0);
+	});
+
+	// ── Group-defined entry currencies (#63; PLAN §7.5.2, ADR-0014) ────────────
+	//
+	// A custom currency's code is OPAQUE (`cur_<uuid>`) and resolves nowhere but its
+	// own group's `currencies` rows, so re-resolving one of its transactions needs
+	// that row's exponent. Before #63 the backfill only knew the seeded 29 and threw
+	// on the first custom-currency transaction it met; these tests are what that
+	// change is worth.
+
+	/** A group of three, plus its own 0-decimal `BEER` currency (PLAN §7.5.2). */
+	async function groupOfThreeWithBeer() {
+		const { group, memberIds } = await groupOfThree();
+		const beer = await createCustomCurrency({
+			userId: userA.id,
+			groupId: group.id,
+			input: { displayCode: 'BEER', name: 'Bottle of beer', symbol: '🍺', exponent: 0 }
+		});
+		return { group, memberIds, beer };
+	}
+
+	/** Five beers at ฿2.00 each — ฿10.00 in all — split equally three ways. */
+	const BEERS = 5;
+	const BEER_ROUND_SETTLEMENT = 1000;
+
+	/**
+	 * The numbers above are chosen so BOTH things this suite cares about are visible:
+	 *
+	 *   - it is ROTATION-SENSITIVE at the entry level. 5 beers over 3 members is
+	 *     2/2/1, and which member draws the short straw is exactly what `rounding_seq`
+	 *     decides — so the backfill has something to move.
+	 *   - it PINS THE EXPONENT. At BEER's own exponent 0, 5 units at rate 2 convert to
+	 *     5 × ฿2.00 = ฿10.00 = 1000 satang. At exponent 2 the same 5 minor units are
+	 *     0.05 BEER and convert to 10 satang instead. So a round that still ties out to
+	 *     1000 after the rewrite proves the backfill resolved BEER's row rather than
+	 *     assuming a seeded exponent — an assumption that used to be a throw.
+	 */
+	function beerRound(beerCode: string, memberIds: string[], payerId: string, title: string) {
+		return {
+			type: 'spending' as const,
+			title,
+			categoryId: SPENDING_CATEGORY,
+			amountTotal: BEERS,
+			currency: beerCode,
+			// The scale these minor units were parsed at — the write path re-checks it
+			// against the locked row (#69), so it must be BEER's own exponent.
+			currencyExponent: 0,
+			exchangeRate: '2',
+			amountTotalSettlement: BEER_ROUND_SETTLEMENT,
+			splitMode: 'equal' as const,
+			payers: [{ memberId: payerId, amountPaid: BEERS }],
+			beneficiaries: memberIds.map((memberId) => ({ memberId })),
+			items: [],
+			charges: []
+		};
+	}
+
+	/** Every member's resolved SETTLEMENT `amount_owed` on one transaction. */
+	async function owedByMember(txnId: string): Promise<Map<string, number>> {
+		const { transactionShares } = await import('$lib/server/db/transactions-schema');
+		const rows = await db
+			.select({ memberId: transactionShares.memberId, amountOwed: transactionShares.amountOwed })
+			.from(transactionShares)
+			.where(eq(transactionShares.transactionId, txnId));
+		return new Map(rows.map((r) => [r.memberId, r.amountOwed]));
+	}
+
+	/** Who drew the short straw — the member owing the least on this round. */
+	async function shortStraw(txnId: string): Promise<string> {
+		const owed = [...(await owedByMember(txnId))];
+		expect(owed.reduce((sum, [, amount]) => sum + amount, 0)).toBe(BEER_ROUND_SETTLEMENT);
+		return owed.reduce((low, entry) => (entry[1] < low[1] ? entry : low))[0];
+	}
+
+	/**
+	 * Rewind BEER rounds to the pre-ADR-0013 state, the same way `rewindToLegacyRounding`
+	 * does for the seeded case: ordinal 0 everywhere, and every share resolved as the
+	 * UNROTATED tie-break would have — so the same member draws the short straw on
+	 * every round. Derived through the real primitives rather than hardcoded, because
+	 * which member is "lowest" depends on generated UUIDs.
+	 */
+	async function rewindBeerRounds(txnIds: string[], memberIds: string[]) {
+		const { transactions, transactionShares } = await import('$lib/server/db/transactions-schema');
+		const entry = distributeEqually(BEERS, memberIds, 0);
+		const legacy = distributeToSettlement(
+			entry.map((r) => ({ memberId: String(r.memberId), amount: r.amount })),
+			BEER_ROUND_SETTLEMENT,
+			0
+		);
+		for (const txnId of txnIds) {
+			await db.update(transactions).set({ roundingSeq: 0 }).where(eq(transactions.id, txnId));
+			for (const row of legacy) {
+				await db
+					.update(transactionShares)
+					.set({ amountOwed: row.amountOwed })
+					.where(
+						and(
+							eq(transactionShares.transactionId, txnId),
+							eq(transactionShares.memberId, row.memberId)
+						)
+					);
+			}
+		}
+	}
+
+	it('re-resolves a history recorded in a group-defined currency', async () => {
+		const { group, memberIds, beer } = await groupOfThreeWithBeer();
+
+		const txnIds: string[] = [];
+		for (let i = 0; i < 3; i++) {
+			txnIds.push(
+				await createTransaction({
+					userId: userA.id,
+					groupId: group.id,
+					settlementCurrency: 'THB',
+					input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
+				})
+			);
+		}
+		await rewindBeerRounds(txnIds, memberIds);
+
+		// The fixture really is the unfair state: one member short-changed every round.
+		const before = [];
+		for (const txnId of txnIds) before.push(await shortStraw(txnId));
+		expect(new Set(before).size).toBe(1);
+
+		// PREVIEW resolves the custom descriptor too — this is where the pre-#63 code
+		// threw — and still writes nothing.
+		const preview = await backfillRoundingRotation({ apply: false });
+		expect(preview.groups.find((g) => g.groupId === group.id)!.changed.length).toBe(2);
+		const afterPreview = [];
+		for (const txnId of txnIds) afterPreview.push(await shortStraw(txnId));
+		expect(afterPreview).toEqual(before);
+
+		await backfillRoundingRotation({ apply: true });
+
+		// Rotated: the short straw now goes round the table exactly once.
+		const after = [];
+		for (const txnId of txnIds) after.push(await shortStraw(txnId));
+		expect(new Set(after).size).toBe(3);
+		expect([...after].sort()).toEqual([...memberIds].sort());
+
+		// And it TIES OUT — `shortStraw` asserts each round still sums to its ฿10.00
+		// settlement total, which is only that number at BEER's exponent 0.
+		const balances = await getGroupBalances({ userId: userA.id, groupId: group.id });
+		expect(balances.reduce((sum, b) => sum + b.balance, 0)).toBe(0);
+		expect(await auditRowCount(group.id, 'recalculate')).toBe(2);
+	});
+
+	it('re-resolves each row at its OWN exponent when a group mixes currencies', async () => {
+		// One seeded-currency round and one group-defined round in the SAME group. The
+		// descriptor is looked up per transaction, so each must convert at its own
+		// exponent — ฿100.00 for the THB row, ฿10.00 for the BEER row — while sharing
+		// one ordinal sequence.
+		const { group, memberIds, beer } = await groupOfThreeWithBeer();
+		const { transactions } = await import('$lib/server/db/transactions-schema');
+
+		const thbTxn = await createTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			settlementCurrency: 'THB',
+			input: hundredBahtEqually(memberIds, memberIds[0], 'Dinner')
+		});
+		const beerTxn = await createTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			settlementCurrency: 'THB',
+			input: beerRound(beer.code, memberIds, memberIds[0], 'Round')
+		});
+		await db
+			.update(transactions)
+			.set({ roundingSeq: 0 })
+			.where(inArray(transactions.id, [thbTxn, beerTxn]));
+
+		await backfillRoundingRotation({ apply: true });
+
+		// One sequence across both currencies, in insert order.
+		const rows = await db
+			.select({
+				id: transactions.id,
+				roundingSeq: transactions.roundingSeq,
+				amountTotalSettlement: transactions.amountTotalSettlement
+			})
+			.from(transactions)
+			.where(eq(transactions.groupId, group.id));
+		const byId = new Map(rows.map((r) => [r.id, r]));
+		expect(byId.get(thbTxn)!.roundingSeq).toBe(0);
+		expect(byId.get(beerTxn)!.roundingSeq).toBe(1);
+
+		// Each row's shares still add up to that row's own settlement total, which the
+		// backfill RECOMPUTES from the stored rate rather than trusting the column.
+		const thbOwed = [...(await owedByMember(thbTxn)).values()];
+		expect(thbOwed.reduce((a, b) => a + b, 0)).toBe(10_000);
+		expect(byId.get(thbTxn)!.amountTotalSettlement).toBe(10_000);
+
+		const beerOwed = [...(await owedByMember(beerTxn)).values()];
+		expect(beerOwed.reduce((a, b) => a + b, 0)).toBe(BEER_ROUND_SETTLEMENT);
+		expect(byId.get(beerTxn)!.amountTotalSettlement).toBe(BEER_ROUND_SETTLEMENT);
+
+		// The payer's settlement side is distributed from the same total, so the group
+		// still nets to zero across two different entry currencies.
+		const balances = await getGroupBalances({ userId: userA.id, groupId: group.id });
+		expect(balances.reduce((sum, b) => sum + b.balance, 0)).toBe(0);
+	});
+
+	it('is idempotent over a group-defined currency', async () => {
+		// The custom path re-derives the settlement total from the currency row on EVERY
+		// run, so "nothing changed" has to survive that re-derivation — otherwise the
+		// script would keep rewriting the same rows and appending audit noise.
+		const { group, memberIds, beer } = await groupOfThreeWithBeer();
+
+		const txnIds: string[] = [];
+		for (let i = 0; i < 3; i++) {
+			txnIds.push(
+				await createTransaction({
+					userId: userA.id,
+					groupId: group.id,
+					settlementCurrency: 'THB',
+					input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
+				})
+			);
+		}
+		await rewindBeerRounds(txnIds, memberIds);
+
+		await backfillRoundingRotation({ apply: true });
+		const afterFirst = [];
+		for (const txnId of txnIds) afterFirst.push(await owedByMember(txnId));
+		const auditAfterFirst = await auditRowCount(group.id, 'recalculate');
+
+		const second = await backfillRoundingRotation({ apply: true });
+		expect(second.groups.find((g) => g.groupId === group.id)!.changed).toEqual([]);
+		const afterSecond = [];
+		for (const txnId of txnIds) afterSecond.push(await owedByMember(txnId));
+		expect(afterSecond).toEqual(afterFirst);
+		expect(await auditRowCount(group.id, 'recalculate')).toBe(auditAfterFirst);
 	});
 });
