@@ -3,10 +3,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // Unit tests for the reactive online/offline detector (PLAN §11 / §11.1).
 // These run in the jsdom ("client") project so `window` + `navigator` exist and
 // runes (`$state`) work. We drive `navigator.onLine` + the online/offline events
-// and assert the SSR-safe default plus reactive flips.
+// and assert the browser default plus reactive flips. The SSR no-op lives in
+// online.ssr.svelte.test.ts so its environment mock cannot race this file's
+// browser mock during the full multi-project unit run.
 //
 // `$app/environment` is mocked to `browser: true` so `startOnlineWatch` actually
-// wires listeners; one test re-mocks it to `false` to prove the SSR no-op.
+// wires listeners.
 
 vi.mock('$app/environment', () => ({ browser: true }));
 
@@ -75,18 +77,5 @@ describe('online detector (PLAN §11)', () => {
 		// Tearing down restores listening to a clean state for later starts.
 		stop1();
 		stop2();
-	});
-
-	it('is a safe no-op during SSR (browser === false)', async () => {
-		vi.doMock('$app/environment', () => ({ browser: false }));
-		vi.resetModules();
-		const mod = await import('./online.svelte');
-		const stop = mod.startOnlineWatch();
-		// Even with navigator.onLine === false, SSR mode must not flip the flag.
-		Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
-		window.dispatchEvent(new Event('offline'));
-		expect(mod.network.offline).toBe(false);
-		expect(typeof stop).toBe('function');
-		stop();
 	});
 });

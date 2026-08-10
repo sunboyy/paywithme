@@ -7,8 +7,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //     waiting update only flips `pwaState.needRefresh`, and the reload happens
 //     ONLY when `applyUpdate()` is called.
 //   - the reactive `pwaState` seam that 7.3 / 7.4 / 7.5 build on.
-//   - registration is a safe no-op when no SW is available (dynamic import
-//     rejects) and during SSR (`browser === false`).
+// The SSR and unavailable-module paths live in dedicated spec files so every
+// file has one fixed `$app/environment` / virtual-module configuration.
 
 const registerSW = vi.fn();
 let lastOptions: Record<string, () => void> = {};
@@ -20,7 +20,7 @@ vi.mock('virtual:pwa-register', () => ({
 	}
 }));
 
-// Default: simulate the browser. Individual tests can re-mock for SSR.
+// This suite exercises browser registration only.
 vi.mock('$app/environment', () => ({ browser: true }));
 
 beforeEach(() => {
@@ -82,25 +82,5 @@ describe('pwa register (PLAN §11.1 — prompt-to-reload, never auto-reload)', (
 		const mod = await import('./register.svelte');
 		await expect(mod.applyUpdate()).resolves.toBeUndefined();
 		expect(registerSW).not.toHaveBeenCalled();
-	});
-
-	it('is a safe no-op during SSR (browser === false)', async () => {
-		vi.doMock('$app/environment', () => ({ browser: false }));
-		vi.resetModules();
-		const mod = await import('./register.svelte');
-		await mod.registerPwa();
-		// No registration happened; state untouched.
-		expect(mod.pwaState.registered).toBe(false);
-	});
-
-	it('is a safe no-op when the virtual SW module is unavailable (dev/preview)', async () => {
-		vi.doMock('virtual:pwa-register', () => {
-			throw new Error('no sw in this build');
-		});
-		vi.resetModules();
-		const mod = await import('./register.svelte');
-		// Must not throw even though the dynamic import rejects.
-		await expect(mod.registerPwa()).resolves.toBeUndefined();
-		expect(mod.pwaState.registered).toBe(false);
 	});
 });
