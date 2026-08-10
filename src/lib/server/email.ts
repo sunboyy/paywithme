@@ -14,9 +14,12 @@
 //
 // Security (PLAN §12): email is sensitive. We NEVER log the API key, and the
 // error path surfaces the response body but never the auth header/credential.
-// The dev-fallback console line (URL included) is for local dev only.
+// The dev-fallback console line (URL included) is for local dev only, and is
+// ENFORCED as such: in production an unconfigured Mailgun throws instead of
+// logging, so a sign-in URL can never reach a production log stream.
 
 import { env } from '$env/dynamic/private';
+import { building } from '$app/environment';
 
 export interface SendEmailInput {
 	to: string;
@@ -43,8 +46,26 @@ export async function sendEmail({ to, subject, text, html }: SendEmailInput): Pr
 	const from = env.EMAIL_FROM;
 	const baseUrl = env.MAILGUN_BASE_URL || 'https://api.mailgun.net';
 
-	// Dev fallback: Mailgun not configured → log instead of send (no throw, no key).
+	// Mailgun not configured. In DEVELOPMENT this is the documented local-dev
+	// path (PLAN decision #24): log the message — magic-link URL included — so
+	// sign-in works with no Mailgun account.
+	//
+	// In PRODUCTION it is a misconfiguration, and the log line would write a
+	// single-use sign-in credential into the platform log stream where anyone with
+	// log access could use it. Worse, returning normally would hide the outage:
+	// the user never gets their email and nothing surfaces why. So we FAIL CLOSED
+	// and loudly, and the URL is never logged.
+	//
+	// `NODE_ENV === 'production' && !building` is the same production signal
+	// `lib/server/auth.ts` uses — `building` is true during `vite build`'s
+	// analyse/prerender phase (which runs under NODE_ENV=production with no real
+	// env) and false at request time.
 	if (!apiKey || !domain || !from) {
+		if (env.NODE_ENV === 'production' && !building) {
+			throw new Error(
+				'Email is not configured: MAILGUN_API_KEY, MAILGUN_DOMAIN and EMAIL_FROM are required in production.'
+			);
+		}
 		console.log(`[email] (dev fallback) to=${to} subject=${JSON.stringify(subject)}\n${text}`);
 		return;
 	}

@@ -16,12 +16,17 @@ function mockEnv(values: Record<string, string>): void {
 	vi.doMock('$env/dynamic/private', () => ({ env: values }));
 }
 
+function mockBuilding(building = false): void {
+	vi.doMock('$app/environment', () => ({ building }));
+}
+
 async function importEmail() {
 	return import('./email');
 }
 
 beforeEach(() => {
 	vi.resetModules();
+	mockBuilding(false);
 });
 
 afterEach(() => {
@@ -192,5 +197,90 @@ describe('sendMagicLinkEmail', () => {
 
 		expect(fetchSpy).not.toHaveBeenCalled();
 		expect(log.mock.calls[0].join(' ')).toContain(url);
+	});
+});
+
+describe('sendEmail — production fail-closed', () => {
+	it('throws when Mailgun is unconfigured in production', async () => {
+		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
+		mockBuilding(false);
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+		const { sendEmail } = await importEmail();
+		await expect(sendEmail({ to: 'a@b.com', subject: 'Hi', text: 'body text' })).rejects.toThrow();
+
+		expect(log).not.toHaveBeenCalled();
+	});
+
+	it('does not log the message body when it throws', async () => {
+		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
+		mockBuilding(false);
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+		const { sendEmail } = await importEmail();
+		const url = 'https://example.test/magic-link?token=SENTINEL';
+		await expect(
+			sendEmail({ to: 'a@b.com', subject: 'Sign in', text: `Click here: ${url}` })
+		).rejects.toThrow();
+
+		for (const call of log.mock.calls) {
+			expect(call.join(' ')).not.toContain('SENTINEL');
+		}
+	});
+
+	it('still logs (does not throw) in production during building', async () => {
+		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
+		mockBuilding(true);
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		vi.spyOn(console, 'log').mockImplementation(() => {});
+
+		const { sendEmail } = await importEmail();
+		await expect(
+			sendEmail({ to: 'a@b.com', subject: 'Hi', text: 'body text' })
+		).resolves.toBeUndefined();
+	});
+
+	it('still logs (does not throw) when NODE_ENV is not production', async () => {
+		mockEnv({
+			NODE_ENV: 'development',
+			MAILGUN_API_KEY: '',
+			MAILGUN_DOMAIN: '',
+			EMAIL_FROM: ''
+		});
+		mockBuilding(false);
+		const fetchSpy = vi.fn();
+		vi.stubGlobal('fetch', fetchSpy);
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+		const { sendEmail } = await importEmail();
+		await expect(
+			sendEmail({ to: 'a@b.com', subject: 'Hi', text: 'body text' })
+		).resolves.toBeUndefined();
+
+		expect(log).toHaveBeenCalledTimes(1);
+	});
+
+	it('sends normally in production when Mailgun IS configured', async () => {
+		mockEnv({
+			NODE_ENV: 'production',
+			MAILGUN_API_KEY: REAL_KEY,
+			MAILGUN_DOMAIN: 'mg.example.com',
+			EMAIL_FROM: 'x@mg.example.com'
+		});
+		mockBuilding(false);
+		const fetchSpy = vi.fn().mockResolvedValue(new Response('OK', { status: 200 }));
+		vi.stubGlobal('fetch', fetchSpy);
+
+		const { sendEmail } = await importEmail();
+		await expect(
+			sendEmail({ to: 'a@b.com', subject: 'Hi', text: 'body text' })
+		).resolves.toBeUndefined();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });
