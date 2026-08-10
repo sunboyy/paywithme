@@ -16,17 +16,31 @@ function mockEnv(values: Record<string, string>): void {
 	vi.doMock('$env/dynamic/private', () => ({ env: values }));
 }
 
-function mockBuilding(building = false): void {
-	vi.doMock('$app/environment', () => ({ building }));
-}
+/**
+ * `$app/environment` is mocked ONCE for the whole file, via a HOISTED mock over a
+ * mutable holder — not with a per-test `vi.doMock`.
+ *
+ * Why: `building` is the only value this suite varies, and repeatedly registering
+ * the same SvelteKit VIRTUAL module specifier (a `beforeEach` default plus a
+ * per-test override) made the resolved value depend on registration order, which
+ * flaked intermittently in full-suite runs — `building` would come back `false`
+ * where a test wanted `true`, so `sendEmail` threw and a `.resolves` assertion
+ * failed. One hoisted registration removes that ordering question entirely.
+ *
+ * The holder is read when `./email` is INSTANTIATED, and `importEmail` re-imports
+ * it after `vi.resetModules()`, so setting `appEnv.building` before the import is
+ * what each test's value comes from.
+ */
+const appEnv = vi.hoisted(() => ({ building: false }));
+vi.mock('$app/environment', () => appEnv);
 
-async function importEmail() {
+async function importEmail({ building = false }: { building?: boolean } = {}) {
+	appEnv.building = building;
 	return import('./email');
 }
 
 beforeEach(() => {
 	vi.resetModules();
-	mockBuilding(false);
 });
 
 afterEach(() => {
@@ -203,7 +217,6 @@ describe('sendMagicLinkEmail', () => {
 describe('sendEmail — production fail-closed', () => {
 	it('throws when Mailgun is unconfigured in production', async () => {
 		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
-		mockBuilding(false);
 		const fetchSpy = vi.fn();
 		vi.stubGlobal('fetch', fetchSpy);
 		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -216,7 +229,6 @@ describe('sendEmail — production fail-closed', () => {
 
 	it('does not log the message body when it throws', async () => {
 		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
-		mockBuilding(false);
 		const fetchSpy = vi.fn();
 		vi.stubGlobal('fetch', fetchSpy);
 		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -234,12 +246,11 @@ describe('sendEmail — production fail-closed', () => {
 
 	it('still logs (does not throw) in production during building', async () => {
 		mockEnv({ NODE_ENV: 'production', MAILGUN_API_KEY: '', MAILGUN_DOMAIN: '', EMAIL_FROM: '' });
-		mockBuilding(true);
 		const fetchSpy = vi.fn();
 		vi.stubGlobal('fetch', fetchSpy);
 		vi.spyOn(console, 'log').mockImplementation(() => {});
 
-		const { sendEmail } = await importEmail();
+		const { sendEmail } = await importEmail({ building: true });
 		await expect(
 			sendEmail({ to: 'a@b.com', subject: 'Hi', text: 'body text' })
 		).resolves.toBeUndefined();
@@ -252,7 +263,6 @@ describe('sendEmail — production fail-closed', () => {
 			MAILGUN_DOMAIN: '',
 			EMAIL_FROM: ''
 		});
-		mockBuilding(false);
 		const fetchSpy = vi.fn();
 		vi.stubGlobal('fetch', fetchSpy);
 		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -272,7 +282,6 @@ describe('sendEmail — production fail-closed', () => {
 			MAILGUN_DOMAIN: 'mg.example.com',
 			EMAIL_FROM: 'x@mg.example.com'
 		});
-		mockBuilding(false);
 		const fetchSpy = vi.fn().mockResolvedValue(new Response('OK', { status: 200 }));
 		vi.stubGlobal('fetch', fetchSpy);
 

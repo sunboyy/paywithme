@@ -35,7 +35,9 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 	function selectChain() {
 		const rows = nextSelectRows();
 		const chain: Record<string, unknown> = {};
-		const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy'];
+		// `for` backs `.for('update')` — `removeMember` locks the member row before it
+		// probes for ledger activity, so the stub has to be able to model that call.
+		const methods = ['from', 'innerJoin', 'where', 'limit', 'orderBy', 'for'];
 		for (const m of methods) chain[m] = () => chain;
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
 		return chain;
