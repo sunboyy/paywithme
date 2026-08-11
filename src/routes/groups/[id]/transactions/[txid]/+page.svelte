@@ -24,7 +24,7 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import TransactionForm from '$lib/components/TransactionForm.svelte';
-	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
+	import ActivityEntryRow from '$lib/components/ActivityEntryRow.svelte';
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
@@ -367,23 +367,7 @@
 		{:else}
 			<Card.Content class="divide-y divide-border p-0">
 				{#each data.history as entry (entry.id)}
-					<div class="flex flex-col gap-1 px-6 py-3">
-						<div class="flex items-start justify-between gap-2">
-							<p class="min-w-0 text-sm">
-								<span class="font-medium">{entry.actorName}</span>
-								<span class="text-muted-foreground"> {actionLabel(entry.action)} </span>
-							</p>
-							<time
-								datetime={entry.occurredAt}
-								title={absoluteTime(entry.occurredAt)}
-								class="shrink-0 text-xs whitespace-nowrap text-muted-foreground"
-							>
-								{relativeTime(entry.occurredAt)}
-							</time>
-						</div>
-						<p class="text-sm">{entry.summary}</p>
-						<p class="text-xs text-muted-foreground">{absoluteTime(entry.occurredAt)}</p>
-					</div>
+					<ActivityEntryRow {entry} class="px-6 py-3" />
 				{/each}
 			</Card.Content>
 		{/if}

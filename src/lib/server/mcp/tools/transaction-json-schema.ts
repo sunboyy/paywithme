@@ -82,6 +82,42 @@ export const CHARGE_PROPERTY = {
 } as const;
 export const AMOUNT_BENEFICIARIES_PROPERTY = beneficiaryArray(AMOUNT_BENEFICIARY_PROPERTY);
 export const SHARE_BENEFICIARIES_PROPERTY = beneficiaryArray(SHARE_BENEFICIARY_PROPERTY);
-export const forbidProperties = (...fields: string[]) => ({
+const forbidProperties = (...fields: string[]) => ({
 	not: { anyOf: fields.map((field) => ({ required: [field] })) }
 });
+
+/**
+ * The four mutually exclusive split shapes a transaction write accepts, each naming
+ * the arguments it requires and forbidding the ones belonging to the other three.
+ * `create_transaction` and `update_transaction` share it verbatim: an agent that has
+ * learned to shape one write must not have to learn a second dialect for the other,
+ * and a shape added here reaches both surfaces at once.
+ */
+export const SPLIT_SHAPE_ONE_OF = [
+	{
+		properties: { splitMode: { enum: ['equal'] } },
+		required: ['amount', 'splitBetween'],
+		...forbidProperties('beneficiaries', 'items', 'charges')
+	},
+	{
+		properties: {
+			splitMode: { const: 'amount' },
+			beneficiaries: AMOUNT_BENEFICIARIES_PROPERTY
+		},
+		required: ['splitMode', 'amount', 'beneficiaries'],
+		...forbidProperties('splitBetween', 'items', 'charges')
+	},
+	{
+		properties: {
+			splitMode: { const: 'share' },
+			beneficiaries: SHARE_BENEFICIARIES_PROPERTY
+		},
+		required: ['splitMode', 'amount', 'beneficiaries'],
+		...forbidProperties('splitBetween', 'items', 'charges')
+	},
+	{
+		properties: { splitMode: { const: 'itemized' } },
+		required: ['splitMode', 'items'],
+		...forbidProperties('amount', 'splitBetween', 'beneficiaries')
+	}
+];

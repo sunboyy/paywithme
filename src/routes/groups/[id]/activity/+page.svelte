@@ -14,14 +14,13 @@
 	import { resolve } from '$app/paths';
 	import * as Card from '$lib/components/ui/card';
 	import * as Select from '$lib/components/ui/select';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
 	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
-	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
+	import ActivityEntryRow from '$lib/components/ActivityEntryRow.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -134,27 +133,7 @@
 		<Card.Root>
 			<Card.Content class="divide-y divide-border p-0">
 				{#each data.entries as entry (entry.id)}
-					<div class="flex flex-col gap-1 p-3">
-						<div class="flex items-start justify-between gap-2">
-							<p class="min-w-0 text-sm">
-								<span class="font-medium">{entry.actorName}</span>
-								<span class="text-muted-foreground"> {actionLabel(entry.action)} </span>
-								<Badge variant="outline" class="ml-1 align-middle capitalize">
-									{entry.entityType}
-								</Badge>
-							</p>
-							<!-- Relative time (locale-aware), absolute on hover/title. -->
-							<time
-								datetime={entry.occurredAt}
-								title={absoluteTime(entry.occurredAt)}
-								class="shrink-0 text-xs whitespace-nowrap text-muted-foreground"
-							>
-								{relativeTime(entry.occurredAt)}
-							</time>
-						</div>
-						<p class="text-sm">{entry.summary}</p>
-						<p class="text-xs text-muted-foreground">{absoluteTime(entry.occurredAt)}</p>
-					</div>
+					<ActivityEntryRow {entry} showEntityType />
 				{/each}
 			</Card.Content>
 		</Card.Root>

@@ -38,13 +38,13 @@
 //   - Idempotency: NO derived window — see `idempotentHint`.
 
 import { z } from 'zod';
-import { getTransactionDetail, softDeleteTransaction } from '$lib/server/transactions';
+import { softDeleteTransaction } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { toolSuccess } from '../errors';
-import { buildDeleteEchoBack, toTransactionView, UNTRUSTED_NOTE } from '../view';
+import { buildDeleteEchoBack, UNTRUSTED_NOTE } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadEntryCurrency, loadGroupView, loadMemberViews } from './load';
+import { applyTransactionStateChange } from './state-change';
 
 /** The wire name. */
 const TOOL_NAME = 'delete_transaction';
@@ -108,55 +108,23 @@ export const deleteTransactionTool: McpTool<z.infer<typeof deleteTransactionArgs
 		}
 	},
 	run: async ({ principal }, { groupId, txnId }) => {
-		// Access-checked load of the group. `loadGroupView` centralizes the conflated
-		// `not_found` (absent / deleted / not-yours → ONE outcome, no existence oracle,
-		// §16.5), so this write path inherits it by construction.
-		await loadGroupView(principal, groupId);
-
-		// The roster resolves member ids to (untrusted) names + `isYou` for the echo.
-		const members = await loadMemberViews(principal, groupId);
-
-		// The BEFORE state, read for ONE fact the after-state cannot tell us: was it
-		// already deleted? `deleted_at` is set either way once the service returns, so
-		// without this read a no-op delete and a real one are indistinguishable — and the
-		// echo would claim a deletion that never happened (§16.6: a no-op is an idempotent
-		// SUCCESS that transitions nothing and writes no audit row).
-		//
-		// It is also the access + existence gate on the TXN: access-checked and
-		// group-scoped, it throws `TransactionNotFoundError` for an absent id, an id in
-		// another group, and an id the caller cannot see alike → the SAME conflated
-		// `not_found` (§16.5).
-		//
-		// This is a read-then-act, and deliberately not more than that: two deletes racing
-		// could both read `null` here and both narrate a fresh deletion. That costs a word
-		// of prose accuracy and NOTHING else — the DATA cannot double-delete (the service's
-		// `isNull(deleted_at)` guard is atomic) and the audit trail still records exactly one
-		// `delete` (its write is gated on rows-affected > 0, §16.6). Making this read
-		// authoritative would mean the service returning its rows-affected count, which is a
-		// change to a service shared with REST for a cosmetic gain on a race that needs two
-		// concurrent deletes of the same txn from the same key.
-		const before = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const wasAlreadyDeleted = before.deletedAt !== null;
-
-		// Soft-delete + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries
-		// the key's `viaKey` provenance into the `delete` audit row — we never write audit
-		// ourselves, and the service gates that write on rows-affected > 0 (§16.6).
-		await softDeleteTransaction({
-			userId: principal.userId,
-			groupId,
-			txnId,
-			via: auditVia(principal)
-		});
-
-		// Re-read the PERSISTED state (now carrying `deletedAt`) and project it wrapped —
-		// the transaction is still fully readable after a soft delete, which is what makes
-		// restoring it possible and what lets the echo name what left the ledger.
-		const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		// A transaction recorded in a currency the GROUP defined can be deleted through the
-		// assistant even though it could never have been WRITTEN through it, so this read
-		// resolves the entry currency's row like every other read (ADR-0014 decision 7).
-		const entryCurrency = await loadEntryCurrency(groupId, detail.currency);
-		const deleted = toTransactionView({ detail, members, principal, entryCurrency });
+		// The shared delete/restore flow (`./state-change`): group gate → before-state
+		// read → the guarded service call → a re-read of the persisted result, wrapped.
+		// Soft-delete + AUDIT happen in one DB transaction (§12.1); `auditVia(principal)`
+		// carries the key's `viaKey` provenance into the `delete` audit row — we never
+		// write audit ourselves, and the service gates that write on rows-affected > 0.
+		const {
+			view: deleted,
+			wasDeleted: wasAlreadyDeleted,
+			minorUnits
+		} = await applyTransactionStateChange(principal, groupId, txnId, () =>
+			softDeleteTransaction({
+				userId: principal.userId,
+				groupId,
+				txnId,
+				via: auditVia(principal)
+			})
+		);
 
 		return toolSuccess({
 			// The wrapped structured view (ADR-0003) — every name and the title inside an
@@ -165,11 +133,7 @@ export const deleteTransactionTool: McpTool<z.infer<typeof deleteTransactionArgs
 			// Machine-readable alongside the prose: whether this call actually transitioned
 			// anything, so an agent need not parse the sentence to know a repeat was a no-op.
 			alreadyDeleted: wasAlreadyDeleted,
-			echo: buildDeleteEchoBack({
-				view: deleted,
-				minorUnits: detail.amountTotalSettlement,
-				wasAlreadyDeleted
-			}),
+			echo: buildDeleteEchoBack({ view: deleted, minorUnits, wasAlreadyDeleted }),
 			// The prose inlines member display names and the title for legibility — so the
 			// result carries the untrusted-note, marking any name/title in the payload as
 			// DATA, and every one it inlines is ALSO present wrapped in `deleted` (ADR-0003).

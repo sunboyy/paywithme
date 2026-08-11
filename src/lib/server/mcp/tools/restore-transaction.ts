@@ -36,13 +36,13 @@
 //   - Idempotency: NO derived window — see `idempotentHint`.
 
 import { z } from 'zod';
-import { getTransactionDetail, restoreTransaction } from '$lib/server/transactions';
+import { restoreTransaction } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { toolSuccess } from '../errors';
-import { buildRestoreEchoBack, toTransactionView, UNTRUSTED_NOTE } from '../view';
+import { buildRestoreEchoBack, UNTRUSTED_NOTE } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadEntryCurrency, loadGroupView, loadMemberViews } from './load';
+import { applyTransactionStateChange } from './state-change';
 
 /** The wire name. */
 const TOOL_NAME = 'restore_transaction';
@@ -100,49 +100,24 @@ export const restoreTransactionTool: McpTool<z.infer<typeof restoreTransactionAr
 		}
 	},
 	run: async ({ principal }, { groupId, txnId }) => {
-		// Access-checked load of the group. `loadGroupView` centralizes the conflated
-		// `not_found` (absent / deleted / not-yours → ONE outcome, no existence oracle,
-		// §16.5), so this write path inherits it by construction.
-		await loadGroupView(principal, groupId);
-
-		// The roster resolves member ids to (untrusted) names + `isYou` for the echo.
-		const members = await loadMemberViews(principal, groupId);
-
-		// The BEFORE state, read for ONE fact the after-state cannot tell us: was it
-		// actually deleted? `deleted_at` is null either way once the service returns, so
-		// without this read a no-op restore and a real one are indistinguishable — and the
-		// echo would claim an undo that never happened (§16.6: a no-op is an idempotent
-		// SUCCESS that transitions nothing and writes no audit row).
-		//
-		// It is also the access + existence gate on the TXN: access-checked and
-		// group-scoped, it throws `TransactionNotFoundError` for an absent id, an id in
-		// another group, and an id the caller cannot see alike → the SAME conflated
-		// `not_found` (§16.5). A SOFT-DELETED txn is deliberately still returned by it —
-		// that is what makes this tool reachable at all.
-		//
-		// A read-then-act, as on the delete path, and benign for the same reason: a race
-		// costs a word of prose accuracy, never data. The `isNotNull(deleted_at)` guard is
-		// atomic and the `restore` audit row is gated on rows-affected > 0 (§16.6).
-		const before = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		const wasAlreadyLive = before.deletedAt === null;
-
-		// Restore + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
-		// key's `viaKey` provenance into the `restore` audit row — we never write audit
-		// ourselves, and the service gates that write on rows-affected > 0 (§16.6).
-		await restoreTransaction({
-			userId: principal.userId,
-			groupId,
-			txnId,
-			via: auditVia(principal)
-		});
-
-		// Re-read the PERSISTED state (now with `deletedAt` back to null) and project it
-		// wrapped, so the echo describes what the ledger actually holds.
-		const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		// Same as the delete path: a restore can target a transaction recorded in a
-		// group-defined currency, so the row is resolved and `display_code` served.
-		const entryCurrency = await loadEntryCurrency(groupId, detail.currency);
-		const restored = toTransactionView({ detail, members, principal, entryCurrency });
+		// The shared delete/restore flow (`./state-change`): group gate → before-state
+		// read → the guarded service call → a re-read of the persisted result, wrapped.
+		// Restore + AUDIT happen in one DB transaction (§12.1); `auditVia(principal)`
+		// carries the key's `viaKey` provenance into the `restore` audit row — we never
+		// write audit ourselves, and the service gates that write on rows-affected > 0.
+		const {
+			view: restored,
+			wasDeleted,
+			minorUnits
+		} = await applyTransactionStateChange(principal, groupId, txnId, () =>
+			restoreTransaction({
+				userId: principal.userId,
+				groupId,
+				txnId,
+				via: auditVia(principal)
+			})
+		);
+		const wasAlreadyLive = !wasDeleted;
 
 		return toolSuccess({
 			// The wrapped structured view (ADR-0003) — every name and the title inside an
@@ -151,11 +126,7 @@ export const restoreTransactionTool: McpTool<z.infer<typeof restoreTransactionAr
 			// Machine-readable alongside the prose: whether this call actually transitioned
 			// anything, so an agent need not parse the sentence to know a repeat was a no-op.
 			alreadyLive: wasAlreadyLive,
-			echo: buildRestoreEchoBack({
-				view: restored,
-				minorUnits: detail.amountTotalSettlement,
-				wasAlreadyLive
-			}),
+			echo: buildRestoreEchoBack({ view: restored, minorUnits, wasAlreadyLive }),
 			// The prose inlines member display names and the title for legibility — so the
 			// result carries the untrusted-note, marking any name/title in the payload as
 			// DATA, and every one it inlines is ALSO present wrapped in `restored` (ADR-0003).
