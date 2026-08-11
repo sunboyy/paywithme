@@ -16,9 +16,12 @@ import { pathAndQuery } from '$lib/redirect';
 import { GroupAccessError } from '$lib/server/groups';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
 import { listMembers } from '$lib/server/members';
-import { categoriesFor } from '$lib/categories';
-import { getCurrency, type SeededCurrencyCode } from '$lib/money';
-import { listCurrenciesForGroup } from '$lib/server/currencies';
+import { type SeededCurrencyCode } from '$lib/money';
+import {
+	loadEntryCurrencies,
+	toCategoryOptions,
+	toSettlementCurrencyView
+} from '$lib/server/transaction-page';
 import type { PageServerLoad } from './$types';
 
 /** Parse the `type` filter from the query string (ignoring anything unrecognized). */
@@ -45,24 +48,6 @@ export interface MemberFilterOption {
 	isInactive: boolean;
 }
 
-/**
- * The group's permitted ENTRY currencies (PLAN §7.5.2): the seeded 29 plus this
- * group's own custom rows. Access was already established by the caller, so a
- * `GroupAccessError` here can only be a race (the group vanished mid-request) —
- * answered the same way the transaction read answers it, with a 404 that never
- * distinguishes "gone" from "never yours" (§12). Every other error propagates.
- */
-async function loadEntryCurrencies(userId: string, groupId: string) {
-	try {
-		return await listCurrenciesForGroup({ userId, groupId });
-	} catch (e) {
-		if (e instanceof GroupAccessError) {
-			error(404, 'Group not found');
-		}
-		throw e;
-	}
-}
-
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard: anonymous → redirect; no-access/not-found → 404. Returns
 	// the already-loaded group. THROWS control flow → outside any try/catch.
@@ -73,7 +58,6 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	});
 
 	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
-	const currency = getCurrency(settlementCurrency);
 
 	// The group's currency set (seeded 29 + this group's custom rows, PLAN §7.5.2).
 	// The rows below show the ORIGINAL amount in its ENTRY currency (§7.6 Display),
@@ -86,12 +70,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// with and the component throws anyway, just later and with a worse message. So the
 	// only tolerated failure is the `GroupAccessError` race the transaction read below
 	// also maps to a 404; anything else is a real fault and propagates.
-	const entryCurrencies = (await loadEntryCurrencies(user.id, params.id)).map((c) => ({
-		code: c.code,
-		displayCode: c.displayCode,
-		symbol: c.symbol,
-		exponent: c.exponent
-	}));
+	const entryCurrencies = (await loadEntryCurrencies(user.id, params.id, 'Group not found')).map(
+		(c) => ({
+			code: c.code,
+			displayCode: c.displayCode,
+			symbol: c.symbol,
+			exponent: c.exponent
+		})
+	);
 
 	// Filter state from the URL (server-first: links carry the filter so it works
 	// without JS). An unknown type/category simply yields no filter / no matches.
@@ -145,21 +131,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	return {
 		group: { id: group.id, name: group.name, settlementCurrency },
-		// The settlement currency is always one of the seeded 29 (ADR-0014 decision 1),
-		// where `displayCode === code` by definition.
-		currency: currency
-			? {
-					code: currency.code,
-					displayCode: currency.code,
-					symbol: currency.symbol,
-					exponent: currency.exponent
-				}
-			: {
-					code: settlementCurrency,
-					displayCode: settlementCurrency,
-					symbol: settlementCurrency,
-					exponent: 2
-				},
+		currency: toSettlementCurrencyView(settlementCurrency),
 		currencies: entryCurrencies,
 		transactions,
 		members,
@@ -171,9 +143,6 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		},
 		// The category lists drive the filter Select (only the matching set when a
 		// type is active; both otherwise).
-		categories: {
-			spending: categoriesFor('spending').map((c) => ({ id: c.id, name: c.name, icon: c.icon })),
-			transfer: categoriesFor('transfer').map((c) => ({ id: c.id, name: c.name, icon: c.icon }))
-		}
+		categories: toCategoryOptions()
 	};
 };

@@ -74,13 +74,14 @@ import { loadEntryCurrencyLookup, loadGroupView, loadMemberViews } from './load'
 import {
 	AMOUNT_BENEFICIARIES_PROPERTY,
 	CHARGE_PROPERTY,
-	forbidProperties,
 	ITEM_PROPERTY,
 	MEMBER_ID_PROPERTY,
 	MONEY_PROPERTY,
-	SHARE_BENEFICIARIES_PROPERTY
+	SHARE_BENEFICIARIES_PROPERTY,
+	SPLIT_SHAPE_ONE_OF
 } from './transaction-json-schema';
 import {
+	argumentErrorResult,
 	MCP_TRANSACTION_ARGUMENT_FIELDS,
 	McpTransactionArgumentError,
 	toTransactionInput,
@@ -112,17 +113,6 @@ const updateTransactionArgs = z
 		categoryId: z.string().min(1).optional()
 	})
 	.superRefine(validateMcpTransactionArguments);
-
-function argumentErrorResult(error: McpTransactionArgumentError) {
-	const fieldErrors: Record<string, string[]> = {};
-	for (const issue of error.issues) {
-		const field = issue.path.join('.') || 'arguments';
-		(fieldErrors[field] ??= []).push(issue.message);
-		const root = typeof issue.path[0] === 'string' ? issue.path[0] : undefined;
-		if (root !== undefined && root !== field) (fieldErrors[root] ??= []).push(issue.message);
-	}
-	return toolError('validation_error', error.message, { fieldErrors });
-}
 
 export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs>> = {
 	scope: 'write',
@@ -220,34 +210,7 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 				}
 			},
 			required: ['groupId', 'txnId', 'title'],
-			oneOf: [
-				{
-					properties: { splitMode: { enum: ['equal'] } },
-					required: ['amount', 'splitBetween'],
-					...forbidProperties('beneficiaries', 'items', 'charges')
-				},
-				{
-					properties: {
-						splitMode: { const: 'amount' },
-						beneficiaries: AMOUNT_BENEFICIARIES_PROPERTY
-					},
-					required: ['splitMode', 'amount', 'beneficiaries'],
-					...forbidProperties('splitBetween', 'items', 'charges')
-				},
-				{
-					properties: {
-						splitMode: { const: 'share' },
-						beneficiaries: SHARE_BENEFICIARIES_PROPERTY
-					},
-					required: ['splitMode', 'amount', 'beneficiaries'],
-					...forbidProperties('splitBetween', 'items', 'charges')
-				},
-				{
-					properties: { splitMode: { const: 'itemized' } },
-					required: ['splitMode', 'items'],
-					...forbidProperties('amount', 'splitBetween', 'beneficiaries')
-				}
-			],
+			oneOf: SPLIT_SHAPE_ONE_OF,
 			additionalProperties: false
 		},
 		annotations: {

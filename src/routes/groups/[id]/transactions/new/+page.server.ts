@@ -25,13 +25,19 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import { setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
-import { categoriesFor, defaultCategoryFor, getCategory } from '$lib/categories';
+import { defaultCategoryFor, getCategory } from '$lib/categories';
 import { getCurrency, MAX_SAFE_MINOR, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess, requireUser } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
-import { listCurrenciesForGroup } from '$lib/server/currencies';
-import { getGroupForUser, GroupAccessError } from '$lib/server/groups';
+import { GroupAccessError } from '$lib/server/groups';
 import { listMembers } from '$lib/server/members';
+import {
+	loadEntryCurrencies,
+	loadTransactionWriteContext,
+	toCategoryOptions,
+	toCurrencyOptions,
+	toSettlementCurrencyView
+} from '$lib/server/transaction-page';
 import { createTransaction, TransactionValidationError } from '$lib/server/transactions';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -53,24 +59,6 @@ import type { Actions, PageServerLoad } from './$types';
  * Returns `null` when any param is absent or invalid → the caller keeps its
  * normal blank spending default.
  */
-/**
- * The group's permitted ENTRY currencies (PLAN §7.5.2): the seeded 29 plus this
- * group's own custom rows. Access was already established by the caller, so a
- * `GroupAccessError` here can only be a race (the group vanished mid-request) —
- * answered the same way every other lookup on this route answers it, with a 404
- * that never distinguishes "gone" from "never yours" (§12).
- */
-async function loadEntryCurrencies(userId: string, groupId: string) {
-	try {
-		return await listCurrenciesForGroup({ userId, groupId });
-	} catch (e) {
-		if (e instanceof GroupAccessError) {
-			error(404, 'Group not found');
-		}
-		throw e;
-	}
-}
-
 function resolveTransferPrefill(
 	url: URL,
 	activeMemberIds: ReadonlySet<string>
@@ -140,7 +128,7 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// entry-currency picker, the group-scoped entry-currency validator, and the
 	// resolved descriptors the §7.6 conversion needs (a custom code cannot be looked
 	// up in the compiled-in seeded constant).
-	const entryCurrencies = await loadEntryCurrencies(user.id, params.id);
+	const entryCurrencies = await loadEntryCurrencies(user.id, params.id, 'Group not found');
 
 	const members = await listMembers({ userId: user.id, groupId: params.id });
 	// Only ACTIVE members are selectable when creating a new transaction (PLAN §6.3
@@ -227,40 +215,14 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	return {
 		form,
 		group: { id: group.id, name: group.name, settlementCurrency },
-		// The settlement currency is always one of the seeded 29 (ADR-0014 decision 1),
-		// where `displayCode === code` by definition.
-		currency: currency
-			? {
-					code: currency.code,
-					displayCode: currency.code,
-					symbol: currency.symbol,
-					exponent: currency.exponent
-				}
-			: {
-					code: settlementCurrency,
-					displayCode: settlementCurrency,
-					symbol: settlementCurrency,
-					exponent: 2
-				},
-		// The group's entry-currency list for the FX picker (§7.6 / §7.5.2) — the
-		// seeded 29 plus this group's custom rows. The form defaults the picker to the
-		// group settlement currency; choosing a different one reveals the rate /
-		// settlement-total entry. `displayCode` is what the picker renders; the opaque
-		// `code` is only ever the posted value.
-		currencies: entryCurrencies.map((c) => ({
-			code: c.code,
-			displayCode: c.displayCode,
-			symbol: c.symbol,
-			exponent: c.exponent,
-			name: c.name
-		})),
+		currency: toSettlementCurrencyView(settlementCurrency),
+		// The group's entry-currency list for the FX picker (§7.6 / §7.5.2). The form
+		// defaults the picker to the group settlement currency; choosing a different one
+		// reveals the rate / settlement-total entry.
+		currencies: toCurrencyOptions(entryCurrencies),
 		members: activeMembers,
 		viewerMemberId: viewerMember?.id ?? null,
-		// Both category sets so the client can swap the picker when the type toggles.
-		categories: {
-			spending: categoriesFor('spending').map((c) => ({ id: c.id, name: c.name, icon: c.icon })),
-			transfer: categoriesFor('transfer').map((c) => ({ id: c.id, name: c.name, icon: c.icon }))
-		}
+		categories: toCategoryOptions()
 	};
 };
 
@@ -270,25 +232,14 @@ export const actions: Actions = {
 		// the redirect; keep it above the validate/try below.
 		const user = requireUser(locals, { redirectTo: pathAndQuery(url) });
 
-		// Re-load the group for its settlement currency + member allow-list so the
-		// schema is rebuilt server-side from trusted group context (NOT the payload).
-		const group = await getGroupForUser(user.id, params.id);
-		if (!group) {
-			error(404, 'Group not found');
-		}
-		const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
-
-		const activeMembers = (await listMembers({ userId: user.id, groupId: params.id })).filter(
-			(m) => m.deactivatedAt === null
+		// Rebuild the shared schema server-side from TRUSTED group context — the
+		// settlement currency, the active member allow-list and the group's entry
+		// currencies, all re-read rather than taken from the payload.
+		const { settlementCurrency, schema } = await loadTransactionWriteContext(
+			user.id,
+			params.id,
+			'Group not found'
 		);
-		// Group-scoped entry-currency set — trusted group context, re-read here rather
-		// than trusted from the payload (same rule as the settlement currency above).
-		const entryCurrencies = await loadEntryCurrencies(user.id, params.id);
-		const schema = buildTransactionSchema({
-			settlementCurrency,
-			memberIds: activeMembers.map((m) => m.id),
-			entryCurrencies
-		});
 
 		const form = await superValidate(request, zod4(schema));
 		if (!form.valid) {

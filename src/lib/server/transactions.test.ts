@@ -1671,7 +1671,7 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 		expect((audit[0].via as { name: string }).name).toBe('tx');
 	});
 
-	it('deletes item-shares per existing item id when the txn HAD items', async () => {
+	it('deletes the item-shares of every existing item when the txn HAD items', async () => {
 		queueEditSelects({ itemIds: [{ id: 'old-i0' }, { id: 'old-i1' }] });
 		await updateTransaction({
 			userId: 'u1',
@@ -1680,8 +1680,20 @@ describe('updateTransaction — re-resolve + replace children + audit (PLAN §7.
 			input: equalInput(),
 			settlementCurrency: 'THB'
 		});
-		// One item-shares delete per existing item id (keyed by item_id).
-		expect(deletesTo('transaction_item_shares')).toHaveLength(2);
+		// ONE delete covering every existing item id (keyed by item_id, via `inArray`).
+		expect(deletesTo('transaction_item_shares')).toHaveLength(1);
+	});
+
+	it('issues NO item-shares delete when the txn had no items', async () => {
+		queueEditSelects({ itemIds: [] });
+		await updateTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			txnId: 't1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(deletesTo('transaction_item_shares')).toHaveLength(0);
 	});
 
 	it('REFUSES to edit a soft-deleted txn (TransactionDeletedError); no writes', async () => {

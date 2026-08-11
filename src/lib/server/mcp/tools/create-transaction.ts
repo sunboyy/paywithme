@@ -71,20 +71,19 @@ import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg } from './args';
 import { loadGroupView, loadMemberViews } from './load';
 import {
+	argumentErrorResult,
 	MCP_TRANSACTION_ARGUMENT_FIELDS,
 	McpTransactionArgumentError,
 	toTransactionInput,
 	validateMcpTransactionArguments
 } from './transaction-input';
 import {
-	AMOUNT_BENEFICIARIES_PROPERTY,
 	AMOUNT_BENEFICIARY_PROPERTY,
 	CHARGE_PROPERTY,
-	forbidProperties,
 	ITEM_PROPERTY,
 	MONEY_PROPERTY,
-	SHARE_BENEFICIARIES_PROPERTY,
-	SHARE_BENEFICIARY_PROPERTY
+	SHARE_BENEFICIARY_PROPERTY,
+	SPLIT_SHAPE_ONE_OF
 } from './transaction-json-schema';
 
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
@@ -133,19 +132,6 @@ function remapTransactionValidationError(
 		}),
 		error.message
 	);
-}
-
-function argumentErrorResult(error: McpTransactionArgumentError) {
-	const fieldErrors: Record<string, string[]> = {};
-	for (const issue of error.issues) {
-		const field = issue.path.join('.') || 'arguments';
-		(fieldErrors[field] ??= []).push(issue.message);
-		// Preserve the original top-level field contract (`splitBetween`, `amount`, …)
-		// while also providing the exact rich nested path an agent can correct.
-		const root = typeof issue.path[0] === 'string' ? issue.path[0] : undefined;
-		if (root !== undefined && root !== field) (fieldErrors[root] ??= []).push(issue.message);
-	}
-	return toolError('validation_error', error.message, { fieldErrors });
 }
 
 /**
@@ -281,34 +267,7 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 				}
 			},
 			required: ['groupId', 'title'],
-			oneOf: [
-				{
-					properties: { splitMode: { enum: ['equal'] } },
-					required: ['amount', 'splitBetween'],
-					...forbidProperties('beneficiaries', 'items', 'charges')
-				},
-				{
-					properties: {
-						splitMode: { const: 'amount' },
-						beneficiaries: AMOUNT_BENEFICIARIES_PROPERTY
-					},
-					required: ['splitMode', 'amount', 'beneficiaries'],
-					...forbidProperties('splitBetween', 'items', 'charges')
-				},
-				{
-					properties: {
-						splitMode: { const: 'share' },
-						beneficiaries: SHARE_BENEFICIARIES_PROPERTY
-					},
-					required: ['splitMode', 'amount', 'beneficiaries'],
-					...forbidProperties('splitBetween', 'items', 'charges')
-				},
-				{
-					properties: { splitMode: { const: 'itemized' } },
-					required: ['splitMode', 'items'],
-					...forbidProperties('amount', 'splitBetween', 'beneficiaries')
-				}
-			],
+			oneOf: SPLIT_SHAPE_ONE_OF,
 			additionalProperties: false
 		},
 		annotations: {

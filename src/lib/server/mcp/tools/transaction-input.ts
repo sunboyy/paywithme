@@ -14,6 +14,7 @@ import {
 	type TransactionInput
 } from '$lib/schemas/transaction';
 import { percentStringToBasisPoints } from '../percentage';
+import { toolError } from '../errors';
 import { amountArg } from './args';
 
 const memberId = z.string().min(1, 'A member id is required. Call `list_members` first.');
@@ -189,6 +190,23 @@ export class McpTransactionArgumentError extends Error {
 		super(issues.map((entry) => `${entry.path.join('.')}: ${entry.message}`).join('; '));
 		this.name = 'McpTransactionArgumentError';
 	}
+}
+
+/**
+ * Turn an {@link McpTransactionArgumentError} into the `validation_error` tool result
+ * both write tools return for it. Each issue is reported at its exact nested argument
+ * path AND (when they differ) at its top-level root — the nested path is what an agent
+ * corrects, the root is the field contract the tools' JSON Schema advertises.
+ */
+export function argumentErrorResult(error: McpTransactionArgumentError) {
+	const fieldErrors: Record<string, string[]> = {};
+	for (const issue of error.issues) {
+		const field = issue.path.join('.') || 'arguments';
+		(fieldErrors[field] ??= []).push(issue.message);
+		const root = typeof issue.path[0] === 'string' ? issue.path[0] : undefined;
+		if (root !== undefined && root !== field) (fieldErrors[root] ??= []).push(issue.message);
+	}
+	return toolError('validation_error', error.message, { fieldErrors });
 }
 
 function parseMcpAmount(

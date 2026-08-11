@@ -69,7 +69,7 @@ import {
 	transactionItemShares,
 	transactionCharges
 } from './db/transactions-schema';
-import { members } from './db/groups-schema';
+import { groups, members } from './db/groups-schema';
 import { currencies } from './db/currencies-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { writeAuditLog, type AuditVia } from './audit';
@@ -255,15 +255,9 @@ export async function createTransaction({
 			now
 		});
 
-		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). Human summary via
-		// `lib/money` `formatAmount` in the ENTRY currency (e.g. "Added spending
-		// 'Dinner' — ฿90.00"); for a foreign transaction the settlement equivalent
-		// is appended (e.g. "CN¥90.00 (฿436.50)", §7.6).
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
 		const entryCurrency = asEntryCurrencyCode(data.currency);
-		const isForeign = entryCurrency !== currency;
-		const amountSummary = isForeign
-			? `${formatAmount(data.amountTotal, entryDescriptor)} (${formatAmount(amountTotalSettlement, currency)})`
-			: formatAmount(data.amountTotal, entryDescriptor);
+		const amountSummary = formatAuditAmount(data, entryDescriptor, currency, amountTotalSettlement);
 		await writeAuditLog(tx, {
 			groupId,
 			actorUserId: userId,
@@ -298,6 +292,24 @@ export async function createTransaction({
  */
 function dateOnlyToCreatedAt(day: string): Date {
 	return new Date(`${day}T12:00:00.000Z`);
+}
+
+/**
+ * The money phrase an audit summary carries for a transaction write: the amount in
+ * the ENTRY currency (e.g. "฿90.00"), with the settlement equivalent appended when
+ * the two differ (e.g. "CN¥90.00 (฿436.50)", §7.6). Shared so the `create` and `edit`
+ * rows can never drift on how a foreign amount reads.
+ */
+function formatAuditAmount(
+	data: TransactionInput,
+	entryDescriptor: CurrencyDescriptor,
+	settlementCurrency: SeededCurrencyCode,
+	amountTotalSettlement: number
+): string {
+	const entry = formatAmount(data.amountTotal, entryDescriptor);
+	return asEntryCurrencyCode(data.currency) === settlementCurrency
+		? entry
+		: `${entry} (${formatAmount(amountTotalSettlement, settlementCurrency)})`;
 }
 
 /**
@@ -557,8 +569,13 @@ async function deleteTransactionChildren(exec: DbExecutor, transactionId: string
 		.select({ id: transactionItems.id })
 		.from(transactionItems)
 		.where(eq(transactionItems.transactionId, transactionId));
-	for (const { id } of itemRows) {
-		await exec.delete(transactionItemShares).where(eq(transactionItemShares.itemId, id));
+	if (itemRows.length > 0) {
+		await exec.delete(transactionItemShares).where(
+			inArray(
+				transactionItemShares.itemId,
+				itemRows.map((i) => i.id)
+			)
+		);
 	}
 	await exec.delete(transactionItems).where(eq(transactionItems.transactionId, transactionId));
 	await exec.delete(transactionCharges).where(eq(transactionCharges.transactionId, transactionId));
@@ -704,8 +721,6 @@ async function loadSettlementCurrency(
 	groupId: string,
 	executor: DbExecutor
 ): Promise<SeededCurrencyCode> {
-	// Import locally to avoid a top-level cycle through groups-schema's re-exports.
-	const { groups } = await import('./db/groups-schema');
 	const [row] = await executor
 		.select({ settlementCurrency: groups.settlementCurrency })
 		.from(groups)
@@ -732,9 +747,6 @@ async function loadSettlementCurrency(
  * re-resolving an edited transaction reproduces its original rounding exactly.
  */
 async function allocateRoundingSeq(executor: DbExecutor, groupId: string): Promise<number> {
-	// Import locally to avoid a top-level cycle through groups-schema's re-exports
-	// (same reason as `loadSettlementCurrency` above).
-	const { groups } = await import('./db/groups-schema');
 	const [row] = await executor
 		.update(groups)
 		.set({ nextRoundingSeq: sql`${groups.nextRoundingSeq} + 1` })
@@ -1634,12 +1646,9 @@ export async function updateTransaction({
 		});
 
 		// `edit` audit row — IN THE SAME TRANSACTION (PLAN §12.1). Summary + before→after
-		// of key fields (title / amount), in the entry currency (settlement appended when foreign).
+		// of key fields (title / amount).
 		const entryCurrency = asEntryCurrencyCode(data.currency);
-		const isForeign = entryCurrency !== currency;
-		const amountSummary = isForeign
-			? `${formatAmount(data.amountTotal, entryDescriptor)} (${formatAmount(amountTotalSettlement, currency)})`
-			: formatAmount(data.amountTotal, entryDescriptor);
+		const amountSummary = formatAuditAmount(data, entryDescriptor, currency, amountTotalSettlement);
 		await writeAuditLog(tx, {
 			groupId,
 			actorUserId: actor,
