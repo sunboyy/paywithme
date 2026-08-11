@@ -98,6 +98,9 @@ import {
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
 
+/** An open transaction handle whose row locks survive until the write commits. */
+type TransactionExecutor = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /**
  * The submitted transaction input failed server-side validation (the SAME shared
  * `buildTransactionSchema` the client uses). Carries the Zod issues so the route
@@ -223,50 +226,12 @@ export async function createTransaction({
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 
-		// Settlement currency is GROUP CONTEXT. Prefer the passed value (loaded from
-		// the group row by the route); fall back to a tx read so the service is
-		// usable standalone. NEVER read it from the payload.
-		const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, tx));
-
-		// Build the schema server-side from the group's settlement currency + active
-		// member ids, then RE-VALIDATE — the single source of truth (task 4.4). The
-		// member allow-list rejects payers/beneficiaries outside the group.
-		const memberIds = await activeMemberIds(groupId, tx);
-		// The ENTRY-currency allow-list is group context too (PLAN §7.5.2): the seeded
-		// 29 plus THIS group's custom rows, resolved on the same handle (and under the
-		// `FOR SHARE` that freezes them) so it is part of the same unit of work as the
-		// write it gates, then narrowed to the display code the caller asserted.
-		const entryCurrencies = gateByExpectedDisplayCode(
-			await resolveEntryCurrencies(groupId, input, tx),
+		const { currency, data, entryDescriptor } = await validateTransactionForWrite(tx, {
+			groupId,
+			input,
+			settlementCurrency,
 			expectedDisplayCode
-		);
-		// Validating against THOSE descriptors is what binds the caller's minor units to
-		// a scale. The payload's `currencyExponent` states the exponent it parsed at, and
-		// the schema compares it against the row we hold `FOR SHARE`. Without that
-		// comparison the freeze is only half a guarantee: it stops the exponent moving
-		// between our READ and our INSERT, but the caller parsed its amounts in an EARLIER
-		// REQUEST, and a group-defined currency stays re-scalable until something
-		// references it (ADR-0014 decision 5). The §7.6 settlement equality catches most of
-		// that gap incidentally — but not the case where both scales round the settlement
-		// total to 0, which is why the assertion has to be on the scale itself.
-		const schema = buildTransactionSchema({
-			settlementCurrency: currency,
-			memberIds,
-			entryCurrencies
 		});
-		const parsed = schema.safeParse(input);
-		if (!parsed.success) {
-			throw new TransactionValidationError(parsed.error.issues);
-		}
-		const data = parsed.data;
-		// The RESOLVED entry currency — a custom one carries its exponent/symbol only
-		// on its row, so every conversion and every formatted amount below takes the
-		// descriptor, never the bare code (ADR-0014 decision 4).
-		const entryDescriptor = requireEntryDescriptor(entryCurrencies, data.currency);
-
-		// Category must exist in the seeded set AND match the type (the schema already
-		// checks the in-app constant; this is the DB-existence half, task 4.7's job).
-		await assertCategoryExists(data.categoryId, tx);
 
 		const transactionId = crypto.randomUUID();
 
@@ -806,6 +771,61 @@ async function assertCategoryExists(categoryId: string, executor: DbExecutor): P
 	if (rows.length === 0) {
 		throw new TransactionValidationError([makeIssue(['categoryId'], 'Unknown category')]);
 	}
+}
+
+/**
+ * Build trusted group context and validate a transaction write once for both create
+ * and edit. Keeping this pipeline shared prevents the two mutations from drifting
+ * on member scope, custom-currency locking, display-code gating, scale binding, or
+ * category checks.
+ */
+async function validateTransactionForWrite(
+	executor: TransactionExecutor,
+	{
+		groupId,
+		input,
+		settlementCurrency,
+		expectedDisplayCode
+	}: {
+		groupId: string;
+		input: unknown;
+		settlementCurrency?: SeededCurrencyCode;
+		expectedDisplayCode?: string;
+	}
+): Promise<{
+	currency: SeededCurrencyCode;
+	data: TransactionInput;
+	entryDescriptor: CurrencyDescriptor;
+}> {
+	// Settlement currency and member ids are trusted group context, never payload
+	// fields. The fallback read keeps the service usable without a route-provided
+	// settlement currency.
+	const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, executor));
+	const memberIds = await activeMemberIds(groupId, executor);
+
+	// Custom descriptors are read and locked on the write transaction, then narrowed
+	// to the display code asserted by REST callers. The schema also binds the posted
+	// minor-unit scale to the descriptor held by that lock.
+	const entryCurrencies = gateByExpectedDisplayCode(
+		await resolveEntryCurrencies(groupId, input, executor),
+		expectedDisplayCode
+	);
+	const parsed = buildTransactionSchema({
+		settlementCurrency: currency,
+		memberIds,
+		entryCurrencies
+	}).safeParse(input);
+	if (!parsed.success) {
+		throw new TransactionValidationError(parsed.error.issues);
+	}
+
+	const data = parsed.data;
+	const entryDescriptor = requireEntryDescriptor(entryCurrencies, data.currency);
+	// The schema checks the in-app category/type pairing; this is the matching DB
+	// existence check required before the transaction row is written.
+	await assertCategoryExists(data.categoryId, executor);
+
+	return { currency, data, entryDescriptor };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1589,31 +1609,12 @@ export async function updateTransaction({
 			throw new TransactionDeletedError();
 		}
 
-		const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, tx));
-
-		const memberIds = await activeMemberIds(groupId, tx);
-		// Group-scoped entry-currency allow-list, locked + display-code gated — see
-		// `createTransaction`.
-		const entryCurrencies = gateByExpectedDisplayCode(
-			await resolveEntryCurrencies(groupId, input, tx),
+		const { currency, data, entryDescriptor } = await validateTransactionForWrite(tx, {
+			groupId,
+			input,
+			settlementCurrency,
 			expectedDisplayCode
-		);
-		// The same scale binding as `createTransaction`: `currencyExponent` is checked
-		// against the row locked above, so an edit can no more be recorded at a scale it
-		// was not entered at than a create can.
-		const schema = buildTransactionSchema({
-			settlementCurrency: currency,
-			memberIds,
-			entryCurrencies
 		});
-		const parsed = schema.safeParse(input);
-		if (!parsed.success) {
-			throw new TransactionValidationError(parsed.error.issues);
-		}
-		const data = parsed.data;
-		const entryDescriptor = requireEntryDescriptor(entryCurrencies, data.currency);
-
-		await assertCategoryExists(data.categoryId, tx);
 
 		// Replace children: delete the existing payer / share / item / item-share /
 		// charge rows, then the shared engine re-inserts the freshly-resolved ones and
