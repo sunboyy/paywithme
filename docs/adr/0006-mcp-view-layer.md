@@ -1,6 +1,8 @@
 # ADR-0006 — MCP gets its own view layer, not the `/api/v1` DTOs
 
-- **Status:** Accepted
+- **Status:** Accepted — the "IDs only in write-tool schemas" clause is
+  superseded by ADR-0015; `isYou`, untrusted-envelope naming, and the
+  similarity echo below stand unchanged.
 - **Date:** 2026-07-14
 
 ## Context
