@@ -212,19 +212,19 @@ describe('the shipped registry (#28 + #29)', () => {
 			label: 'Equal item',
 			amount: '10.00',
 			splitMode: 'equal',
-			beneficiaries: [{ memberId: 'mem_a' }]
+			beneficiaries: [{ memberName: 'Alice' }]
 		};
 		const amountItem = {
 			label: 'Exact item',
 			amount: '10.00',
 			splitMode: 'amount',
-			beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }]
+			beneficiaries: [{ memberName: 'Alice', amount: '10.00' }]
 		};
 		const shareItem = {
 			label: 'Weighted item',
 			amount: '10.00',
 			splitMode: 'share',
-			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }]
+			beneficiaries: [{ memberName: 'Alice', shareWeight: 1 }]
 		};
 		const itemized = (percent = '7.25') => ({
 			...base,
@@ -240,19 +240,19 @@ describe('the shipped registry (#28 + #29)', () => {
 		const expectInvalid = (value: unknown) => expect(validate(value)).toBe(false);
 
 		// Every accepted top-level variant, including missing splitMode legacy equal.
-		expectValid({ ...base, amount: '10.00', splitBetween: ['mem_a'] });
-		expectValid({ ...base, splitMode: 'equal', amount: '10.00', splitBetween: ['mem_a'] });
+		expectValid({ ...base, amount: '10.00', splitBetween: ['Alice'] });
+		expectValid({ ...base, splitMode: 'equal', amount: '10.00', splitBetween: ['Alice'] });
 		expectValid({
 			...base,
 			splitMode: 'amount',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }]
+			beneficiaries: [{ memberName: 'Alice', amount: '10.00' }]
 		});
 		expectValid({
 			...base,
 			splitMode: 'share',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }]
+			beneficiaries: [{ memberName: 'Alice', shareWeight: 1 }]
 		});
 		expectValid(itemized());
 
@@ -262,7 +262,7 @@ describe('the shipped registry (#28 + #29)', () => {
 			expectInvalid({
 				...base,
 				amount: '10.00',
-				splitBetween: ['mem_a'],
+				splitBetween: ['Alice'],
 				[field]: field === 'items' ? [equalItem] : []
 			});
 		}
@@ -271,72 +271,86 @@ describe('the shipped registry (#28 + #29)', () => {
 				...base,
 				splitMode,
 				amount: '10.00',
-				splitBetween: ['mem_a'],
+				splitBetween: ['Alice'],
 				beneficiaries:
 					splitMode === 'amount'
-						? [{ memberId: 'mem_a', amount: '10.00' }]
-						: [{ memberId: 'mem_a', shareWeight: 1 }]
+						? [{ memberName: 'Alice', amount: '10.00' }]
+						: [{ memberName: 'Alice', shareWeight: 1 }]
 			});
 		}
+
+		// The pre-ADR-0015 wire is not dual-accepted: `memberId` is not a property the
+		// advertised schema knows, so a model copying an id out of a read view is told at
+		// the schema level rather than getting a silent reinterpretation.
+		expectInvalid({
+			...base,
+			splitMode: 'amount',
+			amount: '10.00',
+			beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }]
+		});
+		expectInvalid({
+			...itemized(),
+			items: [{ ...amountItem, beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }] }]
+		});
 
 		// Beneficiary variants are exact: required mode input, with conflicting input forbidden.
 		expectInvalid({
 			...base,
 			splitMode: 'amount',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a' }]
+			beneficiaries: [{ memberName: 'Alice' }]
 		});
 		expectInvalid({
 			...base,
 			splitMode: 'amount',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a', amount: '10.00', shareWeight: 1 }]
+			beneficiaries: [{ memberName: 'Alice', amount: '10.00', shareWeight: 1 }]
 		});
 		expectInvalid({
 			...base,
 			splitMode: 'share',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a' }]
+			beneficiaries: [{ memberName: 'Alice' }]
 		});
 		expectInvalid({
 			...base,
 			splitMode: 'share',
 			amount: '10.00',
-			beneficiaries: [{ memberId: 'mem_a', shareWeight: 1, amount: '10.00' }]
+			beneficiaries: [{ memberName: 'Alice', shareWeight: 1, amount: '10.00' }]
 		});
 		expectInvalid({
 			...itemized(),
-			items: [{ ...amountItem, beneficiaries: [{ memberId: 'mem_a' }] }]
+			items: [{ ...amountItem, beneficiaries: [{ memberName: 'Alice' }] }]
 		});
 		expectInvalid({
 			...itemized(),
 			items: [
 				{
 					...amountItem,
-					beneficiaries: [{ memberId: 'mem_a', amount: '10.00', shareWeight: 1 }]
+					beneficiaries: [{ memberName: 'Alice', amount: '10.00', shareWeight: 1 }]
 				}
 			]
 		});
 		expectInvalid({
 			...itemized(),
-			items: [{ ...shareItem, beneficiaries: [{ memberId: 'mem_a' }] }]
+			items: [{ ...shareItem, beneficiaries: [{ memberName: 'Alice' }] }]
 		});
 		expectInvalid({
 			...itemized(),
 			items: [
 				{
 					...shareItem,
-					beneficiaries: [{ memberId: 'mem_a', shareWeight: 1, amount: '10.00' }]
+					beneficiaries: [{ memberName: 'Alice', shareWeight: 1, amount: '10.00' }]
 				}
 			]
 		});
 		expectInvalid({
 			...itemized(),
-			items: [{ ...equalItem, beneficiaries: [{ memberId: 'mem_a', amount: '10.00' }] }]
+			items: [{ ...equalItem, beneficiaries: [{ memberName: 'Alice', amount: '10.00' }] }]
 		});
 		expectInvalid({
 			...itemized(),
-			items: [{ ...equalItem, beneficiaries: [{ memberId: 'mem_a', shareWeight: 1 }] }]
+			items: [{ ...equalItem, beneficiaries: [{ memberName: 'Alice', shareWeight: 1 }] }]
 		});
 
 		// Percentage pattern carries the same 0–100, two-decimal boundary as runtime.
@@ -392,9 +406,19 @@ describe('the shipped registry (#28 + #29)', () => {
 
 	it('the reversibility tools tell the model that ids are not names, and name each other (#35)', () => {
 		// The controls are only controls if the model reads them where it decides (ADR-0006).
+		// A TRANSACTION is still referred to by id — `txnId` comes from `list_transactions`,
+		// never from a title — so these three keep saying so.
 		for (const name of ['update_transaction', 'delete_transaction', 'restore_transaction']) {
-			expect(findTool(name)?.definition.description, name).toMatch(/IDS ONLY, NEVER NAMES/);
+			expect(findTool(name)?.definition.description, name).toMatch(
+				/IDS ONLY, NEVER NAMES|IS AN ID/
+			);
 		}
+		// But a PERSON is now referred to by display name (ADR-0015), and `update_transaction`
+		// is the one of the three that takes member references at all. Its description must
+		// state BOTH rules, because getting them the wrong way round is the likely mistake.
+		const update = findTool('update_transaction')?.definition.description ?? '';
+		expect(update).toMatch(/`txnId` IS AN ID/);
+		expect(update).toMatch(/PEOPLE ARE NAMES, NOT IDS/);
 		// A delete must advertise its own undo: ADR-0003's "an injected write is … undoable"
 		// is only true if the agent can find the undo.
 		expect(findTool('delete_transaction')?.definition.description).toMatch(/restore_transaction/);
@@ -410,11 +434,12 @@ describe('the shipped registry (#28 + #29)', () => {
 		expect(names.slice(-WRITE_TOOLS.length)).toEqual(WRITE_TOOLS);
 	});
 
-	it('`settle_up` tells the model `from` defaults to it, and that ids are not names (#34)', () => {
+	it('`settle_up` tells the model `from` defaults to it, and that names are not ids (#34)', () => {
 		// The wrong-payer and wrong-payee controls are only controls if the model reads
-		// them where it decides: the tool description (ADR-0006).
+		// them where it decides: the tool description (ADR-0006, amended by ADR-0015 —
+		// `to` / `from` are DISPLAY NAMES the server resolves, not member ids).
 		const description = findTool('settle_up')?.definition.description ?? '';
-		expect(description).toMatch(/IDS ONLY, NEVER NAMES/);
+		expect(description).toMatch(/NAMES, NOT IDS/);
 		expect(description).toMatch(/defaults to you/i);
 	});
 

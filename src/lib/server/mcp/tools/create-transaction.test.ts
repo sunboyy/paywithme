@@ -132,17 +132,18 @@ beforeEach(() => {
 });
 
 describe('create_transaction rich wiring', () => {
-	it('keeps the legacy equal call and its existing MCP field names', async () => {
+	it('keeps the legacy equal call, now naming members by DISPLAY NAME (ADR-0015)', async () => {
 		const result = await run({
 			groupId: GROUP_ID,
 			title: 'Lunch',
 			amount: '240.00',
-			splitBetween: ['mem_me', 'mem_bob']
+			splitBetween: ['Alice', 'Bob']
 		});
 		expect(result.isError).toBeUndefined();
 		expect(inputPassed()).toMatchObject({
 			amountTotal: 24_000,
 			splitMode: 'equal',
+			// Names in, ids out: the service layer below is untouched by ADR-0015.
 			payers: [{ memberId: 'mem_me', amountPaid: 24_000 }],
 			beneficiaries: [{ memberId: 'mem_me' }, { memberId: 'mem_bob' }]
 		});
@@ -152,8 +153,8 @@ describe('create_transaction rich wiring', () => {
 		[
 			'amount',
 			[
-				{ memberId: 'mem_me', amount: '4.25' },
-				{ memberId: 'mem_bob', amount: '5.75' }
+				{ memberName: 'Alice', amount: '4.25' },
+				{ memberName: 'Bob', amount: '5.75' }
 			],
 			[
 				{ memberId: 'mem_me', rawAmount: 425 },
@@ -163,8 +164,8 @@ describe('create_transaction rich wiring', () => {
 		[
 			'share',
 			[
-				{ memberId: 'mem_me', shareWeight: 1 },
-				{ memberId: 'mem_bob', shareWeight: 3 }
+				{ memberName: 'Alice', shareWeight: 1 },
+				{ memberName: 'Bob', shareWeight: 3 }
 			],
 			[
 				{ memberId: 'mem_me', shareWeight: 1 },
@@ -194,15 +195,15 @@ describe('create_transaction rich wiring', () => {
 			groupId: GROUP_ID,
 			title: 'Receipt',
 			splitMode: 'itemized',
-			paidBy: 'mem_bob',
+			paidBy: 'Bob',
 			items: [
 				{
 					label: 'Food',
 					amount: '100.00',
 					splitMode: 'amount',
 					beneficiaries: [
-						{ memberId: 'mem_me', amount: '40.00' },
-						{ memberId: 'mem_bob', amount: '60.00' }
+						{ memberName: 'Alice', amount: '40.00' },
+						{ memberName: 'Bob', amount: '60.00' }
 					]
 				}
 			],
@@ -244,7 +245,8 @@ describe('create_transaction rich wiring', () => {
 					label: 'Food',
 					amount: '10.00',
 					splitMode: 'equal',
-					beneficiaries: [{ memberId: 'mem_inactive' }]
+					// "Gone" is a real name on the roster — of a DEACTIVATED member.
+					beneficiaries: [{ memberName: 'Gone' }]
 				}
 			]
 		});
@@ -253,8 +255,108 @@ describe('create_transaction rich wiring', () => {
 			error: { code: string; details: { fieldErrors: Record<string, string[]> } };
 		};
 		expect(envelope.error.code).toBe('validation_error');
-		expect(envelope.error.details.fieldErrors).toHaveProperty('items.0.beneficiaries.0.memberId');
+		expect(envelope.error.details.fieldErrors['items.0.beneficiaries.0.memberName'][0]).toMatch(
+			/removed from this group/
+		);
 		expect(withDerivedIdempotency).not.toHaveBeenCalled();
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('refuses a member ID where a member NAME belongs — no dual-accept (ADR-0015)', async () => {
+		// The pre-ADR-0015 wire, sent by an agent that learned the old contract. It must be
+		// an ordinary, self-correctable validation_error — never silently accepted.
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['mem_me', 'mem_bob']
+		});
+
+		expect(result.isError).toBe(true);
+		const envelope = result.structuredContent as unknown as {
+			error: { code: string; details: { fieldErrors: Record<string, string[]> } };
+		};
+		expect(envelope.error.code).toBe('validation_error');
+		// BOTH names are reported at once, each at its own index, and at the root field.
+		expect(Object.keys(envelope.error.details.fieldErrors).sort()).toEqual([
+			'splitBetween',
+			'splitBetween.0',
+			'splitBetween.1'
+		]);
+		expect(envelope.error.details.fieldErrors['splitBetween.0'][0]).toMatch(/list_members/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('a name matching NO member is a self-correctable validation_error naming what was searched', async () => {
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['Alice', 'Carol']
+		});
+
+		expect(result.isError).toBe(true);
+		const envelope = result.structuredContent as unknown as {
+			error: { code: string; message: string; details: { fieldErrors: Record<string, string[]> } };
+		};
+		expect(envelope.error.code).toBe('validation_error');
+		expect(envelope.error.details.fieldErrors['splitBetween.1'][0]).toBe(
+			'No active member of this group is named "Carol". Call `list_members` and pass a ' +
+				'display name exactly as it appears there — member names, not member ids.'
+		);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('matches a name the way the uniqueness index does — normalized, and never by prefix', async () => {
+		await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['  aLiCe ', 'Bob']
+		});
+		expect(inputPassed().beneficiaries).toEqual([{ memberId: 'mem_me' }, { memberId: 'mem_bob' }]);
+
+		vi.clearAllMocks();
+		loadGroupView.mockResolvedValue({ settlementCurrency: 'THB' });
+		loadMemberViews.mockResolvedValue(members);
+
+		// `Ali` is a prefix of `Alice` and matches nobody: the money path never guesses.
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['Ali']
+		});
+		expect(result.isError).toBe(true);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('resolves an explicit `paidBy` NAME, and defaults to you when it is omitted', async () => {
+		await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			paidBy: 'Bob',
+			splitBetween: ['Alice', 'Bob']
+		});
+		expect(inputPassed().payers).toEqual([{ memberId: 'mem_bob', amountPaid: 24_000 }]);
+	});
+
+	it('reports an unresolvable `paidBy` under `paidBy`, not under the split', async () => {
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			paidBy: 'Gone',
+			splitBetween: ['Alice', 'Bob']
+		});
+
+		expect(result.isError).toBe(true);
+		const envelope = result.structuredContent as unknown as {
+			error: { code: string; details: { fieldErrors: Record<string, string[]> } };
+		};
+		expect(envelope.error.code).toBe('validation_error');
+		expect(envelope.error.details.fieldErrors.paidBy[0]).toMatch(/removed from this group/);
 		expect(createTransaction).not.toHaveBeenCalled();
 	});
 
@@ -268,7 +370,7 @@ describe('create_transaction rich wiring', () => {
 			title: 'Round',
 			amount: '3',
 			currency: 'BEER',
-			splitBetween: ['mem_me', 'mem_bob']
+			splitBetween: ['Alice', 'Bob']
 		});
 
 		expect(result.isError).toBe(true);

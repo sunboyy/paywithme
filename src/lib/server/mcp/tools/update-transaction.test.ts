@@ -65,7 +65,15 @@ const ROSTER: MemberListItem[] = [
 		deactivatedAt: null,
 		isLinked: true
 	},
-	{ id: 'mem_bob', displayName: 'Bob', userId: 'user_bob', deactivatedAt: null, isLinked: true }
+	{ id: 'mem_bob', displayName: 'Bob', userId: 'user_bob', deactivatedAt: null, isLinked: true },
+	// Removed from the group (§6.3): still in the ledger, never in a NEW split.
+	{
+		id: 'mem_gone',
+		displayName: 'Gone',
+		userId: null,
+		deactivatedAt: '2026-07-05T00:00:00.000Z',
+		isLinked: false
+	}
 ];
 
 /**
@@ -169,7 +177,7 @@ const CORRECT_THE_AMOUNT = {
 	txnId: TXN_ID,
 	title: 'Lunch',
 	amount: '950',
-	splitBetween: ['mem_me', 'mem_bob']
+	splitBetween: ['Alice', 'Bob']
 };
 
 beforeEach(() => {
@@ -210,9 +218,12 @@ describe('update_transaction — the tool declaration', () => {
 		expect(updateTransactionTool.definition.annotations.readOnlyHint).toBe(false);
 	});
 
-	it('tells the model it REPLACES, that ids are not names, and to read the txn first', () => {
+	it('tells the model it REPLACES, that people are NAMES (not ids), and to read the txn first', () => {
 		const description = updateTransactionTool.definition.description;
-		expect(description).toMatch(/IDS ONLY, NEVER NAMES/);
+		// ADR-0015 flipped the member contract while leaving `txnId` an id: the description
+		// has to say both, because getting either half wrong is a rejected call.
+		expect(description).toMatch(/PEOPLE ARE NAMES, NOT IDS/);
+		expect(description).toMatch(/`txnId` IS AN ID/);
 		expect(description).toMatch(/get_transaction` FIRST/i);
 		// The sharpest edge of replacement semantics, stated where the model decides.
 		expect(description).toMatch(/omitting an item, beneficiary, or charge REMOVES it/i);
@@ -234,8 +245,8 @@ describe('update_transaction — the argument schema', () => {
 			updateTransactionTool.definition.inputSchema
 		);
 		const base = { groupId: GROUP_ID, txnId: TXN_ID, title: 'Lunch' };
-		expect(valid({ ...base, amount: '10', splitBetween: ['mem_me'] })).toBe(true);
-		expect(valid({ ...base, splitMode: 'equal', amount: '10', splitBetween: ['mem_me'] })).toBe(
+		expect(valid({ ...base, amount: '10', splitBetween: ['Alice'] })).toBe(true);
+		expect(valid({ ...base, splitMode: 'equal', amount: '10', splitBetween: ['Alice'] })).toBe(
 			true
 		);
 		expect(
@@ -243,7 +254,7 @@ describe('update_transaction — the argument schema', () => {
 				...base,
 				splitMode: 'amount',
 				amount: '10',
-				beneficiaries: [{ memberId: 'mem_me', amount: '10' }]
+				beneficiaries: [{ memberName: 'Alice', amount: '10' }]
 			})
 		).toBe(true);
 		expect(
@@ -251,7 +262,7 @@ describe('update_transaction — the argument schema', () => {
 				...base,
 				splitMode: 'share',
 				amount: '10',
-				beneficiaries: [{ memberId: 'mem_me', shareWeight: 1 }]
+				beneficiaries: [{ memberName: 'Alice', shareWeight: 1 }]
 			})
 		).toBe(true);
 		expect(
@@ -263,7 +274,7 @@ describe('update_transaction — the argument schema', () => {
 						label: 'Meal',
 						amount: '10',
 						splitMode: 'equal',
-						beneficiaries: [{ memberId: 'mem_me' }]
+						beneficiaries: [{ memberName: 'Alice' }]
 					}
 				],
 				charges: []
@@ -272,11 +283,11 @@ describe('update_transaction — the argument schema', () => {
 		for (const invalid of [
 			{ ...base, amount: '10', splitBetween: [] },
 			{ ...base, amount: '10', splitBetween: [''] },
-			{ ...base, title: '   ', amount: '10', splitBetween: ['mem_me'] },
-			{ ...base, txnId: '', amount: '10', splitBetween: ['mem_me'] },
-			{ ...base, currency: '', amount: '10', splitBetween: ['mem_me'] },
-			{ ...base, paidBy: '', amount: '10', splitBetween: ['mem_me'] },
-			{ ...base, categoryId: '', amount: '10', splitBetween: ['mem_me'] },
+			{ ...base, title: '   ', amount: '10', splitBetween: ['Alice'] },
+			{ ...base, txnId: '', amount: '10', splitBetween: ['Alice'] },
+			{ ...base, currency: '', amount: '10', splitBetween: ['Alice'] },
+			{ ...base, paidBy: '', amount: '10', splitBetween: ['Alice'] },
+			{ ...base, categoryId: '', amount: '10', splitBetween: ['Alice'] },
 			{
 				...base,
 				splitMode: 'itemized',
@@ -286,7 +297,7 @@ describe('update_transaction — the argument schema', () => {
 						label: 'Meal',
 						amount: '10',
 						splitMode: 'equal',
-						beneficiaries: [{ memberId: 'mem_me' }]
+						beneficiaries: [{ memberName: 'Alice' }]
 					}
 				]
 			}
@@ -327,7 +338,7 @@ describe('update_transaction — what an omitted argument keeps', () => {
 	});
 
 	it('accepts an EXPLICIT `paidBy` — genuinely correcting who paid is a real flow', async () => {
-		await run({ ...CORRECT_THE_AMOUNT, paidBy: 'mem_me' });
+		await run({ ...CORRECT_THE_AMOUNT, paidBy: 'Alice' });
 
 		expect(inputPassed().payers).toEqual([{ memberId: 'mem_me', amountPaid: 95000 }]);
 	});
@@ -357,7 +368,7 @@ describe('update_transaction — what an omitted argument keeps', () => {
 			})
 		);
 
-		await run({ ...CORRECT_THE_AMOUNT, title: 'Debt settlement', splitBetween: ['mem_me'] });
+		await run({ ...CORRECT_THE_AMOUNT, title: 'Debt settlement', splitBetween: ['Alice'] });
 
 		expect(inputPassed().type).toBe('transfer');
 	});
@@ -526,7 +537,7 @@ describe('update_transaction — the shapes it can safely replace', () => {
 					label: 'Meal',
 					amount: '100',
 					splitMode: 'equal',
-					beneficiaries: [{ memberId: 'mem_me' }]
+					beneficiaries: [{ memberName: 'Alice' }]
 				}
 			],
 			charges: [{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' }]
@@ -537,6 +548,145 @@ describe('update_transaction — the shapes it can safely replace', () => {
 			items: [{ label: 'Meal', amount: 10000, beneficiaries: [{ memberId: 'mem_me' }] }],
 			charges: [{ kind: 'vat', mode: 'percent', value: 800, base: 'items_subtotal', sortOrder: 0 }]
 		});
+	});
+});
+
+// ── Member references are NAMES, resolved server-side (ADR-0015 / #78) ─────
+
+describe('update_transaction — naming the people', () => {
+	/** The full error envelope, including the `fieldErrors` an agent corrects against. */
+	async function envelopeFor(args: Record<string, unknown>) {
+		const result = await updateTransactionTool.run(
+			{ principal },
+			updateTransactionTool.args.parse(args)
+		);
+		expect(result.isError).toBe(true);
+		return JSON.parse(result.content[0].text).error as {
+			code: string;
+			message: string;
+			details: { fieldErrors: Record<string, string[]> };
+		};
+	}
+
+	it.each([
+		[
+			'amount',
+			{
+				splitMode: 'amount',
+				amount: '10',
+				beneficiaries: [
+					{ memberName: 'Alice', amount: '4' },
+					{ memberName: 'Bob', amount: '6' }
+				]
+			},
+			[
+				{ memberId: 'mem_me', rawAmount: 400 },
+				{ memberId: 'mem_bob', rawAmount: 600 }
+			]
+		],
+		[
+			'share',
+			{
+				splitMode: 'share',
+				amount: '10',
+				beneficiaries: [
+					{ memberName: 'Alice', shareWeight: 1 },
+					{ memberName: 'Bob', shareWeight: 3 }
+				]
+			},
+			[
+				{ memberId: 'mem_me', shareWeight: 1 },
+				{ memberId: 'mem_bob', shareWeight: 3 }
+			]
+		]
+	] as const)(
+		'resolves every name in a %s replacement to its member id',
+		async (_mode, args, expected) => {
+			await run({ groupId: GROUP_ID, txnId: TXN_ID, title: 'Lunch', ...args });
+
+			expect(inputPassed().beneficiaries).toEqual(expected);
+		}
+	);
+
+	it('resolves names nested inside an ITEMIZED replacement', async () => {
+		scriptDetail(existingDetail({ splitMode: 'itemized' }));
+
+		await run({
+			groupId: GROUP_ID,
+			txnId: TXN_ID,
+			title: 'Receipt',
+			splitMode: 'itemized',
+			items: [
+				{
+					label: 'Meal',
+					amount: '100',
+					splitMode: 'share',
+					beneficiaries: [
+						{ memberName: 'Alice', shareWeight: 1 },
+						{ memberName: 'Bob', shareWeight: 1 }
+					]
+				}
+			]
+		});
+
+		expect(inputPassed().items[0].beneficiaries).toEqual([
+			{ memberId: 'mem_me', shareWeight: 1 },
+			{ memberId: 'mem_bob', shareWeight: 1 }
+		]);
+	});
+
+	it('REFUSES a member id where a name belongs — the old wire is not dual-accepted', async () => {
+		const envelope = await envelopeFor({ ...CORRECT_THE_AMOUNT, splitBetween: ['mem_bob'] });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details.fieldErrors['splitBetween.0'][0]).toMatch(/No active member/);
+		expect(updateTransaction).not.toHaveBeenCalled();
+	});
+
+	it('a name matching NO member is a self-correctable validation_error naming the search', async () => {
+		const envelope = await envelopeFor({ ...CORRECT_THE_AMOUNT, splitBetween: ['Alice', 'Carol'] });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details.fieldErrors['splitBetween.1'][0]).toMatch(/named "Carol"/);
+		expect(envelope.details.fieldErrors['splitBetween.1'][0]).toMatch(/list_members/);
+		expect(updateTransaction).not.toHaveBeenCalled();
+	});
+
+	it('a name matching only a DEACTIVATED member says so — a different fix from a typo', async () => {
+		const envelope = await envelopeFor({ ...CORRECT_THE_AMOUNT, splitBetween: ['Alice', 'Gone'] });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details.fieldErrors['splitBetween.1'][0]).toMatch(/removed from this group/);
+		expect(updateTransaction).not.toHaveBeenCalled();
+	});
+
+	it('an explicit `paidBy` NAME moves the payer; the DEFAULT stays the recorded id', async () => {
+		// The default is the id already on the row — never re-derived from a name, so a
+		// payer who has since been RENAMED still keeps their own transaction.
+		await run({ ...CORRECT_THE_AMOUNT, paidBy: 'Alice' });
+		expect(inputPassed().payers).toEqual([{ memberId: 'mem_me', amountPaid: 95000 }]);
+
+		// Bob — the recorded payer — has since been renamed. Nothing in this call mentions
+		// him, and the edit must still leave his ฿950 lunch his.
+		vi.clearAllMocks();
+		listMembers.mockResolvedValue(
+			ROSTER.map((member) =>
+				member.id === 'mem_bob' ? { ...member, displayName: 'Robert' } : member
+			)
+		);
+		updateTransaction.mockResolvedValue(undefined);
+		scriptDetail();
+
+		await run({ ...CORRECT_THE_AMOUNT, splitBetween: ['Alice'] });
+		expect(inputPassed().payers).toEqual([{ memberId: 'mem_bob', amountPaid: 95000 }]);
+	});
+
+	it('an unresolvable `paidBy` is reported under `paidBy`', async () => {
+		const envelope = await envelopeFor({ ...CORRECT_THE_AMOUNT, paidBy: 'Gone' });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details.fieldErrors.paidBy[0]).toMatch(/removed from this group/);
+		expect(updateTransaction).not.toHaveBeenCalled();
 	});
 });
 
@@ -577,7 +727,7 @@ describe('update_transaction — the echo-back', () => {
 	});
 
 	it('names a payer CHANGE — the money move the user most needs to catch', async () => {
-		const payload = await run({ ...CORRECT_THE_AMOUNT, amount: '240', paidBy: 'mem_me' });
+		const payload = await run({ ...CORRECT_THE_AMOUNT, amount: '240', paidBy: 'Alice' });
 
 		expect(payload.changed).toEqual(['paidBy']);
 		expect(payload.echo).toContain('Changed: who paid.');
@@ -589,7 +739,7 @@ describe('update_transaction — the echo-back', () => {
 	});
 
 	it('names a DROPPED beneficiary — the silent way a replacement moves money', async () => {
-		const payload = await run({ ...CORRECT_THE_AMOUNT, amount: '240', splitBetween: ['mem_bob'] });
+		const payload = await run({ ...CORRECT_THE_AMOUNT, amount: '240', splitBetween: ['Bob'] });
 
 		expect(payload.changed).toEqual(['splitBetween']);
 		expect(payload.echo).toContain('split equally 1 way: Bob');

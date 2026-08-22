@@ -1,10 +1,11 @@
 // Shared MCP-only transaction input contract (issue #44).
 //
 // This is deliberately separate from the internal TransactionInput Zod schema.
-// Agents speak decimal strings and human percentages; the domain speaks integer
-// minor units and basis points. Create/update tools supply the contextual fields
-// that differ between those operations, then this adapter produces the one
-// canonical TransactionInput consumed by the transaction service.
+// Agents speak decimal strings, human percentages and member NAMES (ADR-0015); the
+// domain speaks integer minor units, basis points and member IDS. Create/update tools
+// supply the contextual fields that differ between those operations, then this adapter
+// produces the one canonical TransactionInput consumed by the transaction service —
+// and it is the single place where a name becomes an id.
 
 import { z } from 'zod';
 import { parseAmount, type SeededCurrencyCode } from '$lib/money';
@@ -15,9 +16,12 @@ import {
 } from '$lib/schemas/transaction';
 import { percentStringToBasisPoints } from '../percentage';
 import { toolError } from '../errors';
+import { memberNameIssueMessage, resolveMemberByName, type MemberView } from '../view';
 import { amountArg } from './args';
 
-const memberId = z.string().min(1, 'A member id is required. Call `list_members` first.');
+const memberName = z
+	.string()
+	.min(1, 'A member display name is required. Call `list_members` first.');
 const shareWeight = z
 	.number({ message: 'A share weight is required.' })
 	.int('Share weight must be a whole number.')
@@ -25,7 +29,7 @@ const shareWeight = z
 	.safe('Share weight is out of range.');
 
 const beneficiary = z.strictObject({
-	memberId,
+	memberName,
 	// Agent vocabulary is `amount`; only the adapter calls it `rawAmount` internally.
 	amount: amountArg.optional(),
 	shareWeight: shareWeight.optional()
@@ -84,8 +88,8 @@ export const MCP_TRANSACTION_ARGUMENT_FIELDS = {
 	splitMode: z.enum(['equal', 'amount', 'share', 'itemized']).optional(),
 	// Legacy equal-split shape. It remains the canonical equal wire representation.
 	splitBetween: z
-		.array(memberId)
-		.min(1, 'List at least one member id to split between.')
+		.array(memberName)
+		.min(1, 'List at least one member name to split between.')
 		.optional(),
 	// Rich amount/share representation. `amount` here is an exact beneficiary amount.
 	beneficiaries: z.array(beneficiary).min(1, 'List at least one beneficiary.').optional(),
@@ -109,7 +113,7 @@ export function validateMcpTransactionArguments(
 	if (mode === 'equal') {
 		if (value.amount === undefined) issue(['amount'], 'An amount is required for an equal split.');
 		if (value.splitBetween === undefined)
-			issue(['splitBetween'], 'List at least one member id to split between.');
+			issue(['splitBetween'], 'List at least one member name to split between.');
 		if (value.beneficiaries !== undefined)
 			issue(['beneficiaries'], 'Use `splitBetween` for an equal split.');
 	} else if (mode === 'amount' || mode === 'share') {
@@ -172,6 +176,21 @@ export const mcpTransactionArguments = z
 
 export type McpTransactionArguments = z.infer<typeof mcpTransactionArguments>;
 
+/**
+ * Who paid, as the tool knows them BEFORE resolution (ADR-0015).
+ *
+ * `paidBy` is an agent-supplied NAME, but an OMITTED `paidBy` resolves to an id the
+ * server already holds and the agent never typed — the caller's own member on a
+ * create, the recorded payer on an update. Carrying that difference in the type is
+ * what lets ALL name resolution stay in this one adapter: a tool never has to
+ * normalize-and-match on its own just because its default is already an id.
+ */
+export type McpPayerReference =
+	/** An explicit `paidBy` name, still to be resolved here. */
+	| { readonly kind: 'name'; readonly memberName: string }
+	/** The tool's own default — already a member id, so only checked, never matched. */
+	| { readonly kind: 'default'; readonly memberId: string };
+
 export interface McpTransactionContext {
 	readonly type: 'spending' | 'transfer';
 	readonly title: string;
@@ -180,8 +199,13 @@ export interface McpTransactionContext {
 	readonly categoryId: string;
 	/** v1 MCP writes are settlement-currency-only, at exchange rate 1. */
 	readonly currency: SeededCurrencyCode;
-	readonly payerId: string;
-	readonly memberIds?: readonly string[];
+	readonly payer: McpPayerReference;
+	/**
+	 * The group's FULL roster, deactivated members included. Required, because a name
+	 * cannot be resolved without one — and the deactivated rows are what let a removed
+	 * member be reported as removed rather than as a name nobody has (§6.3).
+	 */
+	readonly members: readonly MemberView[];
 }
 
 /** Error whose paths deliberately use MCP argument names (ADR-0009). */
@@ -239,43 +263,71 @@ export function toTransactionInput(
 	}
 	const args = parsed.data;
 	const splitMode = args.splitMode ?? 'equal';
-	if (context.memberIds !== undefined) {
-		const knownMembers = new Set(context.memberIds);
-		const membershipIssues: { path: (string | number)[]; message: string }[] = [];
-		const checkMember = (id: string, path: (string | number)[]) => {
-			if (!knownMembers.has(id)) {
-				membershipIssues.push({ path, message: 'That member is not part of this group.' });
-			}
-		};
-		checkMember(context.payerId, ['paidBy']);
-		if (splitMode === 'equal') {
-			args.splitBetween!.forEach((id, index) => checkMember(id, ['splitBetween', index]));
-		} else if (splitMode === 'amount' || splitMode === 'share') {
-			args.beneficiaries!.forEach((row, index) =>
-				checkMember(row.memberId, ['beneficiaries', index, 'memberId'])
-			);
-		} else {
-			args.items!.forEach((row, itemIndex) =>
-				row.beneficiaries.forEach((beneficiaryRow, beneficiaryIndex) =>
-					checkMember(beneficiaryRow.memberId, [
-						'items',
-						itemIndex,
-						'beneficiaries',
-						beneficiaryIndex,
-						'memberId'
-					])
-				)
-			);
-		}
-		if (membershipIssues.length > 0) throw new McpTransactionArgumentError(membershipIssues);
+
+	// ── NAME → ID, once, here (ADR-0015) ───────────────────────────────────────
+	// This is the ONLY place an MCP write turns a person's name into a member id. The
+	// service layer downstream still speaks ids, and the resolution rule (exact match
+	// on the normalized display name, active members only) must be one rule: three
+	// tools each matching names their own way would be three subtly different notions
+	// of "the same person" deciding whose money moves.
+	//
+	// Every miss is COLLECTED rather than thrown at, so one round trip tells the agent
+	// about every unresolvable name at once — the same batching the old id-membership
+	// check used, and the reason a corrected retry needs one attempt, not four.
+	const activeMemberIds = context.members.filter((member) => member.isActive).map((m) => m.id);
+	const resolutionIssues: { path: (string | number)[]; message: string }[] = [];
+	const resolve = (name: string, path: (string | number)[]): string => {
+		const match = resolveMemberByName(context.members, name);
+		if (match.kind === 'resolved') return match.id;
+		resolutionIssues.push({ path, message: memberNameIssueMessage(name, match) });
+		// Unused: a non-empty `resolutionIssues` throws before any of these ids is read.
+		return '';
+	};
+
+	const payerId =
+		context.payer.kind === 'name'
+			? resolve(context.payer.memberName, ['paidBy'])
+			: context.payer.memberId;
+	// A DEFAULTED payer was never matched from a name, but it can still be a member the
+	// group has since removed (the caller's own deactivated row on a create, the
+	// recorded payer on an update). Naming it under `paidBy` keeps that the agent's
+	// self-correctable "pass someone else" rather than an opaque failure downstream.
+	if (context.payer.kind === 'default' && !activeMemberIds.includes(payerId)) {
+		resolutionIssues.push({
+			path: ['paidBy'],
+			message:
+				'The member who would pay by default is no longer an active member of this group. ' +
+				'Pass an explicit `paidBy` name from `list_members`.'
+		});
 	}
+
+	// Only the fields belonging to this split mode are present — the cross-field
+	// refinement above already rejected the others — so all three map safely.
+	const splitBetweenIds = (args.splitBetween ?? []).map((name, index) =>
+		resolve(name, ['splitBetween', index])
+	);
+	const beneficiaryIds = (args.beneficiaries ?? []).map((row, index) =>
+		resolve(row.memberName, ['beneficiaries', index, 'memberName'])
+	);
+	const itemBeneficiaryIds = (args.items ?? []).map((row, itemIndex) =>
+		row.beneficiaries.map((beneficiaryRow, beneficiaryIndex) =>
+			resolve(beneficiaryRow.memberName, [
+				'items',
+				itemIndex,
+				'beneficiaries',
+				beneficiaryIndex,
+				'memberName'
+			])
+		)
+	);
+	if (resolutionIssues.length > 0) throw new McpTransactionArgumentError(resolutionIssues);
 
 	const items = (args.items ?? []).map((row, itemIndex) => ({
 		label: row.label,
 		amount: parseMcpAmount(row.amount, context.currency, ['items', itemIndex, 'amount']),
 		splitMode: row.splitMode,
 		beneficiaries: row.beneficiaries.map((beneficiaryRow, beneficiaryIndex) => ({
-			memberId: beneficiaryRow.memberId,
+			memberId: itemBeneficiaryIds[itemIndex][beneficiaryIndex],
 			...(row.splitMode === 'amount'
 				? {
 						rawAmount: parseMcpAmount(beneficiaryRow.amount!, context.currency, [
@@ -312,11 +364,11 @@ export function toTransactionInput(
 
 	const beneficiaries =
 		splitMode === 'equal'
-			? args.splitBetween!.map((memberId) => ({ memberId }))
+			? splitBetweenIds.map((memberId) => ({ memberId }))
 			: splitMode === 'itemized'
 				? []
 				: args.beneficiaries!.map((row, index) => ({
-						memberId: row.memberId,
+						memberId: beneficiaryIds[index],
 						...(splitMode === 'amount'
 							? {
 									rawAmount: parseMcpAmount(row.amount!, context.currency, [
@@ -339,7 +391,7 @@ export function toTransactionInput(
 		exchangeRate: '1',
 		amountTotalSettlement: amountTotal,
 		splitMode,
-		payers: [{ memberId: context.payerId, amountPaid: amountTotal }],
+		payers: [{ memberId: payerId, amountPaid: amountTotal }],
 		beneficiaries,
 		items,
 		charges
@@ -347,7 +399,7 @@ export function toTransactionInput(
 
 	const validated = buildTransactionSchema({
 		settlementCurrency: context.currency,
-		memberIds: context.memberIds
+		memberIds: activeMemberIds
 	}).safeParse(candidate);
 	if (!validated.success) {
 		const remapPath = (path: PropertyKey[]): (string | number)[] => {
@@ -356,6 +408,11 @@ export function toTransactionInput(
 			if (first === 'payers') return ['paidBy'];
 			if (first === 'beneficiaries') {
 				normalized[0] = splitMode === 'equal' ? 'splitBetween' : 'beneficiaries';
+				// `splitBetween` is a flat array of NAMES (ADR-0015): it has no leaf field to
+				// point a `memberId` issue at, so the index itself is the correctable position.
+				if (splitMode === 'equal' && normalized[normalized.length - 1] === 'memberId') {
+					normalized.pop();
+				}
 			}
 			if (
 				first === 'amountTotal' ||
@@ -366,6 +423,8 @@ export function toTransactionInput(
 			}
 			return normalized.map((part) => {
 				if (part === 'rawAmount') return 'amount';
+				// The domain keys a share by id; the MCP argument holding it is a NAME.
+				if (part === 'memberId') return 'memberName';
 				if (part !== 'value') return part;
 				const chargeIndex =
 					normalized[0] === 'charges' && typeof normalized[1] === 'number'
