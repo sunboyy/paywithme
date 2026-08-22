@@ -170,9 +170,20 @@ export type ChargeView =
 			readonly base: 'items_subtotal' | 'running_total';
 	  };
 
+/**
+ * The app-authored stand-in for a member id that is not on the roster — the name
+ * `nameOf` wraps and the name the `editable` block emits bare, so a line whose member
+ * has vanished reads the same in both halves of the payload.
+ */
+const MISSING_MEMBER_NAME = '(unnamed member)';
+
 /** Raw beneficiary input, projected in MCP vocabulary for a faithful edit. */
 export interface EditableBeneficiaryView {
-	readonly memberId: string;
+	/**
+	 * The member's DISPLAY NAME, exactly as the write tools take it (ADR-0015) — see
+	 * {@link EditableTransactionView} on why it is a bare string here.
+	 */
+	readonly memberName: string;
 	/** Exact amount for an `amount` split, in entry-currency major units. */
 	readonly amount?: string;
 	/** Integer weight for a `share` split. */
@@ -204,7 +215,23 @@ export type EditableChargeView =
 
 /**
  * Sanitized reconstruction of the editable inputs. Unlike the internal
- * TransactionInput, it contains no minor-unit money and no bare authored text.
+ * TransactionInput, it contains no minor-unit money and no member ids.
+ *
+ * ── Why the MEMBER fields here are bare strings (ADR-0015) ───────────────────
+ * This is the ONE block ADR-0011 requires the model to copy VERBATIM into
+ * `update_transaction`, and since ADR-0015 that tool refers to people by DISPLAY
+ * NAME. So `paidBy`, `splitBetween` and every `memberName` below hold the name the
+ * write contract takes — plain strings, not {@link UntrustedText} envelopes — and
+ * read → copy → write is a straight copy rather than a translation step on the one
+ * payload meant to be copied faithfully.
+ *
+ * A display name is member-authored (ADR-0003), so bare is a deliberate, bounded
+ * exception rather than an oversight: EVERY name in this block also rides WRAPPED in
+ * the same payload's `payers` / `shares` lines, which is where the model is told what
+ * the text is and who wrote it, and the write side has to speak these names bare in
+ * any case. The authored text that has NO wrapped twin — the title and each item
+ * label — stays wrapped here, which is why `update_transaction` asks for `.value` on
+ * those two fields and on nothing else.
  */
 export interface EditableTransactionView {
 	readonly type: 'spending' | 'transfer';
@@ -230,10 +257,13 @@ export interface EditableTransactionView {
 	readonly currency: string;
 	/** Omitted for itemized: its final total is derived server-side. */
 	readonly amount?: string;
-	/** The current single payer used by the MCP write contract; null for a multi-payer row. */
+	/**
+	 * The current single payer's DISPLAY NAME, as the MCP write contract takes it
+	 * (ADR-0015); null for a multi-payer row, which the assistant cannot replace anyway.
+	 */
 	readonly paidBy: string | null;
 	readonly splitMode: 'equal' | 'amount' | 'share' | 'itemized';
-	/** Legacy equal-split beneficiary shape, retained for backward compatibility. */
+	/** Legacy equal-split beneficiary shape: the members' DISPLAY NAMES (ADR-0015). */
 	readonly splitBetween: string[];
 	readonly beneficiaries: EditableBeneficiaryView[];
 	readonly items: EditableItemView[];
@@ -329,7 +359,14 @@ export function toTransactionView({
 	const author = authorOf(detail.createdBy, principal);
 
 	const nameOf = (memberId: string): UntrustedText =>
-		byId.get(memberId)?.displayName ?? untrusted('(unnamed member)', PAYWITHME_AUTHOR);
+		byId.get(memberId)?.displayName ?? untrusted(MISSING_MEMBER_NAME, PAYWITHME_AUTHOR);
+	// The SAME lookup, unwrapped, for the `editable` block's write-shaped member fields
+	// (ADR-0015 — see EditableTransactionView). It reads the FULL roster, deactivated
+	// members included, because this is a READ of what the ledger actually holds: a
+	// removed member's recorded involvement must still name them. Whether that name is
+	// still WRITABLE is the write side's question, answered by `resolveMemberByName`.
+	const rawNameOf = (memberId: string): string =>
+		byId.get(memberId)?.displayName.value ?? MISSING_MEMBER_NAME;
 	const isYou = (memberId: string): boolean => byId.get(memberId)?.isYou ?? false;
 
 	const share = (s: { memberId: string; amountOwed: number }): ShareView => ({
@@ -370,7 +407,7 @@ export function toTransactionView({
 	const editableBeneficiary = (
 		beneficiary: TransactionDetail['input']['beneficiaries'][number]
 	): EditableBeneficiaryView => ({
-		memberId: beneficiary.memberId,
+		memberName: rawNameOf(beneficiary.memberId),
 		...(beneficiary.rawAmount !== undefined
 			? { amount: toMcpMoney(beneficiary.rawAmount, entry).amount }
 			: {}),
@@ -435,9 +472,10 @@ export function toTransactionView({
 			...(inputSplitMode === 'itemized'
 				? {}
 				: { amount: toMcpMoney(input.amountTotal ?? detail.amountTotal, entry).amount }),
-			paidBy: inputPayers.length === 1 ? inputPayers[0].memberId : null,
+			paidBy: inputPayers.length === 1 ? rawNameOf(inputPayers[0].memberId) : null,
 			splitMode: inputSplitMode,
-			splitBetween: inputSplitMode === 'equal' ? inputBeneficiaries.map((row) => row.memberId) : [],
+			splitBetween:
+				inputSplitMode === 'equal' ? inputBeneficiaries.map((row) => rawNameOf(row.memberId)) : [],
 			beneficiaries:
 				inputSplitMode === 'amount' || inputSplitMode === 'share'
 					? inputBeneficiaries.map(editableBeneficiary)

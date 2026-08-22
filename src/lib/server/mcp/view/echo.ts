@@ -50,7 +50,7 @@
 // which is the entire control ADR-0006 relies on. We keep the name and keep it
 // wrapped.
 
-import type { TransactionView, PayerView, ShareView } from './transaction';
+import type { TransactionView, PayerView, ShareView, EditableBeneficiaryView } from './transaction';
 import type { McpMoney } from './money';
 import type { SimilarMemberView } from './similar-names';
 
@@ -270,6 +270,42 @@ function sameMembers(
 }
 
 /**
+ * One beneficiary row reduced to what a CHANGE means for it: WHO it is, and what the
+ * agent typed for them.
+ *
+ * ── Why the name alone cannot answer "who" (the bug this exists to close) ────
+ * Since ADR-0015 the `editable` block names people by DISPLAY NAME, and that name is
+ * unique only among ACTIVE members (#75). A member can be deactivated and a new member
+ * legitimately arrive holding the identical name (#77 only suffixes against ACTIVE
+ * names), so "Bob" before and "Bob" after can be two DIFFERENT HUMANS: the write side
+ * resolves an update's "Bob" to the ACTIVE row, silently moving the share off the
+ * departed namesake. Comparing the strings would report "Changed: nothing" on exactly
+ * the wrong-person mistake this whole module exists to make legible.
+ *
+ * So identity is taken from the RESOLVED `shares` — the member ids the ledger actually
+ * holds after name→id resolution, the ground truth of who the beneficiary is. Editable
+ * beneficiaries and their resolved shares are reconstructed from the SAME rows in the
+ * SAME order (`getTransactionDetail` builds both from one `transaction_shares` /
+ * `transaction_item_shares` read, ordered by member id), so row `i` of one is row `i`
+ * of the other. A partial test double with no matching share degrades to `null` — the
+ * name and the raw input still carry the comparison, exactly as before.
+ *
+ * The raw `amount` / `shareWeight` stay in the key beside it: an edit that keeps the
+ * same people and only moves the weights is just as much a change.
+ */
+function comparableBeneficiaryRows(
+	beneficiaries: readonly EditableBeneficiaryView[],
+	shares: readonly ShareView[]
+) {
+	return beneficiaries.map(({ memberName, amount, shareWeight }, i) => ({
+		memberId: shares[i]?.memberId ?? null,
+		memberName,
+		...(amount !== undefined ? { amount } : {}),
+		...(shareWeight !== undefined ? { shareWeight } : {})
+	}));
+}
+
+/**
  * Which fields an update actually REPLACED, by comparing the persisted before/after
  * views. PURE.
  *
@@ -303,18 +339,19 @@ export function changedFields({
 	)
 		changed.push('splitBetween');
 	const comparableBeneficiaries = (view: TransactionView) =>
-		view.editable.beneficiaries.map(({ memberId, amount, shareWeight }) => ({
-			memberId,
-			...(amount !== undefined ? { amount } : {}),
-			...(shareWeight !== undefined ? { shareWeight } : {})
-		}));
+		comparableBeneficiaryRows(view.editable.beneficiaries, view.shares);
 	if (
 		JSON.stringify(comparableBeneficiaries(before)) !==
 		JSON.stringify(comparableBeneficiaries(after))
 	)
 		changed.push('beneficiaries');
 	const comparableItems = (view: TransactionView) =>
-		view.editable.items.map((item) => ({ ...item, label: item.label.value }));
+		view.editable.items.map((item, i) => ({
+			label: item.label.value,
+			amount: item.amount,
+			splitMode: item.splitMode,
+			beneficiaries: comparableBeneficiaryRows(item.beneficiaries, view.items[i]?.shares ?? [])
+		}));
 	if (JSON.stringify(comparableItems(before)) !== JSON.stringify(comparableItems(after)))
 		changed.push('items');
 	if (JSON.stringify(before.editable.charges) !== JSON.stringify(after.editable.charges))

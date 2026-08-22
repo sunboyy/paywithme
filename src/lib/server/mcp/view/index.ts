@@ -39,6 +39,7 @@ export {
 	toMemberView,
 	selfMemberId,
 	resolveMemberByName,
+	resolveMemberNameForFilter,
 	memberNameIssueMessage
 } from './member';
 export {

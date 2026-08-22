@@ -28,10 +28,14 @@ import { z } from 'zod';
 import { listTransactions, encodeTransactionCursor } from '$lib/server/transactions';
 import type { TransactionListFilters } from '$lib/server/transactions';
 import { toolSuccess } from '../errors';
-import { toTransactionListItemView, LIST_TRANSACTIONS_NOTE } from '../view';
+import {
+	resolveMemberNameForFilter,
+	toTransactionListItemView,
+	LIST_TRANSACTIONS_NOTE
+} from '../view';
 import type { McpTool } from '../types';
 import { CUSTOM_CURRENCY_GUIDANCE, GROUP_ID_PROPERTY, groupIdArg } from './args';
-import { loadEntryCurrencyLookup } from './load';
+import { loadEntryCurrencyLookup, loadMemberViews } from './load';
 
 /**
  * The FIXED page size (ADR-0008 lever 3), below REST's default 50 / max 100. There
@@ -52,12 +56,13 @@ const listTransactionsArgs = z.strictObject({
 	// string; an unparseable value is a self-correctable `validation_error`.
 	from: z.coerce.date().optional(),
 	to: z.coerce.date().optional(),
-	// The §10 member filter. An id that matches nothing yields an EMPTY page rather
-	// than an error (there is no member-existence oracle here, by design), and a
-	// `role` without a `memberId` is a no-op rather than a `validation_error` — an
-	// agent that guesses the pair wrong gets a truthful empty answer, not a turn
-	// spent on a correction.
-	memberId: z.string().min(1).optional(),
+	// The §10 member filter — a DISPLAY NAME since ADR-0015, resolved server-side the
+	// way the write tools resolve theirs. A name that identifies no single member
+	// yields an EMPTY page rather than an error (there is no member-existence oracle
+	// here, by design), and a `role` without a `memberName` is a no-op rather than a
+	// `validation_error` — an agent that guesses the pair wrong gets a truthful empty
+	// answer, not a turn spent on a correction.
+	memberName: z.string().min(1).optional(),
 	role: z.enum(['paid', 'owes']).optional()
 });
 
@@ -86,8 +91,8 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 		description:
 			"Returns ONE PAGE of a group's transactions (max 25), newest first, for FINDING " +
 			'a transaction — filter by date range (`from`/`to`), `type`, `categoryId`, or the ' +
-			'member involved (`memberId` from `list_members`, optionally narrowed with ' +
-			'`role`), and page with `cursor`. A `memberId` filter does NOT make this page ' +
+			'member involved (`memberName`, a DISPLAY NAME from `list_members`, optionally ' +
+			'narrowed with `role`), and page with `cursor`. A `memberName` filter does NOT make this page ' +
 			'summable: it is still ONE page of a longer list. DO NOT compute balances, ' +
 			'totals, or "who owes what" from this list — it is paginated (see `hasMore`) ' +
 			'and currency-mixed, and you WILL get the ' +
@@ -115,19 +120,25 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 					description:
 						'Restrict to one category id, exactly as returned on a transaction. Never a name.'
 				},
-				memberId: {
+				memberName: {
 					type: 'string',
+					minLength: 1,
 					description:
 						'Restrict to transactions this member is involved in — as a payer, as a ' +
-						'beneficiary, or both. A member id from `list_members`, never a name. An id ' +
-						'that matches nothing returns an empty page.'
+						'beneficiary, or both. A member DISPLAY NAME copied exactly from ' +
+						'`list_members` (the `displayName.value` string), never a member id. Removed ' +
+						'members can be filtered on too: their past transactions are still here. A ' +
+						'name that matches nobody in this group returns an empty page, never an ' +
+						'error — and so does a name shared by more than one member (a removed ' +
+						'member and a current one may hold the same name), since it names no one ' +
+						'person.'
 				},
 				role: {
 					type: 'string',
 					enum: ['paid', 'owes'],
 					description:
-						'Narrows `memberId` to one side: `paid` (they paid) or `owes` (they are a ' +
-						'beneficiary). Omit for either side. Ignored without `memberId`.'
+						'Narrows `memberName` to one side: `paid` (they paid) or `owes` (they are a ' +
+						'beneficiary). Omit for either side. Ignored without `memberName`.'
 				},
 				from: {
 					type: 'string',
@@ -149,7 +160,7 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 			openWorldHint: false
 		}
 	},
-	run: async ({ principal }, { groupId, cursor, type, categoryId, from, to, memberId, role }) => {
+	run: async ({ principal }, { groupId, cursor, type, categoryId, from, to, memberName, role }) => {
 		const filters: TransactionListFilters = {};
 		if (type) filters.type = type;
 		if (categoryId) filters.categoryId = categoryId;
@@ -159,8 +170,26 @@ export const listTransactionsTool: McpTool<z.infer<typeof listTransactionsArgs>>
 		// day is INCLUDED (§16.4), matching REST. `from` stays start-of-day.
 		if (to) filters.to = endOfUtcDay(to);
 		// `role` only applies alongside a member (see the args schema).
-		if (memberId) {
-			filters.memberId = memberId;
+		if (memberName !== undefined) {
+			// NAME → ID (ADR-0015). The roster read is also this branch's access gate, and it
+			// throws the SAME conflated `not_found` `listTransactions` would — so resolving a
+			// name never tells an agent anything about a group it may not see.
+			const members = await loadMemberViews(principal, groupId);
+			const matchedId = resolveMemberNameForFilter(members, memberName);
+			if (matchedId === null) {
+				// Nobody, or several — see `resolveMemberNameForFilter`. Either way there is no
+				// one member to filter on, and the answer is an EMPTY PAGE rather than an error
+				// (no existence oracle) and rather than the unfiltered list (which would silently
+				// answer a different question than the one asked).
+				return toolSuccess({
+					transactions: [],
+					hasMore: false,
+					nextCursor: null,
+					_note: LIST_TRANSACTIONS_NOTE
+				});
+			}
+			// Everything downstream is UNCHANGED: the service still filters by member id.
+			filters.memberId = matchedId;
 			filters.memberRole = role;
 		}
 
