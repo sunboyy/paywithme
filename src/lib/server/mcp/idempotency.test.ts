@@ -20,6 +20,7 @@ import {
 import {
 	canonicalJson,
 	deriveIdempotencyKey,
+	peekIdempotentReplay,
 	withDerivedIdempotency,
 	MCP_IDEMPOTENCY_WINDOW_MS
 } from './idempotency';
@@ -448,5 +449,177 @@ describe('withDerivedIdempotency — concurrency and clock hazards', () => {
 
 		expect(fn).toHaveBeenCalledTimes(2);
 		expect(other.replayedAfterMs).toBeNull();
+	});
+});
+
+// ── `peekIdempotentReplay` — a REPLAY lookup that never inserts (PR #80 review) ──
+//
+// The bug this closes: `create_transaction`/`settle_up` derive their idempotency key
+// from RAW arguments, but only AFTER resolving a member NAME to an id (ADR-0015) — a
+// step that can fail if the roster changed between the original call and a plain
+// retry (the member got renamed or deactivated). Without this peek, that retry would
+// meet a fresh `validation_error` instead of replaying the ALREADY-SUCCESSFUL create.
+// These tests drive `peekIdempotentReplay` directly, the same way the suite above
+// drives `withDerivedIdempotency` — same store stub, same two-bucket shape — because
+// it has to preserve every one of that mechanism's guarantees while adding none of
+// its own insert-side effects.
+describe('peekIdempotentReplay — a READ-ONLY replay lookup, safe ahead of validation', () => {
+	it('finds nothing when the store is empty — the caller must proceed to validate', async () => {
+		const store = makeStore();
+
+		const peeked = await peekIdempotentReplay({
+			keyId: 'key_1',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => T0
+		});
+
+		expect(peeked).toBeNull();
+		// The defining property: a peek that finds nothing must not have written
+		// anything either — there is no `insertPending` on this path at all.
+		expect(store.rows.size).toBe(0);
+	});
+
+	it('finds a CURRENT-bucket completed match — the replay the review scenario needs', async () => {
+		const store = makeStore();
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
+		// The original call succeeds via the ordinary guard...
+		await callAt(store, T0, LUNCH, fn);
+
+		// ...then a plain retry peeks BEFORE doing anything that could now fail (e.g. a
+		// member referenced by `args` was renamed or deactivated in between — the peek
+		// never looks at the roster at all, only at the raw arguments already hashed
+		// into the stored row).
+		const peeked = await peekIdempotentReplay({
+			keyId: 'key_1',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => at(3)
+		});
+
+		expect(peeked).not.toBeNull();
+		expect(peeked?.response).toEqual({ status: 200, body: { id: 't1' } });
+		expect(peeked?.replayedAfterMs).toBe(3000);
+		// Still exactly one stored row — the peek did not insert a second one.
+		expect(store.rows.size).toBe(1);
+	});
+
+	it('finds a PREVIOUS-bucket completed match — the boundary-straddling retry', async () => {
+		const store = makeStore();
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
+		// Written 1s before a bucket boundary...
+		const beforeBoundary = new Date(
+			Math.ceil(T0.getTime() / MCP_IDEMPOTENCY_WINDOW_MS) * MCP_IDEMPOTENCY_WINDOW_MS - 1000
+		);
+		await callAt(store, beforeBoundary, LUNCH, fn);
+		// ...peeked 2s after it, landing in the NEXT bucket.
+		const afterBoundary = new Date(beforeBoundary.getTime() + 2000);
+
+		const peeked = await peekIdempotentReplay({
+			keyId: 'key_1',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => afterBoundary
+		});
+
+		expect(peeked).not.toBeNull();
+		expect(peeked?.replayedAfterMs).toBe(2000);
+	});
+
+	it('ignores a previous-bucket row OLDER than the window — a genuine repeat, not a retry', async () => {
+		const store = makeStore();
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
+		await callAt(store, T0, LUNCH, fn);
+
+		const peeked = await peekIdempotentReplay({
+			keyId: 'key_1',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => at(3600)
+		});
+
+		expect(peeked).toBeNull();
+	});
+
+	it('surfaces `in_progress` for a still-pending row, exactly like `withDerivedIdempotency`', async () => {
+		const store = makeStore();
+		// A pending row with no completion yet (the create is mid-flight elsewhere).
+		await store.insertPending({
+			keyId: 'key_1',
+			idempotencyKey: deriveIdempotencyKey({
+				keyId: 'key_1',
+				groupId: 'grp_1',
+				toolName: 'create_transaction',
+				args: LUNCH,
+				bucket: Math.floor(T0.getTime() / MCP_IDEMPOTENCY_WINDOW_MS)
+			}),
+			requestHash: 'irrelevant-for-this-check',
+			createdAt: T0,
+			expiresAt: at(3600)
+		});
+
+		await expect(
+			peekIdempotentReplay({
+				keyId: 'key_1',
+				groupId: 'grp_1',
+				toolName: 'create_transaction',
+				args: LUNCH,
+				store,
+				now: () => at(1)
+			})
+		).rejects.toBeInstanceOf(IdempotencyConflictError);
+	});
+
+	it('never calls `insertPending` — a call that goes on to fail validation leaves the store untouched', async () => {
+		const store = makeStore();
+		const insertSpy = vi.spyOn(store, 'insertPending');
+
+		await peekIdempotentReplay({
+			keyId: 'key_1',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => T0
+		});
+
+		expect(insertSpy).not.toHaveBeenCalled();
+	});
+
+	it('scopes the lookup to the CALLING key — another key’s identical create is invisible to it', async () => {
+		const store = makeStore();
+		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+			status: 200,
+			body: { id: 't1' }
+		}));
+		await callAt(store, T0, LUNCH, fn);
+
+		const peeked = await peekIdempotentReplay({
+			keyId: 'key_2',
+			groupId: 'grp_1',
+			toolName: 'create_transaction',
+			args: LUNCH,
+			store,
+			now: () => at(1)
+		});
+
+		expect(peeked).toBeNull();
 	});
 });

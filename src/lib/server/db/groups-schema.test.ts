@@ -207,7 +207,17 @@ describe('member-name uniqueness migration', () => {
 		// Drop any of the three and pre-existing rows carry a key the app would never
 		// have written, which silently lets a duplicate through: the index compares
 		// stored keys, so two rows whose keys differ are "different names" to Postgres.
-		expect(sql).toContain('lower(btrim(normalize("display_name", NFC)))');
+		//
+		// Plain `lower()`/`btrim()` do NOT reproduce JS's `.trim().toLowerCase()` (a
+		// prior version of this migration claimed they did — they don't: `lower()`
+		// folds case per the database's collation, and `btrim()` strips only the ASCII
+		// space, not the fuller Unicode-whitespace set `.trim()` does). So this checks
+		// for the ACTUAL locale-independent fold (`COLLATE "und-x-icu"`, the ICU root
+		// locale) and the broader whitespace strip (`regexp_replace`), not just NFC.
+		expect(sql).toContain('normalize("display_name", NFC)');
+		expect(sql).toContain('regexp_replace(');
+		expect(sql).toContain('COLLATE "und-x-icu"');
+		expect(sql).not.toContain('lower(btrim(normalize("display_name", NFC)))');
 	});
 
 	it('creates the unique index PARTIAL on active members only', () => {

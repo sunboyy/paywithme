@@ -42,9 +42,18 @@
 // The agent cannot send an `Idempotency-Key` (`tools/call` carries only model-
 // generated arguments), so the server derives one and routes the create through the
 // existing `withIdempotency` store — see `../idempotency`, which owns the whole
-// mechanism and its rationale (ADR-0005). Here that means only:
-//   - the key is derived from the RAW tool arguments, AFTER validation, so a rejected
-//     create never enters the store — the agent's corrected retry meets a clean path;
+// mechanism and its rationale (ADR-0005). Here that means:
+//   - `peekIdempotentReplay` runs FIRST, on the RAW tool arguments, before any name
+//     resolution: a plain retry of an already-successful call must replay that
+//     success even if a referenced member was renamed or deactivated in between
+//     (ADR-0015 made that resolution able to fail on a call it never failed on
+//     originally, and a stale validation_error on an already-recorded transaction
+//     would be wrong — see `../idempotency`'s doc comment on why this check is
+//     read-only and safe to run ahead of validation that might still reject);
+//   - only on NO match does the tool validate, then route the actual write through
+//     `withDerivedIdempotency`, whose key is ALSO derived from the raw arguments (not
+//     the resolved ones) — a create that fails validation still never enters the
+//     store, so the agent's corrected retry meets a clean path;
 //   - a content-identical retry within the window REPLAYS, and the replay is SURFACED
 //     in the echo-back ("already recorded 3 seconds ago"), never hidden;
 //   - the same expense AFTER the window is a NEW transaction — two ฿60 coffees in a
@@ -61,9 +70,9 @@ import {
 	TransactionValidationError
 } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
-import { createDbIdempotencyStore } from '$lib/server/api/idempotency';
+import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
-import { withDerivedIdempotency } from '../idempotency';
+import { peekIdempotentReplay, withDerivedIdempotency } from '../idempotency';
 import {
 	buildEchoBack,
 	buildReplayEchoBack,
@@ -348,6 +357,23 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			);
 		}
 
+		// ── Idempotency PEEK — before any name resolution (ADR-0015 / see `../idempotency`)
+		//
+		// A plain retry of an already-successful call must replay that success even if a
+		// referenced member was renamed or deactivated in between — this is a READ-ONLY
+		// lookup on the RAW arguments, so it can run ahead of validation that might now
+		// reject the same call the roster used to accept. `null` means "no completed
+		// match yet"; fall through to validate and reach the write guard below as usual.
+		const idempotencyStore = createDbIdempotencyStore();
+		const peeked = await peekIdempotentReplay({
+			keyId: principal.keyId,
+			groupId,
+			toolName: TOOL_NAME,
+			args: rawArgs,
+			store: idempotencyStore
+		});
+		if (peeked) return replaySuccess(peeked);
+
 		// The roster is what every member NAME is resolved against (ADR-0015), where the
 		// `paidBy` default comes from, and where the echo-back's names come from. It
 		// carries deactivated members too, so a removed person can be named as removed.
@@ -405,9 +431,11 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// Everything above this line is validation, and none of it has touched the ledger
-		// — which is why the guard starts HERE: a create that was going to be rejected
-		// never inserts an idempotency row, so the agent's corrected retry is unimpeded.
+		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
+		// arguments; everything between it and here is validation that has now succeeded,
+		// and none of it has touched the ledger — which is why the guard starts HERE: a
+		// create that was going to be rejected never inserts an idempotency row, so the
+		// agent's corrected retry is unimpeded.
 		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it must answer "did the model already send me exactly this?", and resolving the
@@ -426,7 +454,7 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			// weight, exact amount, charge, and its ARRAY POSITION therefore distinguishes
 			// intents; no rich input can collide with a simpler transaction.
 			args: rawArgs,
-			store: createDbIdempotencyStore(),
+			store: idempotencyStore,
 			fn: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's provenance (`viaKey`) into the audit row — audit comes for free, we never
@@ -468,11 +496,9 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			}
 		});
 
-		const payload = response.body as CreatedPayload;
-
 		// The ordinary path: the create ran, exactly once.
 		if (replayedAfterMs === null) {
-			return toolSuccess({ ...payload, replayed: false });
+			return toolSuccess({ ...(response.body as CreatedPayload), replayed: false });
 		}
 
 		// A REPLAY: the window absorbed a retry. This is a SUCCESS — the user's intent
@@ -480,11 +506,29 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 		// the agent cannot report a second lunch that does not exist. The full wrapped
 		// `recorded` view still ships (ADR-0003 holds on a replay exactly as on a create);
 		// only the prose changes, and `replayed` states it machine-readably.
-		return toolSuccess({
-			...payload,
-			replayed: true,
-			recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
-			echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
-		});
+		return replaySuccess({ response, replayedAfterMs });
 	}
 };
+
+/**
+ * The REPLAY response shape, shared by the early `peekIdempotentReplay` exit and
+ * the ordinary `withDerivedIdempotency` replay branch below it — the two answer
+ * the same question ("this exact call already succeeded, `replayedAfterMs` ago")
+ * from two different lookup points, and must render identically to the agent
+ * either way.
+ */
+function replaySuccess({
+	response,
+	replayedAfterMs
+}: {
+	response: IdempotentResponse;
+	replayedAfterMs: number;
+}) {
+	const payload = response.body as CreatedPayload;
+	return toolSuccess({
+		...payload,
+		replayed: true,
+		recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
+		echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
+	});
+}
