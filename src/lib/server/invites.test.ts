@@ -27,6 +27,7 @@ const {
 	updateReturningQueue,
 	insertReturningQueue,
 	insertThrow,
+	insertThrowQueue,
 	updateThrow,
 	makeDb
 } = vi.hoisted(() => {
@@ -44,6 +45,10 @@ const {
 	// When set, the NEXT insert `.values()` throws this (e.g. a Postgres unique
 	// violation `{ code: '23505' }`) to exercise the new-member race backstop.
 	const insertThrow: { error: unknown } = { error: undefined };
+	// Errors for SUCCESSIVE inserts, in call order — what the auto-suffix retry loop
+	// needs (`insertThrow` is one-shot). Each entry is thrown by one insert; an
+	// `undefined` entry lets that insert through. Consumed before `insertThrow`.
+	const insertThrowQueue: unknown[] = [];
 	// When set, the NEXT update `.returning()` rejects with this — exercises the
 	// existing-claim race backstop (the user concurrently linked another slot).
 	const updateThrow: { error: unknown } = { error: undefined };
@@ -71,7 +76,10 @@ const {
 		return {
 			values(values: unknown) {
 				insertCalls.push({ table, values });
-				if (insertThrow.error !== undefined) {
+				if (insertThrowQueue.length > 0) {
+					const err = insertThrowQueue.shift();
+					if (err !== undefined) throw err;
+				} else if (insertThrow.error !== undefined) {
 					const err = insertThrow.error;
 					insertThrow.error = undefined;
 					throw err;
@@ -118,15 +126,21 @@ const {
 		return chain;
 	}
 
-	const executor = {
+	const executor: Record<string, unknown> = {
 		select: () => selectChain(),
 		insert: (table: unknown) => insertChain(table),
 		update: () => updateChain()
 	};
+	// A NESTED `tx.transaction(cb)` is a SAVEPOINT against real Postgres — the
+	// accept path uses one per suffix attempt so a duplicate rolls back that insert
+	// alone. The stub just runs the callback on the same executor: enough to drive
+	// the retry LOOP here; that the rollback really keeps the outer transaction
+	// usable is the integration suite's job (a stub can't prove it).
+	executor.transaction = (cb: (tx: unknown) => unknown) => cb(executor);
 
 	const db = {
 		...executor,
-		transaction: (cb: (tx: typeof executor) => Promise<unknown>) => cb(executor)
+		transaction: (cb: (tx: unknown) => unknown) => cb(executor)
 	};
 
 	return {
@@ -137,6 +151,7 @@ const {
 		updateReturningQueue,
 		insertReturningQueue,
 		insertThrow,
+		insertThrowQueue,
 		updateThrow,
 		makeDb: () => db
 	};
@@ -183,6 +198,7 @@ beforeEach(() => {
 	updateReturningQueue.length = 0;
 	insertReturningQueue.length = 0;
 	insertThrow.error = undefined;
+	insertThrowQueue.length = 0;
 	updateThrow.error = undefined;
 });
 
@@ -593,8 +609,9 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 
 	it("mode 'new' race: a unique-violation on insert is backstopped → already_member", async () => {
 		// (1) resolve → valid; (2) membership → none (lost the race). The insert then
-		// trips the partial unique index `(group_id, user_id)`.
-		queueSelects([validInviteRow()], []);
+		// trips the partial unique index `(group_id, user_id)`, and (3) the re-read
+		// that decides WHICH index refused us finds the row the winner just committed.
+		queueSelects([validInviteRow()], [], [{ id: 'raced-member' }]);
 		insertThrow.error = { code: '23505' }; // Postgres unique_violation
 
 		const result = await acceptInvite({
@@ -605,12 +622,15 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		});
 
 		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+		// A user-id collision is NOT retried under a suffixed name — one insert only.
+		expect(nonAuditInserts()).toHaveLength(1);
+		expect(auditInserts()).toHaveLength(0);
 	});
 
 	it("mode 'new' race: backstop fires on Drizzle's WRAPPED 23505 (cause chain)", async () => {
 		// As above, but on the new-member INSERT path — the wrapped shape real Postgres
 		// throws, which the pre-#26 own-`code`-only check let escape as a 500.
-		queueSelects([validInviteRow()], []);
+		queueSelects([validInviteRow()], [], [{ id: 'raced-member' }]);
 		const pgError = Object.assign(new Error('duplicate key value'), { code: '23505' });
 		insertThrow.error = Object.assign(new Error('Failed query'), { cause: pgError });
 
@@ -631,5 +651,210 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		await expect(
 			acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok', selection: { mode: 'new' } })
 		).rejects.toThrow('connection reset');
+	});
+});
+
+// The auto-suffix rule ADR-0015 gives to invite-accept ONLY: the joiner's display
+// name defaults to their account name, which they did not choose in the moment, so
+// a name already held by an active member must never refuse them entry. The
+// admin-typed writes (add / rename / reactivate) hard-reject instead — see
+// `members.test.ts`. The real-Postgres proof (including concurrent joins) lives in
+// `tests/integration/invite-accept.test.ts`; here we pin the BRANCHING.
+describe("acceptInvite mode 'new' — display-name auto-suffix (ADR-0015)", () => {
+	/** A Postgres unique violation as Drizzle wraps it (own `code` undefined). */
+	function uniqueViolation() {
+		const pgError = Object.assign(new Error('duplicate key value'), { code: '23505' });
+		return Object.assign(new Error('Failed query'), { cause: pgError });
+	}
+
+	/** Rows as the active-name scan selects them. */
+	function activeNames(...names: string[]) {
+		return names.map((normalizedDisplayName) => ({ normalizedDisplayName }));
+	}
+
+	it("suffixes to 'Dana (2)' when an active member already holds the joiner's name", async () => {
+		// (1) resolve → valid; (2) membership → none; [insert #1 rejected by the NAME
+		// index]; (3) user-link re-read → none, so it was NOT a `already_member` case;
+		// (4) the active-name scan.
+		queueSelects([validInviteRow()], [], [], activeNames('dana'));
+		insertThrowQueue.push(uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-2' }]);
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-2' });
+
+		// Two member inserts: the joiner's own name, then the suffixed retry — with the
+		// canonical key kept in step, or the index would not see the duplicate.
+		const memberInserts = nonAuditInserts().map((c) => c.values as Record<string, unknown>);
+		expect(memberInserts).toHaveLength(2);
+		expect(memberInserts[0].displayName).toBe('Dana');
+		expect(memberInserts[1]).toMatchObject({
+			groupId: 'g1',
+			userId: 'u9',
+			displayName: 'Dana (2)',
+			normalizedDisplayName: 'dana (2)'
+		});
+	});
+
+	it('scans past every taken number to the next free one', async () => {
+		queueSelects([validInviteRow()], [], [], activeNames('dana', 'dana (2)', 'dana (3)'));
+		insertThrowQueue.push(uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-4' }]);
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-4' });
+		const values = nonAuditInserts()[1].values as Record<string, unknown>;
+		expect(values.displayName).toBe('Dana (4)');
+	});
+
+	it('matches the taken names case-insensitively (the index compares canonical keys)', async () => {
+		// The group holds 'DANA'; the joiner is 'Dana'. Same key → same collision.
+		queueSelects([validInviteRow()], [], [], activeNames('dana'));
+		insertThrowQueue.push(uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-2' }]);
+
+		await acceptInvite({
+			userId: 'u9',
+			userName: 'dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		const values = nonAuditInserts()[1].values as Record<string, unknown>;
+		expect(values.displayName).toBe('dana (2)');
+		expect(values.normalizedDisplayName).toBe('dana (2)');
+	});
+
+	it('records the name it ACTUALLY stored in the audit row, suffix included', async () => {
+		queueSelects([validInviteRow()], [], [], activeNames('dana'));
+		insertThrowQueue.push(uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-2' }]);
+
+		await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		const audits = auditInserts();
+		expect(audits).toHaveLength(1);
+		const a = audits[0].values as Record<string, unknown>;
+		expect(a.entityId).toBe('new-member-2');
+		expect(a.summary).toContain('Dana (2)');
+		expect(a.metadata).toMatchObject({
+			via: 'invite_accept',
+			mode: 'new',
+			displayName: 'Dana (2)'
+		});
+	});
+
+	it('retries again when a concurrent joiner takes the suffix first (the index is the authority)', async () => {
+		// Two lost races in a row: 'Dana' then 'Dana (2)'. Each rejection re-reads the
+		// live names, which is how the third attempt lands on 'Dana (3)'.
+		queueSelects(
+			[validInviteRow()],
+			[],
+			[],
+			activeNames('dana'), // scan after the 1st rejection
+			[], // user-link re-read after the 2nd rejection
+			activeNames('dana', 'dana (2)') // scan after the 2nd rejection
+		);
+		insertThrowQueue.push(uniqueViolation(), uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-3' }]);
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-3' });
+		const names = nonAuditInserts().map((c) => (c.values as Record<string, unknown>).displayName);
+		expect(names).toEqual(['Dana', 'Dana (2)', 'Dana (3)']);
+	});
+
+	it('never re-proposes a name it just watched fail, even if the scan misses it', async () => {
+		// Defensive: if the re-read somehow does not show the winning row yet, the
+		// attempted names still bump the counter, so the loop cannot spin on 'Dana'.
+		queueSelects([validInviteRow()], [], [], []); // scan comes back EMPTY
+		insertThrowQueue.push(uniqueViolation());
+		insertReturningQueue.push([{ id: 'new-member-2' }]);
+
+		await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		const names = nonAuditInserts().map((c) => (c.values as Record<string, unknown>).displayName);
+		expect(names).toEqual(['Dana', 'Dana (2)']);
+	});
+
+	it('gives up after a bounded number of attempts instead of spinning forever', async () => {
+		queueSelects([validInviteRow()], []);
+		// Every insert is rejected and the user-link re-read never finds a row, so the
+		// loop only ends because it is bounded.
+		insertThrowQueue.push(...Array.from({ length: 20 }, () => uniqueViolation()));
+
+		await expect(
+			acceptInvite({ userId: 'u9', userName: 'Dana', token: 'tok', selection: { mode: 'new' } })
+		).rejects.toThrow('Failed query');
+
+		expect(nonAuditInserts().length).toBeLessThanOrEqual(10);
+		expect(nonAuditInserts().length).toBeGreaterThan(1);
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('does NOT suffix when the collision is the one-member-per-user index', async () => {
+		// The joiner raced THEMSELVES into the group. Suffixing here would hand one user
+		// a second member row; the re-read that finds their existing link is what keeps
+		// the two 23505s apart.
+		queueSelects([validInviteRow()], [], [{ id: 'raced-member' }]);
+		insertThrowQueue.push(uniqueViolation());
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'already_member', groupId: 'g1' });
+		expect(nonAuditInserts()).toHaveLength(1);
+	});
+
+	it('leaves a non-colliding join completely alone (no scan, no suffix, one insert)', async () => {
+		queueSelects([validInviteRow()], []);
+		insertReturningQueue.push([{ id: 'new-member-1' }]);
+
+		const result = await acceptInvite({
+			userId: 'u9',
+			userName: 'Dana',
+			token: 'tok',
+			selection: { mode: 'new' }
+		});
+
+		expect(result).toEqual({ status: 'accepted', groupId: 'g1', memberId: 'new-member-1' });
+		const memberInserts = nonAuditInserts();
+		expect(memberInserts).toHaveLength(1);
+		expect((memberInserts[0].values as Record<string, unknown>).displayName).toBe('Dana');
+		// Exactly the two accept SELECTs (resolve + membership) — the happy path pays
+		// for no extra read.
+		expect(whereCalls).toHaveLength(2);
 	});
 });
