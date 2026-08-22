@@ -44,11 +44,19 @@ import { db } from './db';
 import { isUniqueViolation } from './db/pg-errors';
 import { groups, invites, members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
-import { displayNameValues } from './member-name';
+import { displayNameValues, nextFreeDisplayName, normalizeDisplayName } from './member-name';
 import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update'>;
+
+/**
+ * An OPEN transaction handle (what `db.transaction` hands its callback). Distinct
+ * from `DbExecutor` because the accept path also needs `.transaction()` on it — a
+ * nested call emits a SAVEPOINT, which is what lets one statement fail without
+ * killing the surrounding transaction (see {@link insertJoiningMember}).
+ */
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Default invite lifetime (PLAN §6.2 / decision #12): a link is reusable with a
@@ -394,6 +402,109 @@ export type AcceptResult =
 // against real Postgres (not just the unwrapped stub the unit tests throw).
 
 /**
+ * How many names the auto-suffix loop will try before giving up (ADR-0015).
+ *
+ * Attempt 1 is the joiner's own name; each further attempt follows a LOST RACE for
+ * a number another joiner took in between. Every retry re-reads the group's live
+ * names, so it only ever repeats under genuinely concurrent joins — a group would
+ * need ten simultaneous same-named accepts to exhaust this. The bound exists so a
+ * pathological case surfaces as an error instead of spinning forever.
+ */
+const MAX_JOIN_NAME_ATTEMPTS = 10;
+
+/** The canonical names currently held by the group's ACTIVE members (ADR-0015). */
+async function activeNormalizedNames(groupId: string, executor: DbExecutor): Promise<Set<string>> {
+	const rows = await executor
+		.select({ normalizedDisplayName: members.normalizedDisplayName })
+		.from(members)
+		.where(and(eq(members.groupId, groupId), isNull(members.deactivatedAt)));
+
+	return new Set(rows.map((r) => r.normalizedDisplayName));
+}
+
+/**
+ * Insert the new member for a `mode: 'new'` accept, AUTO-SUFFIXING the display name
+ * on a collision (ADR-0015): `Nan`, `Nan (2)`, `Nan (3)` … Returns the created row,
+ * or `null` when the user turns out to already be a member of the group.
+ *
+ * Two different partial unique indexes can reject this insert, and they mean
+ * OPPOSITE things:
+ *   - `members_group_id_user_id_unique` — the user raced themselves into the group
+ *     (two accepts in flight): a friendly `already_member`, NOT an error.
+ *   - `members_group_id_normalized_display_name_unique` — the joiner's account name
+ *     is already an active member's name. ADR-0015 is explicit that a name
+ *     coincidence must never refuse a real person entry, so this one RETRIES under
+ *     the next free number.
+ * Conflating them would tell a legitimate joiner they are "already a member" and
+ * lock them out of the group entirely.
+ *
+ * We tell them apart by ASKING THE DATABASE rather than by parsing the driver
+ * error's constraint name: after the failed attempt, is there now a member row for
+ * this user in this group? Postgres only raises `23505` once the conflicting
+ * transaction has COMMITTED (an in-flight one blocks the insert instead), so the
+ * row that caused it is visible to the next statement under READ COMMITTED — the
+ * answer is exact, and it stays exact if the indexes are ever renamed.
+ *
+ * Each attempt runs in a NESTED transaction, i.e. a SAVEPOINT: a `23505` aborts the
+ * statement's savepoint only, leaving the caller's transaction alive to re-read the
+ * names and retry. Without it the first duplicate would poison the whole accept
+ * transaction and no retry could run.
+ *
+ * The unique index — not the pre-read — is the authority on who wins a race (the
+ * convention `addMember` follows): the re-read only computes the NEXT candidate,
+ * and if a concurrent joiner takes it first this loops again.
+ */
+async function insertJoiningMember(
+	tx: Tx,
+	{ groupId, userId, userName }: { groupId: string; userId: string; userName: string }
+): Promise<{ id: string; displayName: string } | null> {
+	// Names this accept has already been refused — folded into the next scan so a
+	// retry can never re-propose a name we just watched fail.
+	const attempted = new Set<string>();
+	let displayName = userName;
+
+	for (let attempt = 1; ; attempt++) {
+		try {
+			// SAVEPOINT: a duplicate rolls back this insert alone, not the accept.
+			const [created] = await tx.transaction((sp) =>
+				sp
+					.insert(members)
+					// `displayNameValues` writes the name AND its canonical key (ADR-0015).
+					.values({ groupId, userId, ...displayNameValues(displayName) })
+					.returning({ id: members.id })
+			);
+			return { id: created.id, displayName };
+		} catch (e) {
+			if (!isUniqueViolation(e)) {
+				throw e;
+			}
+
+			// Which index refused us? Only a member row for THIS user means the
+			// `already_member` one; anything else is the name index (see above).
+			const [linked] = await tx
+				.select({ id: members.id })
+				.from(members)
+				.where(and(eq(members.groupId, groupId), eq(members.userId, userId)))
+				.limit(1);
+			if (linked) {
+				return null;
+			}
+
+			if (attempt >= MAX_JOIN_NAME_ATTEMPTS) {
+				throw e;
+			}
+
+			attempted.add(normalizeDisplayName(displayName));
+			const taken = await activeNormalizedNames(groupId, tx);
+			for (const name of attempted) {
+				taken.add(name);
+			}
+			displayName = nextFreeDisplayName(userName, taken);
+		}
+	}
+}
+
+/**
  * The invitee's CHOICE at accept time (PLAN §6.2 step 3):
  *   - `new`      — join as a brand-new member named after the accepting user.
  *   - `existing` — claim one of the group's unlinked, active member slots.
@@ -423,9 +534,12 @@ export type AcceptSelection = { mode: 'new' } | { mode: 'existing'; memberId: st
  *     cross-group guard); else `accepted`. The slot's existing `display_name` is
  *     NEVER overwritten. Wrapped in the unique-violation catch in case the user
  *     concurrently became a member via another slot (→ `already_member`).
- *  4. `new`: insert a new member `{ groupId, userId, displayName: userName }`. A
- *     concurrent double-accept is backstopped by the partial unique index
- *     (→ `already_member`).
+ *  4. `new`: insert a new member `{ groupId, userId, displayName: userName }`,
+ *     AUTO-SUFFIXED to `Nan (2)`, `Nan (3)` … when that name already belongs to an
+ *     ACTIVE member (ADR-0015 — a name coincidence must never refuse a real person
+ *     entry). A concurrent double-accept is still backstopped by the partial unique
+ *     index (→ `already_member`); {@link insertJoiningMember} tells the two
+ *     collisions apart.
  *
  * Accepting does NOT revoke/expire the invite — the link stays reusable until it
  * expires or is revoked. Never logs the token.
@@ -510,42 +624,32 @@ export async function acceptInvite({
 		}
 
 		// (4) Join as a NEW member: create a member linked to this user, display
-		// name defaulting to the accepting user's name (editable later — PLAN §6.2).
-		try {
-			const [created] = await tx
-				.insert(members)
-				// `displayNameValues` writes the name AND its canonical key (ADR-0015).
-				.values({ groupId: invite.groupId, userId, ...displayNameValues(userName) })
-				.returning({ id: members.id });
-
-			// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). New member created +
-			// linked to the accepting user; entity_id is the created member id. Same
-			// `add` verb as the claim path (see decision above). Never log the token.
-			await writeAuditLog(tx, {
-				groupId: invite.groupId,
-				actorUserId: userId,
-				action: 'add',
-				entityType: 'member',
-				entityId: created.id,
-				summary: `Joined the group as a new member '${userName}'`,
-				metadata: { via: 'invite_accept', mode: 'new', displayName: userName }
-			});
-			return { status: 'accepted', groupId: invite.groupId, memberId: created.id };
-		} catch (e) {
-			// Race backstop: the partial unique index `(group_id, user_id)` rejects a
-			// concurrent second link for the same user → friendly `already_member`.
-			//
-			// KNOWN GAP, owned by issue #79: `members_group_id_normalized_display_name_unique`
-			// (ADR-0015) can now also fire here, when the joining user's account name
-			// already belongs to an active member — and this branch would mislabel that
-			// as `already_member`. ADR-0015 is explicit that a name coincidence must
-			// NEVER refuse a real person entry; the fix is #79's auto-suffix
-			// (`Nan (2)`, `Nan (3)`), which resolves the collision BEFORE the insert so
-			// this catch goes back to meaning only what it says.
-			if (isUniqueViolation(e)) {
-				return { status: 'already_member', groupId: invite.groupId };
-			}
-			throw e;
+		// name defaulting to the accepting user's name (editable later — PLAN §6.2),
+		// AUTO-SUFFIXED when an active member already holds it (ADR-0015). `null`
+		// means the user raced themselves into the group → friendly `already_member`.
+		const created = await insertJoiningMember(tx, {
+			groupId: invite.groupId,
+			userId,
+			userName
+		});
+		if (!created) {
+			return { status: 'already_member', groupId: invite.groupId };
 		}
+
+		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). New member created +
+		// linked to the accepting user; entity_id is the created member id. Same
+		// `add` verb as the claim path (see decision above). The name recorded is the
+		// one actually STORED, suffix included — the audit trail must say what
+		// happened, not what was asked for. Never log the token.
+		await writeAuditLog(tx, {
+			groupId: invite.groupId,
+			actorUserId: userId,
+			action: 'add',
+			entityType: 'member',
+			entityId: created.id,
+			summary: `Joined the group as a new member '${created.displayName}'`,
+			metadata: { via: 'invite_accept', mode: 'new', displayName: created.displayName }
+		});
+		return { status: 'accepted', groupId: invite.groupId, memberId: created.id };
 	});
 }

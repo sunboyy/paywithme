@@ -65,3 +65,47 @@ export function displayNameValues(displayName: string): {
 } {
 	return { displayName, normalizedDisplayName: normalizeDisplayName(displayName) };
 }
+
+/**
+ * The nth name in the auto-suffix family for `base`: `1` is the base name ITSELF,
+ * then `Nan (2)`, `Nan (3)`, … (ADR-0015). PURE.
+ *
+ * The base is passed through verbatim at `n === 1` — the display form belongs to
+ * the user and nothing here should rewrite it (same rule as `displayNameValues`).
+ * A numbered name is built from the trimmed, NFC form instead, so a padded base
+ * can't produce `'Nan  (2)'`; the padding would be invisible in the rendered name
+ * yet permanently baked into the suffixed one.
+ */
+function suffixedDisplayName(base: string, n: number): string {
+	return n === 1 ? base : `${base.normalize('NFC').trim()} (${n})`;
+}
+
+/**
+ * The first name in `base`'s suffix family — `Nan`, `Nan (2)`, `Nan (3)`, … — whose
+ * canonical key is NOT in `takenNormalized`. PURE.
+ *
+ * This is the auto-suffix rule ADR-0015 gives to invite-accept, where the joiner
+ * did not choose the colliding name in the moment and must never be refused entry
+ * over a name coincidence. It is deliberately NOT used by the admin writes
+ * (add / rename / reactivate), which hard-reject: there the name IS in hand and
+ * can be retyped.
+ *
+ * `takenNormalized` holds NORMALIZED keys (what the uniqueness index compares), so
+ * `nan` blocks `Nan`. Callers build it from the group's ACTIVE members only —
+ * deactivated members are exempt from the index and must not burn a number.
+ *
+ * Terminates: the set is finite, so at most `size + 1` candidates are tried.
+ *
+ * A base that already looks suffixed is not special-cased — a user genuinely named
+ * `Nan (2)` colliding with an active `Nan (2)` becomes `Nan (2) (2)`. Ugly and
+ * vanishingly rare, and the joiner can rename themselves afterwards; unwinding an
+ * existing `(n)` would instead risk handing them a DIFFERENT person's name.
+ */
+export function nextFreeDisplayName(base: string, takenNormalized: ReadonlySet<string>): string {
+	for (let n = 1; ; n++) {
+		const candidate = suffixedDisplayName(base, n);
+		if (!takenNormalized.has(normalizeDisplayName(candidate))) {
+			return candidate;
+		}
+	}
+}

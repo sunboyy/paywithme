@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeDisplayName, displayNameValues } from './member-name';
+import { normalizeDisplayName, displayNameValues, nextFreeDisplayName } from './member-name';
 
 // The canonical form of a member display name (ADR-0015; issue #75). These cases are
 // the contract the `members_group_id_normalized_display_name_unique` index enforces:
@@ -93,5 +93,56 @@ describe('displayNameValues', () => {
 			'displayName',
 			'normalizedDisplayName'
 		]);
+	});
+});
+
+// The auto-suffix rule ADR-0015 reserves for INVITE-ACCEPT (issue #77): the joiner's
+// name defaults to their account name, which they did not choose in the moment, so a
+// collision suffixes rather than refusing them entry. The admin writes hard-reject
+// instead — this helper is deliberately not used there.
+describe('nextFreeDisplayName', () => {
+	const taken = (...names: string[]) => new Set(names.map(normalizeDisplayName));
+
+	it('returns the base name untouched when nothing holds it', () => {
+		expect(nextFreeDisplayName('Nan', taken())).toBe('Nan');
+		expect(nextFreeDisplayName('Nan', taken('Ploy', 'Nan Suphaporn'))).toBe('Nan');
+	});
+
+	it('starts the counter at (2) — there is no `Nan (1)`', () => {
+		expect(nextFreeDisplayName('Nan', taken('Nan'))).toBe('Nan (2)');
+	});
+
+	it('walks up to the first FREE number', () => {
+		expect(nextFreeDisplayName('Nan', taken('Nan', 'Nan (2)', 'Nan (3)'))).toBe('Nan (4)');
+	});
+
+	it('fills a GAP rather than always appending at the end', () => {
+		// (2) was freed (renamed away, or its holder deactivated), so it is reusable —
+		// the rule is "first free number", not "highest + 1".
+		expect(nextFreeDisplayName('Nan', taken('Nan', 'Nan (3)'))).toBe('Nan (2)');
+	});
+
+	it('compares by canonical key, so case and padding still collide', () => {
+		expect(nextFreeDisplayName('Nan', taken('  NAN  '))).toBe('Nan (2)');
+		expect(nextFreeDisplayName('Nan', taken('nan', 'NAN (2)'))).toBe('Nan (3)');
+	});
+
+	it('leaves the base display form verbatim, but does not bake padding into a suffix', () => {
+		// The unsuffixed name is the user's own (same rule as `displayNameValues`); a
+		// numbered one is built from the trimmed form so it can't read 'Nan  (2)'.
+		expect(nextFreeDisplayName('  Nan  ', taken())).toBe('  Nan  ');
+		expect(nextFreeDisplayName('  Nan  ', taken('Nan'))).toBe('Nan (2)');
+	});
+
+	it('does not unwind a base that already looks suffixed', () => {
+		// A user genuinely named 'Nan (2)' gets 'Nan (2) (2)' — ugly, rare, renameable.
+		// Unwinding it would risk handing them a DIFFERENT person's name.
+		expect(nextFreeDisplayName('Nan (2)', taken('Nan (2)'))).toBe('Nan (2) (2)');
+	});
+
+	it('is pure — it never mutates the taken set', () => {
+		const set = taken('Nan');
+		nextFreeDisplayName('Nan', set);
+		expect([...set]).toEqual(['nan']);
 	});
 });
