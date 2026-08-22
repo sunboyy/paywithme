@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // then member-in-group lookup) in order, and records insert/update/delete calls.
 
 // --- Fluent DB mock -------------------------------------------------------
-const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoisted(() => {
+const { selectQueue, insertCalls, updateCalls, deleteCalls, failNext, makeDb } = vi.hoisted(() => {
 	// A queue of row-sets the SELECT chains resolve to, in call order. The first
 	// SELECT in a mutation is the access check; the second is the member lookup.
 	const selectQueue: unknown[][] = [];
@@ -28,6 +28,19 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 
 	function nextSelectRows(): unknown[] {
 		return selectQueue.length > 0 ? (selectQueue.shift() as unknown[]) : [];
+	}
+
+	// A programmed failure for the NEXT write that calls `.returning()` — the seam
+	// that exercises the unique-violation MAPPING (23505 → `DisplayNameTakenError`)
+	// without a database. Deliberately only the mapping: whether a real Postgres
+	// failure actually carries 23505 down Drizzle's cause chain is a claim only the
+	// integration suite can make (see `db/pg-errors.ts`), and this stub throws
+	// whatever it is told to.
+	const failNext: { error?: unknown } = {};
+	function takeFailure(): unknown | undefined {
+		const e = failNext.error;
+		failNext.error = undefined;
+		return e;
 	}
 
 	// A thenable chain: builder methods return the same object; awaiting it (or a
@@ -48,7 +61,12 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 			values(values: unknown) {
 				insertCalls.push({ table, values });
 				return {
-					returning: () => Promise.resolve([{ id: 'member-1', ...(values as object) }]),
+					returning: () => {
+						const failure = takeFailure();
+						return failure
+							? Promise.reject(failure)
+							: Promise.resolve([{ id: 'member-1', ...(values as object) }]);
+					},
 					then: (resolve: (v: unknown) => unknown) => resolve(undefined)
 				};
 			}
@@ -62,7 +80,12 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 			return chain;
 		};
 		chain.where = () => chain;
-		chain.returning = () => Promise.resolve([{ id: 'member-1', displayName: 'Updated Name' }]);
+		chain.returning = () => {
+			const failure = takeFailure();
+			return failure
+				? Promise.reject(failure)
+				: Promise.resolve([{ id: 'member-1', displayName: 'Updated Name' }]);
+		};
 		chain.then = (resolve: (v: unknown) => unknown) => resolve(undefined);
 		return chain;
 	}
@@ -88,7 +111,7 @@ const { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb } = vi.hoiste
 		transaction: (cb: (tx: typeof executor) => Promise<unknown>) => cb(executor)
 	};
 
-	return { selectQueue, insertCalls, updateCalls, deleteCalls, makeDb: () => db };
+	return { selectQueue, insertCalls, updateCalls, deleteCalls, failNext, makeDb: () => db };
 });
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
@@ -100,6 +123,7 @@ import {
 	removeMember,
 	reactivateMember,
 	decideMemberRemoval,
+	DisplayNameTakenError,
 	MemberNotFoundError
 } from './members';
 import { GroupAccessError } from './groups';
@@ -126,7 +150,17 @@ beforeEach(() => {
 	updateCalls.length = 0;
 	deleteCalls.length = 0;
 	selectQueue.length = 0;
+	failNext.error = undefined;
 });
+
+/**
+ * A stand-in for what Drizzle throws on a constraint trip: the driver error nested
+ * in `cause`, exactly as `isUniqueViolation` expects to find it. `code` defaults to
+ * the unique-violation SQLSTATE.
+ */
+function pgError(code = '23505'): Error {
+	return new Error('drizzle query error', { cause: Object.assign(new Error('pg'), { code }) });
+}
 
 describe('decideMemberRemoval (pure removal-branch rule — PLAN §6.3)', () => {
 	it("returns 'hard_delete' for a member with zero activity", () => {
@@ -188,6 +222,21 @@ describe('addMember (PLAN §6.1 — inserts a NEW UNLINKED slot)', () => {
 		// The defining property: a participant slot, NOT a user link.
 		expect(values.userId).toBeNull();
 		expect(member.id).toBe('member-1');
+	});
+
+	it('writes the canonical name key alongside the name (ADR-0015)', async () => {
+		// The uniqueness index compares STORED keys, so an insert that omitted this
+		// column (or wrote an unfolded value) would leave the constraint unable to see
+		// a case/whitespace-only duplicate. Padded + mixed case on purpose.
+		queueSelects(ACCESS_OK);
+		await addMember({ userId: 'u1', groupId: 'g1', displayName: '  ALEX  ' });
+
+		const values = insertCalls.filter((c) => c.table !== auditLog)[0].values as Record<
+			string,
+			unknown
+		>;
+		expect(values.displayName).toBe('  ALEX  ');
+		expect(values.normalizedDisplayName).toBe('alex');
 	});
 
 	it('writes exactly ONE add/member audit row in the same transaction', async () => {
@@ -252,6 +301,18 @@ describe('renameMember (PLAN §6.2 — display name editable)', () => {
 		expect(updateCalls).toHaveLength(1);
 		expect((updateCalls[0].set as Record<string, unknown>).displayName).toBe('New');
 		expect(updated.id).toBe('member-1');
+	});
+
+	it('moves the canonical name key WITH the name (ADR-0015)', async () => {
+		// A rename that left the old key behind would silently disable the uniqueness
+		// index for that row: it would keep matching its former name and stop matching
+		// its current one.
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		await renameMember({ userId: 'u1', groupId: 'g1', memberId: 'm1', displayName: 'NEW Name' });
+
+		const set = updateCalls[0].set as Record<string, unknown>;
+		expect(set.displayName).toBe('NEW Name');
+		expect(set.normalizedDisplayName).toBe('new name');
 	});
 });
 
@@ -359,6 +420,117 @@ describe('reactivateMember (PLAN §6.3 — flag flip)', () => {
 		expect(updateCalls).toHaveLength(1);
 		expect((updateCalls[0].set as Record<string, unknown>).deactivatedAt).toBeNull();
 		expect(updated.id).toBe('member-1');
+	});
+});
+
+describe('active-name collisions (issue #76; ADR-0015)', () => {
+	// What is asserted here is the TRANSLATION — a unique violation coming back from
+	// the write becomes a `DisplayNameTakenError` carrying an actionable message,
+	// and anything else propagates untouched. That the database really raises 23505
+	// for a normalized duplicate is the integration suite's claim
+	// (`tests/integration/member-name-uniqueness.test.ts`), not this stub's.
+
+	it('addMember maps a unique violation to DisplayNameTakenError', async () => {
+		queueSelects(ACCESS_OK);
+		failNext.error = pgError();
+
+		const thrown = await addMember({
+			userId: 'u1',
+			groupId: 'g1',
+			displayName: 'Alex'
+		}).catch((e: unknown) => e);
+
+		expect(thrown).toBeInstanceOf(DisplayNameTakenError);
+		const taken = thrown as DisplayNameTakenError;
+		expect(taken.code).toBe('display_name_taken');
+		expect(taken.groupId).toBe('g1');
+		// The name AS SUBMITTED, not the folded key — the admin has to recognize it.
+		expect(taken.displayName).toBe('Alex');
+		expect(taken.source).toBe('add');
+		expect(taken.message).toContain('Alex');
+		expect(taken.message).toContain('different name');
+	});
+
+	it('addMember RETHROWS a non-unique database failure unchanged', async () => {
+		// The mapping must not swallow unrelated failures into a user-facing
+		// "pick another name" (23503 = foreign-key violation).
+		queueSelects(ACCESS_OK);
+		const original = pgError('23503');
+		failNext.error = original;
+
+		await expect(addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' })).rejects.toBe(
+			original
+		);
+	});
+
+	it('addMember writes NO audit row when the insert collided', async () => {
+		// The audit write comes after the insert, so a rejected insert must not leave
+		// an "Added member" line behind (PLAN §12.1 — audit joins the same tx).
+		queueSelects(ACCESS_OK);
+		failNext.error = pgError();
+
+		await expect(addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' })).rejects.toThrow();
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('renameMember maps a unique violation to DisplayNameTakenError', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		failNext.error = pgError();
+
+		const thrown = await renameMember({
+			userId: 'u1',
+			groupId: 'g1',
+			memberId: 'm1',
+			displayName: 'Taken'
+		}).catch((e: unknown) => e);
+
+		expect(thrown).toBeInstanceOf(DisplayNameTakenError);
+		// The REQUESTED name, not the one the member currently holds.
+		expect((thrown as DisplayNameTakenError).displayName).toBe('Taken');
+		expect((thrown as DisplayNameTakenError).source).toBe('rename');
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('renameMember RETHROWS a non-unique database failure unchanged', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		const original = pgError('40001');
+		failNext.error = original;
+
+		await expect(
+			renameMember({ userId: 'u1', groupId: 'g1', memberId: 'm1', displayName: 'Taken' })
+		).rejects.toBe(original);
+	});
+
+	it("reactivateMember reports the DEACTIVATED member's own name and the remedy", async () => {
+		// Reactivate submits an id only, so the message can only name the clash by
+		// reading the target row first — and the remedy has to be the one the partial
+		// index leaves open (rename the inactive member, then reactivate).
+		queueSelects(ACCESS_OK, TARGET_MEMBER); // TARGET_MEMBER is named 'Alex'
+		failNext.error = pgError();
+
+		const thrown = await reactivateMember({
+			userId: 'u1',
+			groupId: 'g1',
+			memberId: 'm1'
+		}).catch((e: unknown) => e);
+
+		expect(thrown).toBeInstanceOf(DisplayNameTakenError);
+		const taken = thrown as DisplayNameTakenError;
+		expect(taken.displayName).toBe('Alex');
+		expect(taken.source).toBe('reactivate');
+		expect(taken.message).toContain('Alex');
+		expect(taken.message).toMatch(/rename the inactive member/i);
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('reactivateMember RETHROWS a non-unique database failure unchanged', async () => {
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		const original = pgError('23514');
+		failNext.error = original;
+
+		await expect(reactivateMember({ userId: 'u1', groupId: 'g1', memberId: 'm1' })).rejects.toBe(
+			original
+		);
 	});
 });
 

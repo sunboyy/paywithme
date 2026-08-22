@@ -9,9 +9,14 @@
 //     runs the existing `parseAmount(amount, settlementCurrency)` to get minor units
 //     via that currency's own exponent. More decimal places than the currency allows
 //     is a HARD ERROR (`"240.005"` in THB → rejected), never a silent round.
-//   - ADR-0006 (view layer). IDs ONLY, never names — the model matches "Nan" against
-//     `list_members` ITSELF, visibly; and the result echoes the interpretation back
-//     in prose that names the humans (see `../view/echo`).
+//   - ADR-0006 (view layer), as amended by ADR-0015 (member references by NAME). The
+//     model sends the DISPLAY NAME it read off `list_members` — a payload the user can
+//     check for themselves, which an opaque id never was — and the SERVER resolves it,
+//     by the exact normalized match the active-member uniqueness index enforces. A name
+//     matching no active member is a loud `validation_error`, never a guess. What that
+//     does NOT settle is which real `Nan` a shorthand meant (ADR-0015, "what this does
+//     not fix"), so the result still echoes the interpretation back in prose that names
+//     the humans (see `../view/echo`).
 //
 // ── FX is DEFERRED — a deliberate v1 boundary (read before you widen the scope) ─
 // An assistant has no exchange-rate source, and the internal transaction schema
@@ -37,9 +42,18 @@
 // The agent cannot send an `Idempotency-Key` (`tools/call` carries only model-
 // generated arguments), so the server derives one and routes the create through the
 // existing `withIdempotency` store — see `../idempotency`, which owns the whole
-// mechanism and its rationale (ADR-0005). Here that means only:
-//   - the key is derived from the RAW tool arguments, AFTER validation, so a rejected
-//     create never enters the store — the agent's corrected retry meets a clean path;
+// mechanism and its rationale (ADR-0005). Here that means:
+//   - `peekIdempotentReplay` runs FIRST, on the RAW tool arguments, before any name
+//     resolution: a plain retry of an already-successful call must replay that
+//     success even if a referenced member was renamed or deactivated in between
+//     (ADR-0015 made that resolution able to fail on a call it never failed on
+//     originally, and a stale validation_error on an already-recorded transaction
+//     would be wrong — see `../idempotency`'s doc comment on why this check is
+//     read-only and safe to run ahead of validation that might still reject);
+//   - only on NO match does the tool validate, then route the actual write through
+//     `withDerivedIdempotency`, whose key is ALSO derived from the raw arguments (not
+//     the resolved ones) — a create that fails validation still never enters the
+//     store, so the agent's corrected retry meets a clean path;
 //   - a content-identical retry within the window REPLAYS, and the replay is SURFACED
 //     in the echo-back ("already recorded 3 seconds ago"), never hidden;
 //   - the same expense AFTER the window is a NEW transaction — two ฿60 coffees in a
@@ -56,12 +70,13 @@ import {
 	TransactionValidationError
 } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
-import { createDbIdempotencyStore } from '$lib/server/api/idempotency';
+import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
-import { withDerivedIdempotency } from '../idempotency';
+import { peekIdempotentReplay, withDerivedIdempotency } from '../idempotency';
 import {
 	buildEchoBack,
 	buildReplayEchoBack,
+	memberNameSnapshot,
 	selfMemberId,
 	toTransactionView,
 	UNTRUSTED_NOTE,
@@ -75,12 +90,14 @@ import {
 	MCP_TRANSACTION_ARGUMENT_FIELDS,
 	McpTransactionArgumentError,
 	toTransactionInput,
-	validateMcpTransactionArguments
+	validateMcpTransactionArguments,
+	type McpPayerReference
 } from './transaction-input';
 import {
 	AMOUNT_BENEFICIARY_PROPERTY,
 	CHARGE_PROPERTY,
 	ITEM_PROPERTY,
+	MEMBER_NAME_PROPERTY,
 	MONEY_PROPERTY,
 	SHARE_BENEFICIARY_PROPERTY,
 	SPLIT_SHAPE_ONE_OF
@@ -106,9 +123,16 @@ function remapTransactionValidationError(
 			const [first, ...rest] = issue.path;
 			if (first === 'payers') return { ...issue, path: ['paidBy'] };
 			if (first === 'beneficiaries') {
+				// `splitBetween` is a flat array of NAMES (ADR-0015), so a trailing `memberId`
+				// leaf has nothing to point at there; elsewhere it becomes the `memberName`
+				// argument the agent actually sent.
+				const leaf =
+					splitMode === 'equal'
+						? rest.filter((part) => part !== 'memberId')
+						: rest.map((part) => (part === 'memberId' ? 'memberName' : part));
 				return {
 					...issue,
-					path: [splitMode === 'equal' ? 'splitBetween' : 'beneficiaries', ...rest]
+					path: [splitMode === 'equal' ? 'splitBetween' : 'beneficiaries', ...leaf]
 				};
 			}
 			if (
@@ -122,6 +146,8 @@ function remapTransactionValidationError(
 				...issue,
 				path: issue.path.map((part, index) => {
 					if (part === 'rawAmount') return 'amount';
+					// The domain keys a share by id; the MCP argument holding it is a NAME.
+					if (part === 'memberId') return 'memberName';
 					if (part !== 'value') return part;
 					const chargeIndex = issue.path[0] === 'charges' ? issue.path[index - 1] : undefined;
 					return typeof chargeIndex === 'number' && charges?.[chargeIndex]?.mode === 'absolute'
@@ -158,7 +184,9 @@ const createTransactionArgs = z
 		// OPTIONAL: FX is deferred, so this defaults to (and must equal) the group's
 		// settlement currency. See the header.
 		currency: z.string().min(1).optional(),
-		// OPTIONAL: defaults to the CALLER's own member (the `isYou` member).
+		// OPTIONAL: the payer's DISPLAY NAME (ADR-0015), resolved server-side. Omitted, it
+		// defaults to the CALLER's own member (the `isYou` member) — an id we already hold,
+		// which is why the adapter takes a payer REFERENCE rather than a bare name.
 		paidBy: z.string().min(1).optional(),
 		// OPTIONAL: defaults to the genuinely generic Other category. The enum is also
 		// advertised in JSON Schema, so the model can choose without guessing an id.
@@ -184,8 +212,12 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			'`items`; each item has its own equal/amount/share beneficiaries. Optional ordered ' +
 			'`charges` support service, VAT, discount, and tip as either a human `percent` string ' +
 			'or an absolute money `amount`; ARRAY ORDER IS APPLICATION ORDER, and the server derives ' +
-			'the final total and payer amount. IDS ONLY, NEVER NAMES: `paidBy` and every beneficiary ' +
-			'id must come from `list_members`; match people yourself and show your reasoning. Every ' +
+			'the final total and payer amount. NAMES, NOT IDS: `paidBy` and every `memberName` is a ' +
+			'member DISPLAY NAME copied exactly from `list_members` — a member id here matches ' +
+			'nobody and is rejected. The server resolves each name itself against the active ' +
+			'members of this group, so a name it cannot match comes back as an error you can fix; ' +
+			'but two members can still have similar names, so when the user says "Nan" and the ' +
+			'roster holds two, ASK which one instead of picking. Every ' +
 			'money amount is a DECIMAL STRING exactly as the user said it — the server does currency ' +
 			'math, so never multiply by 100 or convert exponents. The ' +
 			"amount must be in the group's settlement currency (logging a foreign currency via the " +
@@ -229,17 +261,18 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 						'assistant is not supported yet.'
 				},
 				paidBy: {
-					type: 'string',
-					minLength: 1,
+					...MEMBER_NAME_PROPERTY,
 					description:
-						'OPTIONAL member id of who paid, from `list_members`. Defaults to YOU (your own ' +
-						'member in this group). Never a name.'
+						'OPTIONAL display NAME of who paid, copied exactly from `list_members`. Defaults ' +
+						'to YOU (your own member in this group). Never a member id.'
 				},
 				splitBetween: {
 					type: 'array',
 					minItems: 1,
-					items: { type: 'string', minLength: 1 },
-					description: 'Member ids for an equal split. Required for equal mode only.'
+					items: MEMBER_NAME_PROPERTY,
+					description:
+						'Member display NAMES, copied exactly from `list_members`, for an equal split. ' +
+						'Required for equal mode only. Never member ids.'
 				},
 				beneficiaries: {
 					type: 'array',
@@ -325,32 +358,55 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			);
 		}
 
-		// The roster resolves member ids to (untrusted) names + `isYou`, both for the
-		// `paidBy` default and for the echo-back's names.
+		// ── Idempotency PEEK — before any name resolution (ADR-0015 / see `../idempotency`)
+		//
+		// A plain retry of an already-successful call must replay that success even if a
+		// referenced member was renamed or deactivated in between — this is a READ-ONLY
+		// lookup on the RAW arguments, so it can run ahead of validation that might now
+		// reject the same call the roster used to accept. `null` means "no completed
+		// match yet"; fall through to validate and reach the write guard below as usual.
+		const idempotencyStore = createDbIdempotencyStore();
+		const peeked = await peekIdempotentReplay({
+			keyId: principal.keyId,
+			groupId,
+			toolName: TOOL_NAME,
+			args: rawArgs,
+			store: idempotencyStore
+		});
+		if (peeked) return replaySuccess(peeked);
+
+		// The roster is what every member NAME is resolved against (ADR-0015), where the
+		// `paidBy` default comes from, and where the echo-back's names come from. It
+		// carries deactivated members too, so a removed person can be named as removed.
 		const members = await loadMemberViews(principal, groupId);
 
-		// Default the payer to the CALLER's own member (ADR-0006: `isYou`, server-derived
-		// from the key owner). If the caller has no active member row they cannot be the
-		// implicit payer — a self-correctable validation_error rather than an opaque throw.
-		const payerId = paidBy ?? selfMemberId(members);
-		if (payerId === null) {
+		// Who paid. An EXPLICIT `paidBy` is a name the shared adapter resolves (one
+		// resolution rule, one place); an omitted one defaults to the CALLER's own member
+		// (ADR-0006: `isYou`, server-derived from the key owner) — already an id, so it is
+		// passed as one. If the caller has no member row at all they cannot be the implicit
+		// payer: a self-correctable validation_error rather than an opaque throw.
+		const selfId = paidBy === undefined ? selfMemberId(members) : null;
+		if (paidBy === undefined && selfId === null) {
 			return toolError(
 				'validation_error',
-				'You are not an active member of this group, so `paidBy` cannot default to you. ' +
-					'Pass an explicit `paidBy` member id from `list_members`.',
-				{ fieldErrors: { paidBy: ['Pass an active member id from `list_members`.'] } }
+				'You are not a member of this group, so `paidBy` cannot default to you. ' +
+					'Pass an explicit `paidBy` member name from `list_members`.',
+				{ fieldErrors: { paidBy: ['Pass an active member name from `list_members`.'] } }
 			);
 		}
-
-		const activeMemberIds = members.filter((member) => member.isActive).map((member) => member.id);
+		const payer: McpPayerReference =
+			paidBy === undefined
+				? { kind: 'default', memberId: selfId as string }
+				: { kind: 'name', memberName: paidBy };
 
 		// Omission means Other, not the first display row (Food & Drink). Explicit ids were
 		// already checked against the same list advertised in the tool's JSON Schema.
 		const resolvedCategoryId = categoryId ?? DEFAULT_SPENDING_CATEGORY_ID;
 
-		// The shared MCP adapter is the ONLY decimal-string/basis-point conversion path.
-		// It also validates every active member at the exact nested MCP argument path and
-		// derives itemized total + payer amount from items and ordered charges.
+		// The shared MCP adapter is the ONLY decimal-string/basis-point conversion path, and
+		// the ONLY name → member-id resolution path. It reports every unresolvable name at
+		// its exact nested MCP argument path, and derives the itemized total + payer amount
+		// from items and ordered charges.
 		let input;
 		try {
 			input = toTransactionInput(
@@ -361,8 +417,8 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					date: new Date().toISOString().slice(0, 10),
 					categoryId: resolvedCategoryId,
 					currency: settlementCurrency,
-					payerId,
-					memberIds: activeMemberIds
+					payer,
+					members
 				}
 			);
 		} catch (error) {
@@ -376,9 +432,11 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// Everything above this line is validation, and none of it has touched the ledger
-		// — which is why the guard starts HERE: a create that was going to be rejected
-		// never inserts an idempotency row, so the agent's corrected retry is unimpeded.
+		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
+		// arguments; everything between it and here is validation that has now succeeded,
+		// and none of it has touched the ledger — which is why the guard starts HERE: a
+		// create that was going to be rejected never inserts an idempotency row, so the
+		// agent's corrected retry is unimpeded.
 		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it must answer "did the model already send me exactly this?", and resolving the
@@ -397,7 +455,7 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			// weight, exact amount, charge, and its ARRAY POSITION therefore distinguishes
 			// intents; no rich input can collide with a simpler transaction.
 			args: rawArgs,
-			store: createDbIdempotencyStore(),
+			store: idempotencyStore,
 			fn: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's provenance (`viaKey`) into the audit row — audit comes for free, we never
@@ -409,6 +467,14 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 						groupId,
 						input,
 						settlementCurrency,
+						// The names `paidBy` / `splitBetween` / beneficiary rows resolved against,
+						// re-verified LOCKED inside this write's own transaction (PR #80 review — see
+						// `expectedMemberNames` on `createTransaction`). The full roster snapshot,
+						// not just the resolved ids: `input` no longer distinguishes a NAME-resolved
+						// id from a DEFAULTED one (unlike `settle_up`, which never merged them), and
+						// checking a defaulted id too only ever costs a rare, self-correctable retry —
+						// never a wrong write.
+						expectedMemberNames: memberNameSnapshot(members),
 						via: auditVia(principal)
 					});
 				} catch (error) {
@@ -439,11 +505,9 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			}
 		});
 
-		const payload = response.body as CreatedPayload;
-
 		// The ordinary path: the create ran, exactly once.
 		if (replayedAfterMs === null) {
-			return toolSuccess({ ...payload, replayed: false });
+			return toolSuccess({ ...(response.body as CreatedPayload), replayed: false });
 		}
 
 		// A REPLAY: the window absorbed a retry. This is a SUCCESS — the user's intent
@@ -451,11 +515,29 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 		// the agent cannot report a second lunch that does not exist. The full wrapped
 		// `recorded` view still ships (ADR-0003 holds on a replay exactly as on a create);
 		// only the prose changes, and `replayed` states it machine-readably.
-		return toolSuccess({
-			...payload,
-			replayed: true,
-			recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
-			echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
-		});
+		return replaySuccess({ response, replayedAfterMs });
 	}
 };
+
+/**
+ * The REPLAY response shape, shared by the early `peekIdempotentReplay` exit and
+ * the ordinary `withDerivedIdempotency` replay branch below it — the two answer
+ * the same question ("this exact call already succeeded, `replayedAfterMs` ago")
+ * from two different lookup points, and must render identically to the agent
+ * either way.
+ */
+function replaySuccess({
+	response,
+	replayedAfterMs
+}: {
+	response: IdempotentResponse;
+	replayedAfterMs: number;
+}) {
+	const payload = response.body as CreatedPayload;
+	return toolSuccess({
+		...payload,
+		replayed: true,
+		recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
+		echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
+	});
+}

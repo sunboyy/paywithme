@@ -15,9 +15,17 @@
 // (no access / soft-deleted group), `MemberNotFoundError` (member not in group),
 // and `InviteNotFoundError` (invite not in group) all map to `error(404)`; any
 // other failure is a generic message (never leaking the raw cause — §12).
+//
+// `DisplayNameTakenError` (ADR-0015) is the exception to "generic message": it is
+// a USER-FIXABLE 400 whose whole value is its text, so the service message is
+// passed through verbatim. It surfaces wherever the submitting form can show it —
+// on the `displayName` field for the add form (which renders `Form.FieldErrors`),
+// and as the shared status banner's error text for rename/reactivate (one
+// `superForm` backs every row, so a field error would light up all of them, and
+// reactivate has no name field to attach to at all).
 
 import { error, fail, redirect } from '@sveltejs/kit';
-import { message, superValidate } from 'sveltekit-superforms';
+import { message, setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { addMemberSchema, memberIdSchema, renameMemberSchema } from '$lib/schemas/member';
 import { createInviteSchema, revokeInviteSchema } from '$lib/schemas/invite';
@@ -30,6 +38,7 @@ import {
 	reactivateMember,
 	removeMember,
 	renameMember,
+	DisplayNameTakenError,
 	MemberNotFoundError,
 	type MemberListItem
 } from '$lib/server/members';
@@ -132,6 +141,11 @@ export const actions: Actions = {
 			if (isNotFoundError(e)) {
 				error(404, 'Group not found');
 			}
+			if (e instanceof DisplayNameTakenError) {
+				// Against the FIELD the user can actually fix (ADR-0015) — the typed name
+				// stays in the input, so retyping it is the whole correction.
+				return setError(form, 'displayName', e.message, { status: 400 });
+			}
 			return message(
 				form,
 				{ type: 'error', text: 'Could not add that member. Please try again.' },
@@ -161,6 +175,13 @@ export const actions: Actions = {
 		} catch (e) {
 			if (isNotFoundError(e)) {
 				error(404, 'Member not found');
+			}
+			if (e instanceof DisplayNameTakenError) {
+				// The banner, not `setError`: ONE `superForm` backs every row's rename form,
+				// so a `displayName` field error would mark every row on the page — not just
+				// the one submitted. The message names the clashing name itself, so it is
+				// self-contained without the field attribution.
+				return message(form, { type: 'error', text: e.message }, { status: 400 });
 			}
 			return message(
 				form,
@@ -227,6 +248,13 @@ export const actions: Actions = {
 		} catch (e) {
 			if (isNotFoundError(e)) {
 				error(404, 'Member not found');
+			}
+			if (e instanceof DisplayNameTakenError) {
+				// Reactivate submits a member id and nothing else (`memberIdSchema`), so
+				// there is no field to attach this to — and the remedy it states ("rename
+				// the inactive member first") is about a DIFFERENT control on the page
+				// anyway. The banner is the only right surface.
+				return message(form, { type: 'error', text: e.message }, { status: 400 });
 			}
 			return message(
 				form,

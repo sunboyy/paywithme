@@ -43,7 +43,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { asc, eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
-import { addMember } from '$lib/server/members';
+import { addMember, removeMember, renameMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
 import {
@@ -135,17 +135,21 @@ interface TransactionWire {
 	isDeleted: boolean;
 	payers: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountPaid: MoneyWire }[];
 	shares: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountOwed: MoneyWire }[];
+	// The copy-back block (ADR-0011). Its member references are DISPLAY NAMES since
+	// ADR-0015 — `paidBy`, `splitBetween` and every `memberName` are exactly what
+	// `update_transaction` takes, so the round trip is a straight copy.
 	editable?: {
 		title: UntrustedWire;
 		categoryId: string;
 		currency: string;
 		paidBy: string | null;
 		splitMode: string;
+		splitBetween: string[];
 		items: {
 			label: UntrustedWire;
 			amount: string;
 			splitMode: string;
-			beneficiaries: { memberId: string; amount?: string; shareWeight?: number }[];
+			beneficiaries: { memberName: string; amount?: string; shareWeight?: number }[];
 		}[];
 		charges: { kind: string; mode: string; percent?: string; amount?: string; base: string }[];
 	};
@@ -205,35 +209,48 @@ function wrappedValues(node: unknown, acc: Set<string> = new Set()): Set<string>
 /**
  * Count occurrences of the exact string `needle` that are BARE — i.e. a plain string
  * node that is NOT the `value` of an untrusted envelope (that copy is the deliberate,
- * marked one) and is NOT under a key listed in `proseKeys`. `proseKeys` is for the
- * server-generated echo-back prose, which ADR-0003/ADR-0006 deliberately inline a
- * member name into for legibility — the STRUCTURED copy alongside it must still be
- * wrapped, and that is exactly what a non-zero bare count outside the prose catches.
+ * marked one) and is NOT under a key listed in `bareKeys`.
+ *
+ * `bareKeys` holds the two DOCUMENTED exceptions, and nothing else:
+ *
+ *   - `echo` — the server-generated echo-back prose, which ADR-0003/ADR-0006
+ *     deliberately inline a member name into for legibility.
+ *   - the `editable` block's member-reference fields (ADR-0015, #79), which hold
+ *     display NAMES because that is what the write tools take, so the block stays a
+ *     verbatim copy-back.
+ *
+ * In both cases the STRUCTURED copy alongside them must still be wrapped, and that is
+ * exactly what a non-zero bare count outside these keys catches.
  */
-function bareOccurrences(
-	node: unknown,
-	needle: string,
-	proseKeys: Set<string> = new Set()
-): number {
+function bareOccurrences(node: unknown, needle: string, bareKeys: Set<string> = new Set()): number {
 	if (typeof node === 'string') return node === needle ? 1 : 0;
 	if (Array.isArray(node)) {
-		return node.reduce((sum, child) => sum + bareOccurrences(child, needle, proseKeys), 0);
+		return node.reduce((sum, child) => sum + bareOccurrences(child, needle, bareKeys), 0);
 	}
 	if (node && typeof node === 'object') {
 		const obj = node as Record<string, unknown>;
 		const isEnvelope = obj._untrusted === true;
 		let sum = 0;
 		for (const [key, child] of Object.entries(obj)) {
-			// The envelope's own `value` is the marked copy — allowed. Prose fields are the
-			// documented legibility exception. Everything else is walked.
+			// The envelope's own `value` is the marked copy — allowed. The exception keys are
+			// the documented ones above. Everything else is walked.
 			if (isEnvelope && key === 'value') continue;
-			if (proseKeys.has(key)) continue;
-			sum += bareOccurrences(child, needle, proseKeys);
+			if (bareKeys.has(key)) continue;
+			sum += bareOccurrences(child, needle, bareKeys);
 		}
 		return sum;
 	}
 	return 0;
 }
+
+/**
+ * The `editable` block's member-reference fields (ADR-0015, #79): a member DISPLAY
+ * NAME, bare, because `update_transaction` takes bare names and this block exists to
+ * be copied into it unchanged. Every name here also rides WRAPPED in the same
+ * payload's `payers` / `shares` lines — which the sweeps below still enforce, since
+ * only these three keys are exempted, not the `editable` block as a whole.
+ */
+const EDITABLE_MEMBER_KEYS = ['paidBy', 'splitBetween', 'memberName'];
 
 describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)', () => {
 	let s: ApiScenario;
@@ -1063,11 +1080,13 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				})
 			});
 
+			// The filter is a DISPLAY NAME since ADR-0015 (#79) — the same string
+			// `list_members` and `get_transaction` show, resolved server-side.
 			// Either side — and 'Shared dinner' appears ONCE despite Alice being both
 			// payer and beneficiary (the EXISTS semi-join, not a join).
 			const mine = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice
+				memberName: s.user.name
 			});
 			expect(mine.transactions.map((t) => t.title.value).sort()).toEqual([
 				'Bob only',
@@ -1078,7 +1097,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// `role: 'owes'` drops the one Alice merely paid for.
 			const owes = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice,
+				memberName: s.user.name,
 				role: 'owes'
 			});
 			expect(owes.transactions.map((t) => t.title.value)).toEqual(['Shared dinner']);
@@ -1086,7 +1105,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// `role: 'paid'` keeps both of Alice's, and never Bob's own.
 			const paid = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice,
+				memberName: s.user.name,
 				role: 'paid'
 			});
 			expect(paid.transactions.map((t) => t.title.value).sort()).toEqual([
@@ -1094,13 +1113,146 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				'Shared dinner'
 			]);
 
-			// NO EXISTENCE ORACLE: an unknown member id is an empty page, not an error.
+			// A member ID in the name field matches NOBODY — it is not dual-accepted
+			// (ADR-0015), and being a read filter it is silently empty rather than an error.
+			const byId = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: s.alice
+			});
+			expect(byId.transactions).toEqual([]);
+
+			// NO EXISTENCE ORACLE: an unknown member name is an empty page, not an error.
 			const nobody = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: 'mbr_does_not_exist'
+				memberName: 'Nobody At All'
 			});
 			expect(nobody.transactions).toEqual([]);
 			expect(nobody.hasMore).toBe(false);
+		});
+
+		it('the `memberName` filter names the SAME member `get_transaction` shows (#79)', async () => {
+			// The read side has one vocabulary: the name on a transaction's payer line is
+			// the name that filters for it, with no translation in between.
+			const txnId = await seed('Shared dinner');
+			const detail = await callOk<TransactionWire>('get_transaction', {
+				groupId: s.group.id,
+				transactionId: txnId
+			});
+			const payerName = detail.payers[0].displayName.value;
+			expect(detail.editable!.paidBy).toBe(payerName);
+
+			const found = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: payerName
+			});
+			expect(found.transactions.map((t) => t.id)).toContain(txnId);
+		});
+
+		it('matches a REMOVED member’s past transactions, and stops at an ambiguous name (#79)', async () => {
+			// §6.3: a removed member is still in the ledger, so their history stays
+			// findable — the id-based filter this replaced found it, and the rename must
+			// not quietly narrow what the tool can find.
+			const gone = (await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' }))
+				.id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [gone],
+					amount: 3000,
+					title: 'Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: gone });
+
+			const removed = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(removed.transactions.map((t) => t.title.value)).toEqual(['Nan owes']);
+
+			// The uniqueness index covers ACTIVE members only, so a SECOND removed member
+			// may legitimately come to hold the same name (renaming a deactivated row is
+			// exactly the §6.3 escape hatch) — and then no single member is named. The tool
+			// must not pick one, and must not error either: an empty page.
+			const alsoGone = (
+				await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan (2)' })
+			).id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [alsoGone],
+					amount: 2000,
+					title: 'The other Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: alsoGone });
+			await renameMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				memberId: alsoGone,
+				displayName: 'Nan'
+			});
+
+			const ambiguous = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(ambiguous.transactions).toEqual([]);
+			expect(ambiguous.hasMore).toBe(false);
+		});
+
+		it('an ACTIVE namesake of a REMOVED member does not win the filter — still an empty page (#79)', async () => {
+			// The uniqueness index covers ACTIVE members only (#75) and invite-accept
+			// suffixes against ACTIVE names only (#77), so a current member quite ordinarily
+			// holds a departed member's name. On the WRITE side the active row wins because
+			// the removed one is not a legal participant at all; on this READ filter both are
+			// real people whose history the filter exists to expose. Answering with the
+			// ACTIVE one's page would silently return the WRONG person's transactions, so the
+			// collision is ambiguous — and ambiguity is an empty page, never a guess.
+			const gone = (await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' }))
+				.id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [gone],
+					amount: 3000,
+					title: 'Departed Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: gone });
+
+			// A NEW, still-active member takes the same name — legal, the index exempts the
+			// deactivated row.
+			const current = (
+				await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' })
+			).id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [current],
+					amount: 2000,
+					title: 'Current Nan owes'
+				})
+			});
+
+			const collided = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(collided.transactions).toEqual([]);
+			expect(collided.hasMore).toBe(false);
 		});
 
 		it('filters by an INCLUSIVE `from`/`to` date range on the real-world date (§7.1)', async () => {
@@ -1204,17 +1356,18 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		/**
 		 * A fresh group of a GIVEN settlement currency owned by the suite user, plus the
-		 * creator's own member id (which is `isYou` for the write key). The default fixture
-		 * group settles in USD; the exponent matrix needs THB and JPY groups.
+		 * DISPLAY NAME of the creator's own member — which is what a write tool takes since
+		 * ADR-0015, and which `createGroup` seeds from the user's own name in every group.
+		 * The default fixture group settles in USD; the exponent matrix needs THB and JPY.
 		 */
-		async function groupWithCurrency(cur: string): Promise<{ groupId: string; me: string }> {
+		async function groupWithCurrency(cur: string): Promise<{ groupId: string; meName: string }> {
 			const g = await createGroup({
 				userId: s.user.id,
 				userName: s.user.name,
 				name: `${cur} group`,
 				settlementCurrency: cur
 			});
-			return { groupId: g.id, me: await creatorMemberId(g.id, s.user.id) };
+			return { groupId: g.id, meName: s.user.name };
 		}
 
 		/** The rows persisted for a group (to assert on `amountTotal` / row COUNT). */
@@ -1239,11 +1392,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		}
 
 		it('records "240.00" in a THB group as 24000 minor units — the ADR-0004 exponent', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+			const { groupId, meName } = await groupWithCurrency('THB');
 
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [me] },
+				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [meName] },
 				writeKeyOf()
 			);
 
@@ -1261,11 +1414,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('records "2400" in a JPY group as 2400 minor units — 0-exponent currency', async () => {
-			const { groupId, me } = await groupWithCurrency('JPY');
+			const { groupId, meName } = await groupWithCurrency('JPY');
 
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Ramen', amount: '2400', splitBetween: [me] },
+				{ groupId, title: 'Ramen', amount: '2400', splitBetween: [meName] },
 				writeKeyOf()
 			);
 
@@ -1289,8 +1442,8 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 							amount: '100.00',
 							splitMode: 'amount',
 							beneficiaries: [
-								{ memberId: s.alice, amount: '40.00' },
-								{ memberId: s.bob, amount: '60.00' }
+								{ memberName: s.user.name, amount: '40.00' },
+								{ memberName: 'Bob', amount: '60.00' }
 							]
 						},
 						{
@@ -1298,8 +1451,8 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 							amount: '50.00',
 							splitMode: 'share',
 							beneficiaries: [
-								{ memberId: s.alice, shareWeight: 1 },
-								{ memberId: s.bob, shareWeight: 2 }
+								{ memberName: s.user.name, shareWeight: 1 },
+								{ memberName: 'Bob', shareWeight: 2 }
 							]
 						}
 					],
@@ -1350,8 +1503,8 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					splitMode: 'amount',
 					amount: '30.00',
 					beneficiaries: [
-						{ memberId: s.alice, amount: '10.00' },
-						{ memberId: s.bob, amount: '20.00' }
+						{ memberName: s.user.name, amount: '10.00' },
+						{ memberName: 'Bob', amount: '20.00' }
 					]
 				},
 				writeKeyOf()
@@ -1376,7 +1529,38 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 							label: 'Food',
 							amount: '10.00',
 							splitMode: 'equal',
-							beneficiaries: [{ memberId: 'mem_not_in_this_group' }]
+							beneficiaries: [{ memberName: 'Nobody Real' }]
+						}
+					]
+				},
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			// The path is the MCP ARGUMENT path (ADR-0009), down to the `memberName` leaf the
+			// agent actually typed — and `items` too, the field the JSON Schema advertises.
+			expect(error.details).toMatchObject({
+				fieldErrors: { 'items.0.beneficiaries.0.memberName': expect.any(Array) }
+			});
+			expect(await txnRows(s.group.id)).toHaveLength(0);
+		});
+
+		it('a member ID nested in an item is an ORDINARY name miss, never silently accepted', async () => {
+			// The pre-ADR-0015 payload, at the deepest path it can appear. Passing a real
+			// member's id must not resolve: it is simply a name nobody in the group holds.
+			const res = await mcpToolCall(
+				'create_transaction',
+				{
+					groupId: s.group.id,
+					title: 'Bad receipt',
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '10.00',
+							splitMode: 'equal',
+							beneficiaries: [{ memberName: s.alice }]
 						}
 					]
 				},
@@ -1386,17 +1570,18 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			const error = toolErrorEnvelope(res.body.result).error;
 			expect(error.code).toBe('validation_error');
 			expect(error.details).toMatchObject({
-				fieldErrors: { 'items.0.beneficiaries.0.memberId': expect.any(Array) }
+				fieldErrors: { 'items.0.beneficiaries.0.memberName': expect.any(Array) }
 			});
+			expect(error.message).toContain('member names, not member ids');
 			expect(await txnRows(s.group.id)).toHaveLength(0);
 		});
 
 		it('OVER-PRECISION is a hard error, never a silent round ("240.005" in THB)', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+			const { groupId, meName } = await groupWithCurrency('THB');
 
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: '240.005', splitBetween: [me] },
+				{ groupId, title: 'Lunch', amount: '240.005', splitBetween: [meName] },
 				writeKeyOf()
 			);
 
@@ -1407,10 +1592,10 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('rejects a negative amount at the Zod regex ("-5")', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+			const { groupId, meName } = await groupWithCurrency('THB');
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: '-5', splitBetween: [me] },
+				{ groupId, title: 'Lunch', amount: '-5', splitBetween: [meName] },
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError).toBe(true);
@@ -1419,51 +1604,81 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('rejects junk that is not a decimal ("abc")', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+			const { groupId, meName } = await groupWithCurrency('THB');
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: 'abc', splitBetween: [me] },
+				{ groupId, title: 'Lunch', amount: 'abc', splitBetween: [meName] },
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError).toBe(true);
 			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
 		});
 
-		it('a bogus `splitBetween` member id is a self-correctable validation_error, not internal_error (#31)', async () => {
-			// The IDS-ONLY re-validation story: `createTransaction` re-checks every member id
-			// against the group's active roster server-side and throws `TransactionValidationError`
-			// for an unknown / other-group / deactivated id. `mapToolError` must surface that as a
-			// `validation_error` the agent can fix — NOT the opaque `internal_error` a plain Error
-			// would fall through to.
-			const { groupId, me } = await groupWithCurrency('THB');
+		it('a `splitBetween` name nobody holds is a self-correctable validation_error, not internal_error (#31)', async () => {
+			// Since ADR-0015 the server resolves NAMES itself, against this group's ACTIVE
+			// roster, and a miss is caught in the shared adapter before `createTransaction` is
+			// ever called. It must surface as a `validation_error` the agent can fix — NOT the
+			// opaque `internal_error` a plain Error would fall through to — and it must be
+			// reported under the argument the agent typed.
+			const { groupId, meName } = await groupWithCurrency('THB');
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [me, 'mem_not_in_this_group'] },
+				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [meName, 'Nobody Real'] },
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError).toBe(true);
 			const error = toolErrorEnvelope(res.body.result).error;
 			expect(error.code).toBe('validation_error');
 			expect(error.details).toMatchObject({
-				fieldErrors: { splitBetween: expect.any(Array) }
+				// The exact element that failed, AND the top-level field the schema advertises.
+				fieldErrors: {
+					'splitBetween.1': expect.any(Array),
+					splitBetween: expect.any(Array)
+				}
 			});
+			// A member reference never leaks the DOMAIN's own field names back to the agent.
 			expect(
 				(error.details as { fieldErrors?: Record<string, unknown> }).fieldErrors
 			).not.toHaveProperty('payers');
+			expect(error.message).toContain('Nobody Real');
 			// The reject happened server-side before any row was written.
 			expect(await txnRows(groupId)).toHaveLength(0);
 		});
 
-		it('reports an invalid explicit payer under the MCP `paidBy` argument', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+		it('a member ID in `splitBetween` is now an ORDINARY validation_error (ADR-0015 / #78)', async () => {
+			// The pre-ADR-0015 wire. A REAL, in-group member id must not be dual-accepted:
+			// there is no id path left, so it fails exactly like any other unmatchable name.
+			const { groupId, meName } = await groupWithCurrency('THB');
+			// The id of an ACTIVE member OF THIS GROUP — so the ONLY reason it can fail is
+			// that it is an id rather than a name. A reintroduced id-fallback would resolve
+			// it and this test would go red, which is the regression protection we want.
+			const meId = await creatorMemberId(groupId, s.user.id);
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.00', splitBetween: [meName, meId] },
+				writeKeyOf()
+			);
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({
+				fieldErrors: { 'splitBetween.1': expect.any(Array) }
+			});
+			// And the message says WHICH mistake this is, so the agent can correct itself.
+			expect(error.message).toContain('member names, not member ids');
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('reports an unresolvable explicit payer under the MCP `paidBy` argument', async () => {
+			const { groupId, meName } = await groupWithCurrency('THB');
 			const res = await mcpToolCall(
 				'create_transaction',
 				{
 					groupId,
 					title: 'Lunch',
 					amount: '240.00',
-					paidBy: 'mem_not_in_this_group',
-					splitBetween: [me]
+					paidBy: 'Nobody Real',
+					splitBetween: [meName]
 				},
 				writeKeyOf()
 			);
@@ -1475,11 +1690,30 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(await txnRows(groupId)).toHaveLength(0);
 		});
 
-		it('a currency other than the group settlement currency is refused (FX deferred)', async () => {
-			const { groupId, me } = await groupWithCurrency('THB');
+		it('a member ID passed as `paidBy` is rejected like any other unknown name', async () => {
+			const { groupId, meName } = await groupWithCurrency('THB');
+			// Again a REAL member id of THIS group: an id-fallback would happily resolve it to
+			// the payer and the write would succeed, so only the name-vs-id rule keeps this red.
+			const meId = await creatorMemberId(groupId, s.user.id);
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId, title: 'Lunch', amount: '240.00', currency: 'JPY', splitBetween: [me] },
+				{ groupId, title: 'Lunch', amount: '240.00', paidBy: meId, splitBetween: [meName] },
+				writeKeyOf()
+			);
+
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.details).toMatchObject({ fieldErrors: { paidBy: expect.any(Array) } });
+			expect(error.message).toContain('member names, not member ids');
+			expect(await txnRows(groupId)).toHaveLength(0);
+		});
+
+		it('a currency other than the group settlement currency is refused (FX deferred)', async () => {
+			const { groupId, meName } = await groupWithCurrency('THB');
+			const res = await mcpToolCall(
+				'create_transaction',
+				{ groupId, title: 'Lunch', amount: '240.00', currency: 'JPY', splitBetween: [meName] },
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError).toBe(true);
@@ -1499,7 +1733,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					groupId: s.group.id,
 					title: 'Team lunch',
 					amount: '240.00',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				},
 				writeKeyOf()
 			);
@@ -1522,7 +1756,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('writes an audit_log row carrying the WRITE KEY as `viaKey` provenance (§16.2)', async () => {
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId: s.group.id, title: 'Coffee', amount: '12.00', splitBetween: [s.alice] },
+				{ groupId: s.group.id, title: 'Coffee', amount: '12.00', splitBetween: [s.user.name] },
 				writeKeyOf()
 			);
 			const payload = res.body.result?.structuredContent as unknown as CreatedWire;
@@ -1539,7 +1773,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('a READ key calling it is refused with forbidden_scope, and writes NOTHING (ADR-0002)', async () => {
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId: s.group.id, title: 'Lunch', amount: '240.00', splitBetween: [s.alice] },
+				{ groupId: s.group.id, title: 'Lunch', amount: '240.00', splitBetween: [s.user.name] },
 				read
 			);
 
@@ -1600,7 +1834,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		async function createLunch(extra: Record<string, unknown> = {}) {
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.alice], ...extra },
+				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.user.name], ...extra },
 				{ key: s.writeKey.key }
 			);
 			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
@@ -1630,6 +1864,47 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(first.replayed).toBe(false);
 		});
 
+		it('a retry after the referenced member was RENAMED still replays — the guard runs before name resolution (PR #80 review)', async () => {
+			// The bug this closes: `paidBy`/`splitBetween` names are resolved AFTER the raw
+			// arguments are hashed but the OLD guard ran only AFTER that resolution — so an
+			// identical retry whose name no longer resolves (the member was renamed or
+			// deactivated in between) got a fresh `validation_error` instead of replaying
+			// the already-successful create. `peekIdempotentReplay` runs BEFORE resolution
+			// specifically so this cannot happen.
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const carol = await addMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				displayName: 'Carol'
+			});
+			const args = { groupId: s.group.id, ...LUNCH, splitBetween: [s.user.name, 'Carol'] };
+
+			const first = await mcpToolCall('create_transaction', args, { key: s.writeKey.key });
+			expect(first.body.result?.isError, JSON.stringify(first.body.result)).toBeUndefined();
+			const firstPayload = first.body.result?.structuredContent as unknown as CreatedWire;
+
+			// "Carol" no longer resolves to anybody — a FRESH call with these exact
+			// arguments would now fail as a self-correctable validation_error.
+			await renameMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				memberId: carol.id,
+				displayName: 'Carolina'
+			});
+
+			// "That didn't seem to go through, let me try again." — 3 seconds later, with
+			// the model none the wiser that the roster changed underneath it.
+			advance(3);
+			const retry = await mcpToolCall('create_transaction', args, { key: s.writeKey.key });
+
+			expect(retry.body.result?.isError, JSON.stringify(retry.body.result)).toBeUndefined();
+			const retryPayload = retry.body.result?.structuredContent as unknown as CreatedWire;
+			expect(retryPayload.recorded.id).toBe(firstPayload.recorded.id);
+			expect(retryPayload.replayed).toBe(true);
+			// Still one lunch — the retry never reached `createTransaction` a second time.
+			expect(await rows()).toHaveLength(1);
+		});
+
 		it('fingerprints complete nested rich arguments: identical itemized retries replay, a nested change does not', async () => {
 			freezeAt('2026-07-16T12:00:00.000Z');
 			const args = {
@@ -1641,7 +1916,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						label: 'Meal',
 						amount: '100.00',
 						splitMode: 'equal',
-						beneficiaries: [{ memberId: s.alice }]
+						beneficiaries: [{ memberName: s.user.name }]
 					}
 				],
 				charges: [{ kind: 'vat', mode: 'percent', percent: '7', base: 'items_subtotal' }]
@@ -1734,7 +2009,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			advance(1);
 			const res = await mcpToolCall(
 				'create_transaction',
-				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.alice] },
+				{ groupId: s.group.id, ...LUNCH, splitBetween: [s.user.name] },
 				{ key: other.key }
 			);
 
@@ -1748,7 +2023,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// An over-precise amount: rejected before the ledger is touched (#31).
 			const bad = await mcpToolCall(
 				'create_transaction',
-				{ groupId: s.group.id, title: 'Lunch', amount: '240.005', splitBetween: [s.alice] },
+				{ groupId: s.group.id, title: 'Lunch', amount: '240.005', splitBetween: [s.user.name] },
 				{ key: s.writeKey.key }
 			);
 			expect(bad.body.result?.isError).toBe(true);
@@ -1816,7 +2091,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// The overwhelmingly common settle-up: "I paid Bob back $12." `from` is omitted,
 			// and the server resolves it from the KEY's owner (ADR-0006's `isYou`) — the one
 			// identity in the request the model cannot influence.
-			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 			const persisted = await rows();
 			expect(persisted).toHaveLength(1);
@@ -1830,7 +2105,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('records it as a §16.4 TRANSFER under "Debt settlement" — no new domain logic', async () => {
-			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 			expect(payload.recorded.type).toBe('transfer');
 			expect(payload.recorded.category.id).toBe(DEBT_SETTLEMENT_CATEGORY);
@@ -1845,7 +2120,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('accepts an EXPLICIT `from`: recording that A paid B on others’ behalf is a real flow', async () => {
 			const carol = await addMemberNamed('Carol');
 
-			const payload = await settleUpOk({ from: carol, to: s.bob, amount: '12.00' });
+			const payload = await settleUpOk({ from: 'Carol', to: 'Bob', amount: '12.00' });
 
 			expect(payload.recorded.payers[0]).toMatchObject({ memberId: carol, isYou: false });
 			expect(payload.recorded.shares[0]).toMatchObject({ memberId: s.bob });
@@ -1873,7 +2148,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 			// … and settles it. The balance is recomputed from the ledger (§8.1), so a
 			// settle-up that did not really record a transfer would show up right here.
-			await settleUpOk({ to: s.bob, amount: '45.00' });
+			await settleUpOk({ to: 'Bob', amount: '45.00' });
 
 			const after = await callOk<BalancesWire>('get_balances', { groupId: s.group.id });
 			expect(after.you?.balance.amount).toBe('0.00');
@@ -1890,13 +2165,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				settlementCurrency: 'THB'
 			});
 			// `from` is left to default to the caller's own member in this new group.
-			const nan = (
-				await addMember({ userId: s.user.id, groupId: g.id, displayName: 'Nan Suphaporn' })
-			).id;
+			await addMember({ userId: s.user.id, groupId: g.id, displayName: 'Nan Suphaporn' });
 
 			const res = await mcpToolCall(
 				'settle_up',
-				{ groupId: g.id, to: nan, amount: '1200' },
+				{ groupId: g.id, to: 'Nan Suphaporn', amount: '1200' },
 				writeKeyOf()
 			);
 			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
@@ -1911,7 +2184,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('OVER-PRECISION is a hard error, never a silent round ("12.005" in USD)', async () => {
-			const res = await settleUp({ to: s.bob, amount: '12.005' });
+			const res = await settleUp({ to: 'Bob', amount: '12.005' });
 
 			expect(res.body.result?.isError).toBe(true);
 			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
@@ -1921,7 +2194,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		// ── The ECHO-BACK: the wrong-payee control (ADR-0006) ───────────────────
 
 		it('ECHOES BACK NAMING THE PAYEE IN FULL — "you → Bob", never a bare id', async () => {
-			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 			expect(payload.echo).toBe('Recorded settle-up: you → Bob, USD 12.00 (1200 minor units).');
 			// The wrapped copy ships alongside it (ADR-0003), and the note marks names as data.
@@ -1939,10 +2212,10 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// The failure this whole ticket exists for: the agent matched the user's "Nan"
 			// to one of two real people, and either write passes every guard. The server does
 			// not prevent it — it makes it READABLE at the moment it happens.
-			const nan = await addMemberNamed('Nan Suphaporn');
+			await addMemberNamed('Nan Suphaporn');
 			const nanthawat = await addMemberNamed('Nanthawat P.');
 
-			const payload = await settleUpOk({ to: nan, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Nan Suphaporn', amount: '12.00' });
 
 			expect(payload.echo).toBe(
 				'Recorded settle-up: you → Nan Suphaporn, USD 12.00 (1200 minor units). ' +
@@ -1967,7 +2240,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			const nan = await addMemberNamed('Nan Suphaporn');
 			const nanthawat = await addMemberNamed('Nanthawat P.');
 
-			const payload = await settleUpOk({ to: nanthawat, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Nanthawat P.', amount: '12.00' });
 
 			expect(payload.recorded.shares[0].memberId).toBe(nanthawat);
 			expect(payload.echo).toContain('you → Nanthawat P.');
@@ -1981,7 +2254,9 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				.set({ displayName: INJECTION })
 				.where(eq(membersTable.id, s.bob));
 
-			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+			// Since ADR-0015 the injected name is ALSO the wire reference the agent must send,
+			// so the attacker's text takes the full round trip: argument → resolution → echo.
+			const payload = await settleUpOk({ to: INJECTION, amount: '12.00' });
 
 			// The prose inlines it (that is the legibility trade echo.ts documents) …
 			expect(payload.echo).toContain(INJECTION);
@@ -1996,28 +2271,71 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		// ── The guards ─────────────────────────────────────────────────────────
 
-		it('an UNKNOWN payee id is a self-correctable validation_error, and writes NOTHING', async () => {
-			// The hallucinated-id half of the story: `createTransaction` re-validates every
-			// member id against the group's active roster and throws, and `mapToolError`
-			// surfaces that as a `validation_error` the agent can fix — not the opaque
-			// `internal_error` a plain Error would fall through to.
-			const res = await settleUp({ to: 'mem_not_in_this_group', amount: '12.00' });
+		it('an UNKNOWN payee NAME is a self-correctable validation_error, and writes NOTHING', async () => {
+			// The hallucinated-reference half of the story (ADR-0015): the server resolves
+			// `to` against this group's ACTIVE roster and refuses a name it cannot match
+			// EXACTLY — it never guesses, and `mapToolError` surfaces the miss as a
+			// `validation_error` the agent can fix, not the opaque `internal_error` a plain
+			// Error would fall through to.
+			const res = await settleUp({ to: 'Nobody Real', amount: '12.00' });
 
 			expect(res.body.result?.isError).toBe(true);
-			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			// It quotes the agent's OWN search term and names the tool that fixes it.
+			expect(error.message).toContain('Nobody Real');
+			expect(error.message).toContain('list_members');
+			expect(
+				(error.details as { fieldErrors?: Record<string, string[]> }).fieldErrors?.to?.[0]
+			).toContain('Nobody Real');
 			expect(await rows()).toHaveLength(0);
 		});
 
-		it('an unknown explicit `from` is refused the same way', async () => {
-			const res = await settleUp({ from: 'mem_nobody', to: s.bob, amount: '12.00' });
+		it('a member ID passed as `to` is now an ORDINARY name miss (ADR-0015 / #78)', async () => {
+			// The pre-ADR-0015 wire, with a REAL in-group id. There is no id path left, so it
+			// must fail exactly like any other unmatchable name — never quietly accepted.
+			const res = await settleUp({ to: s.bob, amount: '12.00' });
 
 			expect(res.body.result?.isError).toBe(true);
-			expect(toolErrorEnvelope(res.body.result).error.code).toBe('validation_error');
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.message).toContain('member names, not member ids');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('a payee who was REMOVED from the group says so — a different fix from a typo', async () => {
+			// §6.3: a deactivated member is still in the ledger and may still be owed, but
+			// they cannot be a party to a NEW transaction. Re-reading `list_members` will
+			// never make this name work, so the message must not send the agent back there.
+			const gone = await addMemberNamed('Gone');
+			await db
+				.update(membersTable)
+				.set({ deactivatedAt: new Date() })
+				.where(eq(membersTable.id, gone));
+
+			const res = await settleUp({ to: 'Gone', amount: '12.00' });
+
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(error.message).toContain('removed from this group');
+			expect(await rows()).toHaveLength(0);
+		});
+
+		it('an unknown explicit `from` is refused the same way, under `from`', async () => {
+			const res = await settleUp({ from: 'Nobody Real', to: 'Bob', amount: '12.00' });
+
+			expect(res.body.result?.isError).toBe(true);
+			const error = toolErrorEnvelope(res.body.result).error;
+			expect(error.code).toBe('validation_error');
+			expect(
+				(error.details as { fieldErrors?: Record<string, string[]> }).fieldErrors?.from?.[0]
+			).toContain('Nobody Real');
 			expect(await rows()).toHaveLength(0);
 		});
 
 		it('a self-settlement (`to` = your own member, `from` defaulted) is refused', async () => {
-			const res = await settleUp({ to: s.alice, amount: '12.00' });
+			const res = await settleUp({ to: s.user.name, amount: '12.00' });
 
 			expect(res.body.result?.isError).toBe(true);
 			const envelope = toolErrorEnvelope(res.body.result).error;
@@ -2027,7 +2345,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('writes an audit_log row carrying the WRITE KEY as `viaKey` provenance (§12.1 / §16.2)', async () => {
-			const payload = await settleUpOk({ to: s.bob, amount: '12.00' });
+			const payload = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 			const [row] = await db
 				.select()
@@ -2043,7 +2361,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('a READ key calling it is refused forbidden_scope, and moves NO money (ADR-0002)', async () => {
 			const res = await mcpToolCall(
 				'settle_up',
-				{ groupId: s.group.id, to: s.bob, amount: '12.00' },
+				{ groupId: s.group.id, to: 'Bob', amount: '12.00' },
 				read
 			);
 
@@ -2063,7 +2381,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 			const res = await mcpToolCall(
 				'settle_up',
-				{ groupId: theirs.id, to: 'mem_whatever', amount: '12.00' },
+				{ groupId: theirs.id, to: 'Nobody', amount: '12.00' },
 				writeKeyOf()
 			);
 
@@ -2076,11 +2394,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('inherits the server-derived window: an identical retry → ONE payment, replayed', async () => {
 			vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-16T12:00:00.000Z') });
 			try {
-				const first = await settleUpOk({ to: s.bob, amount: '12.00' });
+				const first = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 				// "That didn't seem to go through" — 3 seconds later.
 				vi.setSystemTime(new Date(Date.now() + 3000));
-				const retry = await settleUpOk({ to: s.bob, amount: '12.00' });
+				const retry = await settleUpOk({ to: 'Bob', amount: '12.00' });
 
 				// ONE payment on the ledger. Paying someone back twice is the failure that
 				// starts an argument in a shared ledger.
@@ -2098,11 +2416,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		it('never dedups against `create_transaction` — `toolName` is in the derived key (#33)', async () => {
 			vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-16T12:00:00.000Z') });
 			try {
-				await settleUpOk({ to: s.bob, amount: '12.00' });
+				await settleUpOk({ to: 'Bob', amount: '12.00' });
 				// A create whose arguments overlap, in the same group, in the same window.
 				const created = await mcpToolCall(
 					'create_transaction',
-					{ groupId: s.group.id, title: 'Debt settlement', amount: '12.00', splitBetween: [s.bob] },
+					{ groupId: s.group.id, title: 'Debt settlement', amount: '12.00', splitBetween: ['Bob'] },
 					writeKeyOf()
 				);
 
@@ -2369,7 +2687,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 				const payload = await callWriteOk<{ recorded: TransactionWire; changed: string[] }>(
 					'update_transaction',
-					{ txnId, title: 'Dinner', amount: '190.00', splitBetween: [s.alice, s.bob] }
+					{ txnId, title: 'Dinner', amount: '190.00', splitBetween: [s.user.name, 'Bob'] }
 				);
 
 				// The DATABASE holds the corrected minor units — $190.00, not $1.90 (ADR-0004).
@@ -2403,7 +2721,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 				const payload = await callWriteOk<{ recorded: TransactionWire; changed: string[] }>(
 					'update_transaction',
-					{ txnId, title: 'Lunch', amount: '60.00', splitBetween: [s.alice, s.bob] }
+					{ txnId, title: 'Lunch', amount: '60.00', splitBetween: [s.user.name, 'Bob'] }
 				);
 
 				// The payer is still BOB — the caller's key did not become the payer.
@@ -2425,7 +2743,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					txnId,
 					title: 'Dinner',
 					amount: '95.00',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				});
 
 				// `created_at` is the EDITABLE real-world date (§7.1) — the one the list sorts and
@@ -2451,7 +2769,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					txnId,
 					title: 'Team dinner',
 					amount: '190.00',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				});
 
 				expect(payload.echo).toContain('It WAS: spending "Dinner" — USD 90.00 (9000 minor units)');
@@ -2473,7 +2791,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					txnId,
 					title: 'Dinner',
 					amount: '190.00',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				});
 
 				const edit = (await auditFor(txnId)).find((r) => r.action === 'edit');
@@ -2489,7 +2807,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					txnId,
 					title: 'Dinner',
 					amount: '90.005',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				});
 
 				expect(res.body.result?.isError).toBe(true);
@@ -2509,7 +2827,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					txnId,
 					title: 'Dinner',
 					amount: '190.00',
-					splitBetween: [s.alice, s.bob]
+					splitBetween: [s.user.name, 'Bob']
 				});
 
 				// NOT a `not_found`: the txn is still visible to `get_transaction` (that is what
@@ -2572,6 +2890,12 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					transactionId: txnId
 				});
 				const editable = readBack.editable!;
+				// `editable` is copied VERBATIM into `update_transaction` (ADR-0011), and since
+				// #79 both sides speak member NAMES — so this is a straight copy with NO
+				// translation step. The only fields touched are the two untrusted envelopes
+				// (`title`, item `label`), which is precisely what the tool asks to be unwrapped.
+				expect(editable.paidBy).toBe(s.user.name);
+				expect(editable.items[1].beneficiaries).toEqual([{ memberName: 'Bob' }]);
 				const unchangedArgs = {
 					txnId,
 					title: editable.title.value,
@@ -2620,12 +2944,12 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				]);
 				const firstItemWeights = Object.fromEntries(
 					persistedItems[0].beneficiaries.map((beneficiary) => [
-						beneficiary.memberId,
+						beneficiary.memberName,
 						beneficiary.shareWeight
 					])
 				);
-				expect(firstItemWeights).toEqual({ [s.alice]: 2, [s.bob]: 1 });
-				expect(persistedItems[1].beneficiaries).toEqual([{ memberId: s.bob }]);
+				expect(firstItemWeights).toEqual({ [s.user.name]: 2, Bob: 1 });
+				expect(persistedItems[1].beneficiaries).toEqual([{ memberName: 'Bob' }]);
 				expect(persisted.editable?.charges).toEqual([
 					{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' },
 					{ kind: 'discount', mode: 'absolute', amount: '3.00', base: 'running_total' },
@@ -2643,7 +2967,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						txnId,
 						title: 'Hijacked',
 						amount: '999.00',
-						splitBetween: [s.alice]
+						splitBetween: [s.user.name]
 					},
 					read
 				);
@@ -2865,10 +3189,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 					// It must carry SOME member-authored text (else the sweep is vacuous for it) …
 					expect(wrapped.size, `${name} returned no wrapped text`).toBeGreaterThan(0);
-					// … and NONE of those wrapped strings may also appear bare, anywhere.
+					// … and NONE of those wrapped strings may also appear bare, anywhere outside
+					// the `editable` block's write-shaped member fields (ADR-0015).
 					for (const value of wrapped) {
 						expect(
-							bareOccurrences(payload, value),
+							bareOccurrences(payload, value, new Set(EDITABLE_MEMBER_KEYS)),
 							`${name}: "${value}" appears as a BARE string as well as wrapped`
 						).toBe(0);
 					}
@@ -2896,6 +3221,30 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				expect(txnWrapped).toContain(TXN_TITLE);
 				expect(txnWrapped).toContain(MEMBER_NAME);
 			});
+
+			it('every BARE name in the `editable` copy-back is one the same payload also wraps (#79)', async () => {
+				// This is what bounds the sweep's exemption. `editable`'s member fields are
+				// bare because `update_transaction` takes bare names (ADR-0015) — but each one
+				// also rides WRAPPED in the same payload's payer/share lines, which is where
+				// the model learns the text is member-authored. A name that appeared ONLY
+				// bare would be the ADR-0003 hole, and this test is what would catch it.
+				const { group, txnId } = await seedTextRich();
+				const txn = await callOk<TransactionWire>('get_transaction', {
+					groupId: group.id,
+					transactionId: txnId
+				});
+				const editable = txn.editable!;
+				const bareNames = [
+					editable.paidBy!,
+					...editable.splitBetween,
+					...editable.items.flatMap((item) => item.beneficiaries.map((b) => b.memberName))
+				];
+
+				// Not vacuous: the block really does carry the injection-flavoured name.
+				expect(bareNames).toContain(MEMBER_NAME);
+				const wrapped = wrappedValues(txn);
+				for (const name of bareNames) expect(wrapped).toContain(name);
+			});
 		});
 
 		// ── 13b. The ECHO-BACK wraps the Member names it embeds (ADR-0003) ────────
@@ -2913,22 +3262,26 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			 * For each write tool: run a SUCCESSFUL call that embeds Bob's name, and return
 			 * the structured payload. Enumerated from `scope === 'write'`, so a new write
 			 * tool must be given a recipe here or the coverage assertion fails.
+			 *
+			 * Bob has been renamed to `MEMBER_NAME` before these run, and since ADR-0015 that
+			 * name is ALSO how a write tool refers to him — so each recipe sends the attack
+			 * string as its own member reference and gets it back in the echo.
 			 */
 			const echoRecipes: Record<string, () => Promise<Record<string, unknown>>> = {
 				create_transaction: () =>
 					callWriteOk('create_transaction', {
 						title: 'Team lunch',
 						amount: '12.00',
-						splitBetween: [s.alice, s.bob]
+						splitBetween: [s.user.name, MEMBER_NAME]
 					}),
-				settle_up: () => callWriteOk('settle_up', { to: s.bob, amount: '12.00' }),
+				settle_up: () => callWriteOk('settle_up', { to: MEMBER_NAME, amount: '12.00' }),
 				update_transaction: async () => {
 					const txnId = await seedDinner();
 					return callWriteOk('update_transaction', {
 						txnId,
 						title: 'Team dinner',
 						amount: '60.00',
-						splitBetween: [s.alice, s.bob]
+						splitBetween: [s.user.name, MEMBER_NAME]
 					});
 				},
 				delete_transaction: async () => {
@@ -2963,10 +3316,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					expect(wrappedValues(payload), `${name}: Bob's name is never wrapped`).toContain(
 						MEMBER_NAME
 					);
-					// … and it appears BARE only inside the `echo` prose (the documented legibility
-					// exception). A bare copy anywhere in the structured content is the ADR-0003 hole.
+					// … and it appears BARE only inside the `echo` prose and the `editable`
+					// copy-back's member fields (the two documented exceptions). A bare copy
+					// anywhere else in the structured content is the ADR-0003 hole.
 					expect(
-						bareOccurrences(payload, MEMBER_NAME, new Set(['echo'])),
+						bareOccurrences(payload, MEMBER_NAME, new Set(['echo', ...EDITABLE_MEMBER_KEYS])),
 						`${name}: Bob's name appears BARE in the structured payload`
 					).toBe(0);
 					// And the payload always restates that such strings are data, not instructions.
@@ -2993,13 +3347,16 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				get_balances: { args: {}, write: false },
 				list_transactions: { args: {}, write: false },
 				get_transaction: { args: { transactionId: 'txn_whatever' }, write: false },
+				// The write tools' member references are NAMES (ADR-0015); these never resolve,
+				// and they never have to — `loadGroupView` fails on the invisible group first,
+				// which is exactly the ordering this matrix depends on.
 				create_transaction: {
-					args: { title: 'x', amount: '1.00', splitBetween: ['mem_x'] },
+					args: { title: 'x', amount: '1.00', splitBetween: ['Nobody'] },
 					write: true
 				},
-				settle_up: { args: { to: 'mem_x', amount: '1.00' }, write: true },
+				settle_up: { args: { to: 'Nobody', amount: '1.00' }, write: true },
 				update_transaction: {
-					args: { txnId: 'txn_x', title: 'x', amount: '1.00', splitBetween: ['mem_x'] },
+					args: { txnId: 'txn_x', title: 'x', amount: '1.00', splitBetween: ['Nobody'] },
 					write: true
 				},
 				delete_transaction: { args: { txnId: 'txn_x' }, write: true },
@@ -3068,7 +3425,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 						const p = await callWriteOk<{ recorded: { id: string } }>('create_transaction', {
 							title: 'Coffee',
 							amount: '12.00',
-							splitBetween: [s.alice]
+							splitBetween: [s.user.name]
 						});
 						return p.recorded.id;
 					}
@@ -3077,7 +3434,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					action: 'create',
 					run: async () => {
 						const p = await callWriteOk<{ recorded: { id: string } }>('settle_up', {
-							to: s.bob,
+							to: 'Bob',
 							amount: '12.00'
 						});
 						return p.recorded.id;
@@ -3091,7 +3448,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 							txnId,
 							title: 'Dinner',
 							amount: '190.00',
-							splitBetween: [s.alice, s.bob]
+							splitBetween: [s.user.name, 'Bob']
 						});
 						return txnId;
 					}

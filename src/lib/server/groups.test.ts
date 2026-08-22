@@ -209,7 +209,10 @@ describe('createGroup (PLAN §6.1 — also creates the creator member)', () => {
 		expect(memberInsert).toMatchObject({
 			groupId: 'group-1',
 			userId: 'user-42',
-			displayName: 'Alice'
+			displayName: 'Alice',
+			// The canonical key backing the active-name uniqueness index (ADR-0015) —
+			// written with the name, never separately.
+			normalizedDisplayName: 'alice'
 		});
 
 		expect(group.id).toBe('group-1');

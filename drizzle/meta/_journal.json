@@ -127,6 +127,13 @@
       "when": 1786191846968,
       "tag": "0017_custom_currencies",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787383487769,
+      "tag": "0018_member_name_uniqueness",
+      "breakpoints": true
     }
   ]
 }

@@ -33,7 +33,16 @@ export {
 
 export { type McpMoney, toMcpMoney } from './money';
 export { type GroupView, toGroupView } from './group';
-export { type MemberView, toMemberView, selfMemberId } from './member';
+export {
+	type MemberView,
+	type MemberNameMatch,
+	toMemberView,
+	selfMemberId,
+	resolveMemberByName,
+	resolveMemberNameForFilter,
+	memberNameIssueMessage,
+	memberNameSnapshot
+} from './member';
 export {
 	type BalanceDirection,
 	type BalanceLineView,

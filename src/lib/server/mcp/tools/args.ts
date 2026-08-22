@@ -2,12 +2,15 @@
 //
 // Two rules, both load-bearing:
 //
-//   - IDS ONLY, NEVER NAMES (ADR-0006). No tool takes a group or member NAME. The
-//     server does no fuzzy matching in the money path — an agent matching "Nan"
-//     against `Nan Suphaporn` and `Nanthawat P.` must do it ITSELF, visibly, in the
-//     transcript, where the user can see the reasoning and catch a wrong pick. That
-//     starts here, on the READ tools, because the ids a write tool takes are the ids
-//     these tools hand out.
+//   - GROUPS AND TRANSACTIONS ARE IDS; MEMBERS ARE NAMES. `groupIdArg` and `txnIdArg`
+//     below are ids, never names: there is no uniqueness rule behind a group or
+//     transaction TITLE, so matching one would be a guess over member-authored text
+//     (ADR-0003) about which row to write. A MEMBER reference is different since
+//     ADR-0015 (which partially supersedes ADR-0006's blanket ids-only rule): active
+//     display names are UNIQUE per group, so the server can resolve one EXACTLY —
+//     no fuzzy matching, a `validation_error` on a miss — and the resulting payload
+//     is one the user can actually check. That resolution lives with the write tools
+//     (`../view/member.ts`'s `resolveMemberByName`), not here.
 //
 //   - `strictObject`, so a hallucinated argument (`{ userId: 'someone-else' }`) is a
 //     loud `validation_error` tool result the agent can self-correct against — never

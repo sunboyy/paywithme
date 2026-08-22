@@ -1,4 +1,4 @@
-import { isNotNull } from 'drizzle-orm';
+import { isNotNull, isNull } from 'drizzle-orm';
 import { pgTable, text, timestamp, index, integer, uniqueIndex } from 'drizzle-orm/pg-core';
 import { user } from './auth-schema';
 
@@ -64,6 +64,16 @@ export const members = pgTable(
 			.notNull()
 			.references(() => groups.id, { onDelete: 'cascade' }),
 		displayName: text('display_name').notNull(),
+		// The canonical form of `display_name` (NFC → trim → lowercase, full string),
+		// computed IN THE APP by `displayNameValues()` (`$lib/server/member-name`) on
+		// every write of the name. It exists solely to back the active-member
+		// uniqueness index below — nothing renders it, and no view projects it.
+		//
+		// App-computed rather than a DB-generated column (ADR-0015): the same rule has
+		// to run on the LOOKUP side too (resolving an agent-supplied name back to a
+		// member), so keeping it in one language is what stops the write path and the
+		// lookup path drifting apart.
+		normalizedDisplayName: text('normalized_display_name').notNull(),
 		// Nullable link to a real user (§6.2). Set on invite accept; unlinked
 		// members are still valid ledger participants. `set null` on user delete.
 		userId: text('user_id').references(() => user.id, { onDelete: 'set null' }),
@@ -81,7 +91,25 @@ export const members = pgTable(
 		// collapse multiple unlinked members into one allowed row.
 		uniqueIndex('members_group_id_user_id_unique')
 			.on(table.groupId, table.userId)
-			.where(isNotNull(table.userId))
+			.where(isNotNull(table.userId)),
+		// "No two ACTIVE members of a group share a display name" (ADR-0015). Same
+		// PARTIAL-index shape as the constraint above, with the predicate on the other
+		// soft flag: only live rows (`deactivated_at IS NULL`) are constrained.
+		//
+		// DEACTIVATED MEMBERS ARE EXEMPT, and that exemption is load-bearing, not an
+		// oversight (§6.3): a departed member keeps their name in the ledger forever,
+		// so constraining them would permanently burn that name for the group — and
+		// renaming a deactivated member (the escape hatch when a reactivation would
+		// collide) must never be blocked by it.
+		//
+		// Compared on the NORMALIZED column, so a collision that only appears after
+		// folding — `Nan` vs `  nan  ` — is caught. That is an EQUALITY test on the
+		// whole name: `Nan` and `Nan Suphaporn` are distinct here and always will be
+		// (ADR-0015 "What this does not fix" — that residual risk stays with
+		// `mcp/view/similar-names.ts`).
+		uniqueIndex('members_group_id_normalized_display_name_unique')
+			.on(table.groupId, table.normalizedDisplayName)
+			.where(isNull(table.deactivatedAt))
 	]
 );
 

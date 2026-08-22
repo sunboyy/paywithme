@@ -64,6 +64,7 @@ import { toolError, toolSuccess } from '../errors';
 import {
 	buildUpdateEchoBack,
 	changedFields,
+	memberNameSnapshot,
 	toTransactionView,
 	UNTRUSTED_NOTE,
 	type TransactionView
@@ -75,7 +76,7 @@ import {
 	AMOUNT_BENEFICIARIES_PROPERTY,
 	CHARGE_PROPERTY,
 	ITEM_PROPERTY,
-	MEMBER_ID_PROPERTY,
+	MEMBER_NAME_PROPERTY,
 	MONEY_PROPERTY,
 	SHARE_BENEFICIARIES_PROPERTY,
 	SPLIT_SHAPE_ONE_OF
@@ -85,7 +86,8 @@ import {
 	MCP_TRANSACTION_ARGUMENT_FIELDS,
 	McpTransactionArgumentError,
 	toTransactionInput,
-	validateMcpTransactionArguments
+	validateMcpTransactionArguments,
+	type McpPayerReference
 } from './transaction-input';
 
 /** The wire name. */
@@ -107,7 +109,8 @@ const updateTransactionArgs = z
 		// OPTIONAL: FX is deferred (as on `create_transaction`), so this defaults to (and
 		// must equal) the group's settlement currency.
 		currency: z.string().min(1).optional(),
-		// OPTIONAL: defaults to THE EXISTING PAYER — never the caller. See the header.
+		// OPTIONAL: the payer's DISPLAY NAME (ADR-0015), resolved server-side. Omitted, it
+		// defaults to THE EXISTING PAYER — never the caller. See the header.
 		paidBy: z.string().min(1).optional(),
 		// OPTIONAL: defaults to the transaction's EXISTING category.
 		categoryId: z.string().min(1).optional()
@@ -128,9 +131,13 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			'item `label.value` fields, then send the COMPLETE equal, amount, share, or itemized ' +
 			'split shape. This REPLACES rather than patches the transaction — omitting an item, ' +
 			'beneficiary, or charge REMOVES it. Itemized total is derived by the server. ' +
-			'IDS ONLY, NEVER NAMES: `txnId`, `paidBy` and every beneficiary id ' +
-			'come from `list_transactions` / `list_members`; match the people the user named to ' +
-			'ids YOURSELF and show your reasoning. STATE THE AMOUNT EXACTLY AS THE USER SAID IT ' +
+			'`txnId` IS AN ID, from `list_transactions` — never a title. PEOPLE ARE NAMES, ' +
+			'NOT IDS: `paidBy` and every `memberName` is a member DISPLAY NAME copied exactly ' +
+			'from `list_members` (or from the `editable` object you just read), and a member id ' +
+			'there matches nobody and is rejected. The server resolves each name itself against ' +
+			'the active members of this group; but two members can have similar names, so when ' +
+			'the user says "Nan" and the roster holds two, ASK which one instead of picking. ' +
+			'STATE THE AMOUNT EXACTLY AS THE USER SAID IT ' +
 			'("950", "950.00") as a decimal string — the server does the currency math, so never ' +
 			'multiply by 100 or convert exponents. Defaults: `paidBy` and `categoryId` KEEP what ' +
 			'the transaction already has (omit them unless the user is changing who paid or what ' +
@@ -171,21 +178,20 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 						'is not supported.'
 				},
 				paidBy: {
-					type: 'string',
-					minLength: 1,
+					...MEMBER_NAME_PROPERTY,
 					description:
-						'OPTIONAL member id of who paid, from `list_members`. Defaults to WHOEVER IS ' +
-						'ALREADY RECORDED as having paid — omit it unless the user is explicitly ' +
-						'changing who paid. Never a name.'
+						'OPTIONAL display NAME of who paid, copied exactly from `list_members`. Defaults ' +
+						'to WHOEVER IS ALREADY RECORDED as having paid — omit it unless the user is ' +
+						'explicitly changing who paid. Never a member id.'
 				},
 				splitBetween: {
 					type: 'array',
 					minItems: 1,
-					items: MEMBER_ID_PROPERTY,
+					items: MEMBER_NAME_PROPERTY,
 					description:
-						'REQUIRED array of member ids (from `list_members`) the cost should now be split ' +
-						'equally between. This REPLACES the existing split — pass the full list, ' +
-						'including everyone who should stay on it. Never names.'
+						'REQUIRED array of member display NAMES (copied exactly from `list_members`) the ' +
+						'cost should now be split equally between. This REPLACES the existing split — ' +
+						'pass the full list, including everyone who should stay on it. Never member ids.'
 				},
 				splitMode: {
 					type: 'string',
@@ -346,10 +352,18 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// The DEFAULTS that keep an omitted argument from moving money (see the header):
 		// the payer and the category come from the EXISTING row, never from the caller.
 		// `before.payers.length === 1` is guaranteed by the shape gate above.
-		const payerId = paidBy ?? before.payers[0].memberId;
+		//
+		// An EXPLICIT `paidBy` is a NAME (ADR-0015) and goes to the shared adapter unresolved,
+		// so all three write tools match names by one rule in one place. The default is the
+		// id already on the row — it was never a name and must not be turned into one: the
+		// recorded payer may since have been RENAMED, and re-resolving their current name
+		// would be a lookup that can only fail or, worse, land on somebody else.
+		const payer: McpPayerReference =
+			paidBy === undefined
+				? { kind: 'default', memberId: before.payers[0].memberId }
+				: { kind: 'name', memberName: paidBy };
 		const resolvedCategoryId = categoryId ?? before.categoryId;
 
-		const activeMemberIds = members.filter((member) => member.isActive).map((member) => member.id);
 		let input;
 		try {
 			input = toTransactionInput(
@@ -360,8 +374,8 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 					date: before.input.date,
 					categoryId: resolvedCategoryId,
 					currency: settlementCurrency,
-					payerId,
-					memberIds: activeMemberIds
+					payer,
+					members
 				}
 			);
 		} catch (error) {
@@ -377,6 +391,10 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			txnId,
 			input,
 			settlementCurrency,
+			// See `create-transaction.ts` — the same re-verification, LOCKED inside this
+			// write's own transaction (PR #80 review), against the same roster `paidBy` /
+			// `splitBetween` / beneficiary names were resolved against.
+			expectedMemberNames: memberNameSnapshot(members),
 			via: auditVia(principal)
 		});
 

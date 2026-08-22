@@ -23,13 +23,19 @@
 // `name.author` is about the TEXT (an unrecorded fact). They are different
 // questions and only one of them has an answer.
 
+import { normalizeDisplayName } from '$lib/server/member-name';
 import type { MemberListItem } from '$lib/server/members';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import { untrusted, UNKNOWN_AUTHOR, type UntrustedText } from './untrusted';
 
 /** A group member as an agent sees it. */
 export interface MemberView {
-	/** The member id — what every write tool takes (ADR-0006: IDs only, never names). */
+	/**
+	 * The member id. A stable cross-reference handle in READ output — no longer what
+	 * a write tool takes: since ADR-0015 (partially superseding ADR-0006) every
+	 * write-tool member reference is the `displayName` below, which is unique among
+	 * a group's ACTIVE members and which the server resolves itself.
+	 */
 	readonly id: string;
 	/** UNTRUSTED (ADR-0003); author `unknown` — the domain records none. */
 	readonly displayName: UntrustedText;
@@ -72,4 +78,129 @@ export function toMemberView(member: MemberListItem, principal: ApiKeyPrincipal)
  */
 export function selfMemberId(members: MemberView[]): string | null {
 	return members.find((m) => m.isYou)?.id ?? null;
+}
+
+/**
+ * The outcome of resolving one agent-supplied member NAME against a roster (ADR-0015).
+ *
+ * The two failure kinds differ only in what the agent should DO about them, which is
+ * why they are distinguished at all: an unknown name is a typo or a hallucination to
+ * re-read off `list_members`, while a deactivated one is a real person the group has
+ * removed — no amount of re-reading the roster will make them writable (§6.3).
+ */
+export type MemberNameMatch =
+	| { readonly kind: 'resolved'; readonly id: string }
+	| { readonly kind: 'unknown' }
+	| { readonly kind: 'deactivated' };
+
+/**
+ * Resolve a member NAME to its member id, the way ADR-0015 requires every MCP write
+ * tool to: against ACTIVE members only, by the SAME normalized comparison the
+ * uniqueness index enforces (`normalizeDisplayName`: NFC → trim → lowercase, whole
+ * string), and EXACTLY — never fuzzily. PURE.
+ *
+ * Exactness is the point, not caution. `similar-names.ts` deliberately matches
+ * loosely, because it answers "could the agent have MEANT someone else?" — a
+ * presentational hint. This decides WHOSE MONEY MOVES, so it may only answer the
+ * question the database can also answer: is this the same name? A prefix or accent
+ * fold here would reintroduce exactly the wrong-but-valid pick ADR-0006 feared, with
+ * the server rather than the model making the guess.
+ *
+ * The active-member uniqueness index (ADR-0015) is what makes a single match
+ * well-defined; `find` therefore returns THE member, not the first of several. A
+ * deactivated member is reported separately rather than as "unknown": their name is
+ * exempt from the index, so it can legitimately be shared with an active member, and
+ * the ACTIVE row must win.
+ */
+export function resolveMemberByName(members: readonly MemberView[], name: string): MemberNameMatch {
+	const target = normalizeDisplayName(name);
+	const active = members.find(
+		(m) => m.isActive && normalizeDisplayName(m.displayName.value) === target
+	);
+	if (active !== undefined) return { kind: 'resolved', id: active.id };
+	const inactive = members.some(
+		(m) => !m.isActive && normalizeDisplayName(m.displayName.value) === target
+	);
+	return inactive ? { kind: 'deactivated' } : { kind: 'unknown' };
+}
+
+/**
+ * A snapshot of `id → current display name`, for a write tool to hand `createTransaction`
+ * / `updateTransaction` as `expectedMemberNames` (PR #80 review). `resolveMemberByName`
+ * runs against this SAME roster, outside the write's own DB transaction; passing the
+ * snapshot along lets the write re-verify, LOCKED inside that transaction, that a
+ * resolved id hasn't been renamed out from under the request before it commits — the
+ * member-identity analogue of `expectedDisplayCode`.
+ */
+export function memberNameSnapshot(members: readonly MemberView[]): ReadonlyMap<string, string> {
+	return new Map(members.map((m) => [m.id, m.displayName.value]));
+}
+
+/**
+ * Resolve a member NAME for a READ-SIDE FILTER — `list_transactions`' `memberName`
+ * (ADR-0015). Returns the one member's id, or `null` when the name identifies no
+ * single member. PURE.
+ *
+ * It differs from {@link resolveMemberByName} on both halves, and deliberately:
+ *
+ *   - It matches the WHOLE ROSTER, deactivated members included. A filter asks "which
+ *     transactions is this person in?", and a removed member's past involvement is
+ *     still on the ledger — the id-based filter this replaced found it, and a rename
+ *     of the field must not quietly narrow what the tool can find. The write-side rule
+ *     is active-only for the opposite reason: only an active member is a valid
+ *     participant in a NEW transaction (§6.3).
+ *   - Every failure is the SAME `null`. The tool must never guess (the write side's
+ *     rule, for the same reason: this decides which rows the user is shown) and must
+ *     never error either — `list_transactions` is not a member-existence oracle. So
+ *     "nobody" and "more than one" are ONE outcome: no usable filter, and the caller
+ *     serves an empty page.
+ *
+ * ── Why an ACTIVE match does NOT break a tie here, though it does on the write side ──
+ * The uniqueness index covers ACTIVE rows only (#75), so a name can be shared by two
+ * removed members, or by one removed member and one active one — invite-accept
+ * suffixes against ACTIVE names alone (#77), so a new member quite ordinarily arrives
+ * holding a departed member's name.
+ *
+ * On the WRITE side that collision has one legal answer and picking it is not a guess:
+ * a deactivated member cannot be a participant in a NEW transaction (§6.3), so only
+ * the active row was ever a candidate. HERE both are equally legitimate real people
+ * whose history this filter exists to expose, and "show me departed-Bob's old
+ * transactions" answered with the ACTIVE Bob's page would return the WRONG PERSON'S
+ * DATA with nothing in the payload saying a namesake collision occurred. An empty page
+ * is the worse answer to a question we could have answered, and the better answer to a
+ * question we cannot tell apart from another one: it is never wrong about who. So any
+ * ambiguity — in any combination of active and deactivated — is `null`, the same as no
+ * match at all.
+ *
+ * The comparison is the same exact, normalized, non-fuzzy one everywhere else uses.
+ */
+export function resolveMemberNameForFilter(
+	members: readonly MemberView[],
+	name: string
+): string | null {
+	const target = normalizeDisplayName(name);
+	const matches = members.filter((m) => normalizeDisplayName(m.displayName.value) === target);
+	return matches.length === 1 ? matches[0].id : null;
+}
+
+/**
+ * The self-correctable sentence a failed {@link resolveMemberByName} becomes (ADR-0009:
+ * say WHAT was wrong and how to fix it). One copy, so all three write tools name a
+ * missing member identically.
+ *
+ * It quotes the name the AGENT searched for — its own input, echoed back so the
+ * correction is obvious — and never the stored display name of the deactivated member
+ * it nearly matched. That would be member-authored text (ADR-0003) smuggled into an
+ * error string outside the untrusted envelope, and it would tell the agent nothing it
+ * did not already type.
+ */
+export function memberNameIssueMessage(
+	name: string,
+	match: { readonly kind: 'unknown' | 'deactivated' }
+): string {
+	return match.kind === 'deactivated'
+		? `"${name}" is a member who has been removed from this group, so they cannot be ` +
+				'part of a new transaction. Call `list_members` and use an active name.'
+		: `No active member of this group is named "${name}". Call \`list_members\` and pass a ` +
+				'display name exactly as it appears there — member names, not member ids.';
 }

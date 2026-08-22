@@ -10,28 +10,36 @@
 // expects to shrink).
 //
 // ── The two failure modes that meet here ────────────────────────────────────
-// The server already rejects a HALLUCINATED member id. What it cannot reject is a
-// VALID write against the WRONG REAL PERSON: an agent matching "Nan" against a roster
+// The server already rejects a HALLUCINATED member reference. What it cannot reject is
+// a VALID write against the WRONG REAL PERSON: an agent matching "Nan" against a roster
 // holding `Nan Suphaporn` and `Nanthawat P.` can pick either, and both pass every
 // guard while moving one human's money to another. And `from` — the caller's OWN
-// member id — was not obtainable at all before `isYou` existed (ADR-0006), so the
+// member — was not obtainable at all before `isYou` existed (ADR-0006), so the
 // agent's only recourse was to guess it from a display name: the wrong-payer failure,
 // guaranteed rather than occasional.
 //
-// ADR-0006's answer is LEGIBILITY, NOT PREVENTION, in three parts, all of them here:
+// ADR-0006's answer is LEGIBILITY, NOT PREVENTION — amended by ADR-0015, which changes
+// the MECHANISM of the middle part while leaving the other two exactly as they were:
 //   - `from` DEFAULTS to the caller's own member (`isYou`, server-derived from the
 //     key's owner — the one identity in the request the model cannot influence). The
 //     overwhelmingly common settle-up therefore cannot pick the wrong payer at all,
 //     because the agent never picks it. An explicit `from` is still accepted:
 //     recording that A paid B on someone else's behalf is a real flow.
-//   - IDS ONLY in the schema. No server-side fuzzy matching in the money path — the
-//     agent matches "Nan" to an id ITSELF, visibly, in the transcript, where the user
-//     can see the reasoning.
+//   - NAMES, resolved SERVER-SIDE and EXACTLY (ADR-0015). `to` and `from` are display
+//     names, and the server matches each against the group's ACTIVE members by the same
+//     normalized full-string comparison the uniqueness index enforces — never fuzzily.
+//     This is not the fuzzy matching ADR-0006 refused to do: it either finds the one
+//     member holding that exact name or returns a `validation_error`, so it can fail
+//     loudly but can never GUESS. What it buys is a payload the USER can check —
+//     `to: "Nan Suphaporn"` is verifiable at a glance, `to: "a3f2e9d1-…"` never was.
 //   - The ECHO-BACK NAMES THE PAYEE IN FULL ("Recorded settle-up: you → Nan
 //     Suphaporn, THB 1200.00"), and where the roster holds someone else who could
 //     have been meant, it says who (`../view/similar-names` — a post-write, purely
-//     presentational check that never touches the payee decision). A wrong pick is
-//     read in plain language on the spot, instead of surfacing weeks later.
+//     presentational check that never touches the payee decision). This is STILL the
+//     only control for the "which Nan?" ambiguity: uniqueness makes each full name
+//     unambiguous, but a SHORTHAND for one of two full names is exactly as ambiguous
+//     as it ever was, and the agent still chooses. A wrong pick is read in plain
+//     language on the spot, instead of surfacing weeks later.
 //
 // ── Everything else it inherits rather than re-implements ────────────────────
 //   - SCOPE + RATE LIMIT: the dispatcher denies a read key (`forbidden_scope`) and
@@ -51,12 +59,15 @@ import { z } from 'zod';
 import { parseAmount } from '$lib/money';
 import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
-import { createDbIdempotencyStore } from '$lib/server/api/idempotency';
+import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
-import { withDerivedIdempotency } from '../idempotency';
+import { peekIdempotentReplay, withDerivedIdempotency } from '../idempotency';
 import {
 	buildReplayEchoBack,
 	buildSettleUpEchoBack,
+	memberNameIssueMessage,
+	memberNameSnapshot,
+	resolveMemberByName,
 	selfMemberId,
 	similarlyNamedMembers,
 	toTransactionView,
@@ -67,6 +78,7 @@ import {
 import type { McpTool } from '../types';
 import { amountArg, GROUP_ID_PROPERTY, groupIdArg } from './args';
 import { loadGroupView, loadMemberViews } from './load';
+import { MEMBER_NAME_PROPERTY } from './transaction-json-schema';
 
 /** The wire name — shared by the definition and the derived idempotency key (#33). */
 const TOOL_NAME = 'settle_up';
@@ -107,9 +119,11 @@ interface SettledPayload {
 
 const settleUpArgs = z.strictObject({
 	groupId: groupIdArg,
-	// REQUIRED: the payee's member id (never a name, ADR-0006).
-	to: z.string().min(1, 'A payee member id is required. Call `list_members` to find it.'),
-	// OPTIONAL: defaults to the CALLER's own member — the `isYou` member (ADR-0006).
+	// REQUIRED: the payee's DISPLAY NAME, resolved server-side (never an id, ADR-0015).
+	to: z
+		.string()
+		.min(1, 'A payee member name is required. Call `list_members` to find the exact name.'),
+	// OPTIONAL: a payer display name; defaults to the CALLER's own member (`isYou`).
 	from: z.string().min(1).optional(),
 	// The ADR-0004 decimal-string gate, shared with every other write tool (`./args`).
 	amount: amountArg
@@ -125,11 +139,14 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		description:
 			'Record a settle-up: one member paying another back to clear what they owe (a ' +
 			'transfer, categorised as a debt settlement). Use this when the user says they PAID ' +
-			'someone back — not for a shared expense, which is `create_transaction`. IDS ONLY, ' +
-			'NEVER NAMES: `to` (and `from`, if you pass it) must be member ids from ' +
-			'`list_members` — match the person the user named ("settle up with Nan") to an id ' +
-			'YOURSELF and show your reasoning, because two members can have similar names and ' +
-			'this tool does no name matching. `from` DEFAULTS TO YOU (your own member in this ' +
+			'someone back — not for a shared expense, which is `create_transaction`. NAMES, NOT ' +
+			'IDS: `to` (and `from`, if you pass it) is a member DISPLAY NAME copied exactly from ' +
+			'`list_members`; a member id there matches nobody and is rejected. The server ' +
+			'resolves the name itself, matching it EXACTLY against the active members of this ' +
+			'group — it never guesses, so a name it cannot match comes back as an error you can ' +
+			'fix. It also cannot tell you which person a SHORTHAND meant: if the user says ' +
+			'"settle up with Nan" and the roster holds two names starting with Nan, ASK which ' +
+			'one rather than choosing. `from` DEFAULTS TO YOU (your own member in this ' +
 			'group, the one `list_members` marks `isYou`) — omit it unless the user is recording ' +
 			'a payment SOMEONE ELSE made. STATE THE AMOUNT EXACTLY AS THE USER SAID IT ("1200", ' +
 			'"1200.00") as a decimal string in the group\'s settlement currency; the server does ' +
@@ -145,17 +162,18 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			properties: {
 				groupId: GROUP_ID_PROPERTY,
 				to: {
-					type: 'string',
+					...MEMBER_NAME_PROPERTY,
 					description:
-						'REQUIRED member id of who was PAID (the creditor), from `list_members`. Match ' +
-						'the person the user named to an id yourself. Never a name.'
+						'REQUIRED display NAME of who was PAID (the creditor), copied exactly from ' +
+						'`list_members`. Never a member id. If two members have similar names, ask the ' +
+						'user which they mean rather than choosing one.'
 				},
 				from: {
-					type: 'string',
+					...MEMBER_NAME_PROPERTY,
 					description:
-						'OPTIONAL member id of who PAID (the debtor), from `list_members`. Defaults to ' +
-						'YOU (your own member in this group). Pass it only to record a payment someone ' +
-						'else made. Never a name.'
+						'OPTIONAL display NAME of who PAID (the debtor), copied exactly from ' +
+						'`list_members`. Defaults to YOU (your own member in this group). Pass it only ' +
+						'to record a payment someone else made. Never a member id.'
 				},
 				amount: {
 					type: 'string',
@@ -193,23 +211,81 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// §16.5), so this write path inherits it by construction.
 		const { settlementCurrency } = await loadGroupView(principal, groupId);
 
-		// The roster resolves member ids to (untrusted) names + `isYou`: it is where the
-		// `from` default comes from, where the echo's names come from, and where the
-		// "other Nan" check looks.
+		// ── Idempotency PEEK — before any name resolution (ADR-0015 / see `../idempotency`)
+		//
+		// A plain retry of an already-successful settle-up must replay that success even if
+		// `to`/`from` names a member who was renamed or deactivated in between — this is a
+		// READ-ONLY lookup on the RAW arguments, so it can run ahead of the name resolution
+		// below that might now reject a call the roster used to accept. `null` means "no
+		// completed match yet"; fall through to resolve names and reach the write guard.
+		const idempotencyStore = createDbIdempotencyStore();
+		const peeked = await peekIdempotentReplay({
+			keyId: principal.keyId,
+			groupId,
+			toolName: TOOL_NAME,
+			args: { groupId, to, from, amount },
+			store: idempotencyStore
+		});
+		if (peeked) return replaySuccess(peeked);
+
+		// The roster is what the `to` / `from` NAMES are resolved against, where the `from`
+		// default comes from, where the echo's names come from, and where the "other Nan"
+		// check looks. It includes deactivated members, so paying one back can be refused
+		// as "they were removed" rather than as "nobody is called that".
 		const members = await loadMemberViews(principal, groupId);
+
+		// ── The PAYEE, by NAME (ADR-0015) ──────────────────────────────────────────
+		// This tool builds its §16.4 transfer by hand rather than through the shared
+		// create/update adapter, so it resolves its two member references here — with the
+		// SAME `resolveMemberByName`, so "the same name" means one thing across all three
+		// write tools. Exact match against active members only; a miss is self-correctable.
+		const payee = resolveMemberByName(members, to);
+		if (payee.kind !== 'resolved') {
+			const message = memberNameIssueMessage(to, payee);
+			return toolError('validation_error', message, { fieldErrors: { to: [message] } });
+		}
+		const payeeId = payee.id;
+
+		// The snapshot every NAME-RESOLVED id below is checked against, LOCKED inside
+		// `createTransaction`'s own write transaction (`expectedMemberNames`, PR #80
+		// review) — closing the gap between resolving here and committing there, where a
+		// rename could otherwise hand the write an id that is still active but no longer
+		// the person `to` / `from` named. Built once, from the same roster both resolved
+		// against; entries are added below only for ids that came from a NAME (never the
+		// `from` default), since a default was never a claim about who the name meant.
+		const rosterSnapshot = memberNameSnapshot(members);
+		const expectedMemberNames = new Map<string, string>();
+		const expectMember = (memberId: string) => {
+			const name = rosterSnapshot.get(memberId);
+			if (name !== undefined) expectedMemberNames.set(memberId, name);
+		};
+		expectMember(payeeId);
 
 		// ── The DEFAULT PAYER (ADR-0006) ───────────────────────────────────────────
 		// The overwhelmingly common case — "I paid Nan back" — cannot pick the wrong
 		// payer, because the agent does not pick it: it is the key owner's own member,
-		// derived server-side. If the caller has no active member row they cannot be the
-		// implicit payer — a self-correctable validation_error, not an opaque throw.
-		const payerId = from ?? selfMemberId(members);
-		if (payerId === null) {
-			return toolError(
-				'validation_error',
-				'You are not an active member of this group, so `from` cannot default to you. ' +
-					'Pass an explicit `from` member id from `list_members`.'
-			);
+		// derived server-side. An explicit `from` is a name, resolved exactly as `to` is.
+		// If the caller has no member row they cannot be the implicit payer — a
+		// self-correctable validation_error, not an opaque throw.
+		let payerId: string;
+		if (from === undefined) {
+			const self = selfMemberId(members);
+			if (self === null) {
+				return toolError(
+					'validation_error',
+					'You are not a member of this group, so `from` cannot default to you. ' +
+						'Pass an explicit `from` member name from `list_members`.'
+				);
+			}
+			payerId = self;
+		} else {
+			const payer = resolveMemberByName(members, from);
+			if (payer.kind !== 'resolved') {
+				const message = memberNameIssueMessage(from, payer);
+				return toolError('validation_error', message, { fieldErrors: { from: [message] } });
+			}
+			payerId = payer.id;
+			expectMember(payerId);
 		}
 
 		// A self-settlement is meaningless: it nets to zero and puts a phantom payment on
@@ -218,8 +294,9 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// default is resolved — the likely agent error is exactly that, passing its OWN id
 		// as `to` while omitting `from`. `createTransaction` does not catch this (a
 		// self-transfer breaks none of its rules), so this check is load-bearing, not a
-		// belt-and-braces copy of a guard downstream.
-		if (payerId === to) {
+		// belt-and-braces copy of a guard downstream. It compares RESOLVED ids, so two
+		// different spellings of one member's name ("nan  ", "Nan") cannot slip past it.
+		if (payerId === payeeId) {
 			return toolError(
 				'validation_error',
 				from === undefined
@@ -250,9 +327,10 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// single-payer / single-beneficiary Transfer at rate 1 in the settlement currency
 		// (so `amountTotalSettlement == amountTotal`), category "Debt settlement". The
 		// lone beneficiary under an equal split receives the whole amount. `date` is
-		// omitted so the shared schema defaults it to today (§7.1). `createTransaction`
-		// RE-VALIDATES all of it — an unknown / other-group / deactivated `from` or `to`
-		// throws `TransactionValidationError` → `validation_error`.
+		// omitted so the shared schema defaults it to today (§7.1). Both ids came out of
+		// THIS group's roster, so they are members by construction; `createTransaction`
+		// RE-VALIDATES them anyway — an unknown / other-group / deactivated member throws
+		// `TransactionValidationError` → `validation_error`.
 		const input = {
 			type: 'transfer' as const,
 			title: DEBT_SETTLEMENT_TITLE,
@@ -263,16 +341,18 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			amountTotalSettlement: minor,
 			splitMode: 'equal' as const,
 			payers: [{ memberId: payerId, amountPaid: minor }],
-			beneficiaries: [{ memberId: to }],
+			beneficiaries: [{ memberId: payeeId }],
 			items: [],
 			charges: []
 		};
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// Everything above is validation and none of it has touched the ledger — which is
-		// why the guard starts HERE: a settle-up that was going to be rejected never
-		// inserts an idempotency row, so the agent's corrected retry meets a clean path.
+		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
+		// arguments; everything between it and here is validation that has now succeeded,
+		// and none of it has touched the ledger — which is why the guard starts HERE: a
+		// settle-up that was going to be rejected never inserts an idempotency row, so the
+		// agent's corrected retry meets a clean path.
 		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it answers "did the model already send me exactly this?", and resolving `from`
@@ -282,7 +362,7 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			groupId,
 			toolName: TOOL_NAME,
 			args: { groupId, to, from, amount },
-			store: createDbIdempotencyStore(),
+			store: idempotencyStore,
 			fn: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's `viaKey` provenance into the audit row — we never write audit ourselves.
@@ -291,6 +371,7 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 					groupId,
 					input,
 					settlementCurrency,
+					expectedMemberNames,
 					via: auditVia(principal)
 				});
 
@@ -304,7 +385,11 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 				// prose. The payer is excluded: they are already named in the sentence, so
 				// "the other similarly-named member" must never be one of the two people the
 				// settle-up is between.
-				const similar = similarlyNamedMembers({ members, targetId: to, excludeIds: [payerId] });
+				const similar = similarlyNamedMembers({
+					members,
+					targetId: payeeId,
+					excludeIds: [payerId]
+				});
 
 				const payload: SettledPayload = {
 					recorded,
@@ -322,11 +407,9 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			}
 		});
 
-		const payload = response.body as SettledPayload;
-
 		// The ordinary path: the settle-up was recorded, exactly once.
 		if (replayedAfterMs === null) {
-			return toolSuccess({ ...payload, replayed: false });
+			return toolSuccess({ ...(response.body as SettledPayload), replayed: false });
 		}
 
 		// A REPLAY: the window absorbed a retry. A SUCCESS — the user's intent (one
@@ -335,11 +418,28 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// ship; only the leading prose changes, and `replayed` states it machine-readably.
 		// (The replay prose carries the original echo verbatim, disambiguation included:
 		// the "other Nan" is exactly as relevant on the retry as it was on the create.)
-		return toolSuccess({
-			...payload,
-			replayed: true,
-			recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
-			echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
-		});
+		return replaySuccess({ response, replayedAfterMs });
 	}
 };
+
+/**
+ * The REPLAY response shape, shared by the early `peekIdempotentReplay` exit and
+ * the ordinary `withDerivedIdempotency` replay branch above — the two answer the
+ * same question ("this exact call already succeeded, `replayedAfterMs` ago") from
+ * two different lookup points, and must render identically to the agent either way.
+ */
+function replaySuccess({
+	response,
+	replayedAfterMs
+}: {
+	response: IdempotentResponse;
+	replayedAfterMs: number;
+}) {
+	const payload = response.body as SettledPayload;
+	return toolSuccess({
+		...payload,
+		replayed: true,
+		recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
+		echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
+	});
+}
