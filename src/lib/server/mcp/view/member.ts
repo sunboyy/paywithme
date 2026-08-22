@@ -125,6 +125,53 @@ export function resolveMemberByName(members: readonly MemberView[], name: string
 }
 
 /**
+ * Resolve a member NAME for a READ-SIDE FILTER — `list_transactions`' `memberName`
+ * (ADR-0015). Returns the one member's id, or `null` when the name identifies no
+ * single member. PURE.
+ *
+ * It differs from {@link resolveMemberByName} on both halves, and deliberately:
+ *
+ *   - It matches the WHOLE ROSTER, deactivated members included. A filter asks "which
+ *     transactions is this person in?", and a removed member's past involvement is
+ *     still on the ledger — the id-based filter this replaced found it, and a rename
+ *     of the field must not quietly narrow what the tool can find. The write-side rule
+ *     is active-only for the opposite reason: only an active member is a valid
+ *     participant in a NEW transaction (§6.3).
+ *   - Every failure is the SAME `null`. The tool must never guess (the write side's
+ *     rule, for the same reason: this decides which rows the user is shown) and must
+ *     never error either — `list_transactions` is not a member-existence oracle. So
+ *     "nobody" and "more than one" are ONE outcome: no usable filter, and the caller
+ *     serves an empty page.
+ *
+ * ── Why an ACTIVE match does NOT break a tie here, though it does on the write side ──
+ * The uniqueness index covers ACTIVE rows only (#75), so a name can be shared by two
+ * removed members, or by one removed member and one active one — invite-accept
+ * suffixes against ACTIVE names alone (#77), so a new member quite ordinarily arrives
+ * holding a departed member's name.
+ *
+ * On the WRITE side that collision has one legal answer and picking it is not a guess:
+ * a deactivated member cannot be a participant in a NEW transaction (§6.3), so only
+ * the active row was ever a candidate. HERE both are equally legitimate real people
+ * whose history this filter exists to expose, and "show me departed-Bob's old
+ * transactions" answered with the ACTIVE Bob's page would return the WRONG PERSON'S
+ * DATA with nothing in the payload saying a namesake collision occurred. An empty page
+ * is the worse answer to a question we could have answered, and the better answer to a
+ * question we cannot tell apart from another one: it is never wrong about who. So any
+ * ambiguity — in any combination of active and deactivated — is `null`, the same as no
+ * match at all.
+ *
+ * The comparison is the same exact, normalized, non-fuzzy one everywhere else uses.
+ */
+export function resolveMemberNameForFilter(
+	members: readonly MemberView[],
+	name: string
+): string | null {
+	const target = normalizeDisplayName(name);
+	const matches = members.filter((m) => normalizeDisplayName(m.displayName.value) === target);
+	return matches.length === 1 ? matches[0].id : null;
+}
+
+/**
  * The self-correctable sentence a failed {@link resolveMemberByName} becomes (ADR-0009:
  * say WHAT was wrong and how to fix it). One copy, so all three write tools name a
  * missing member identically.

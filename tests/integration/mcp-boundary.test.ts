@@ -43,7 +43,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { asc, eq } from 'drizzle-orm';
 import { RATE_LIMITS } from '$lib/server/api/rate-limit';
 import { createGroup } from '$lib/server/groups';
-import { addMember } from '$lib/server/members';
+import { addMember, removeMember, renameMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { members as membersTable } from '$lib/server/db/groups-schema';
 import {
@@ -135,17 +135,21 @@ interface TransactionWire {
 	isDeleted: boolean;
 	payers: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountPaid: MoneyWire }[];
 	shares: { memberId: string; displayName: UntrustedWire; isYou: boolean; amountOwed: MoneyWire }[];
+	// The copy-back block (ADR-0011). Its member references are DISPLAY NAMES since
+	// ADR-0015 — `paidBy`, `splitBetween` and every `memberName` are exactly what
+	// `update_transaction` takes, so the round trip is a straight copy.
 	editable?: {
 		title: UntrustedWire;
 		categoryId: string;
 		currency: string;
 		paidBy: string | null;
 		splitMode: string;
+		splitBetween: string[];
 		items: {
 			label: UntrustedWire;
 			amount: string;
 			splitMode: string;
-			beneficiaries: { memberId: string; amount?: string; shareWeight?: number }[];
+			beneficiaries: { memberName: string; amount?: string; shareWeight?: number }[];
 		}[];
 		charges: { kind: string; mode: string; percent?: string; amount?: string; base: string }[];
 	};
@@ -205,35 +209,48 @@ function wrappedValues(node: unknown, acc: Set<string> = new Set()): Set<string>
 /**
  * Count occurrences of the exact string `needle` that are BARE — i.e. a plain string
  * node that is NOT the `value` of an untrusted envelope (that copy is the deliberate,
- * marked one) and is NOT under a key listed in `proseKeys`. `proseKeys` is for the
- * server-generated echo-back prose, which ADR-0003/ADR-0006 deliberately inline a
- * member name into for legibility — the STRUCTURED copy alongside it must still be
- * wrapped, and that is exactly what a non-zero bare count outside the prose catches.
+ * marked one) and is NOT under a key listed in `bareKeys`.
+ *
+ * `bareKeys` holds the two DOCUMENTED exceptions, and nothing else:
+ *
+ *   - `echo` — the server-generated echo-back prose, which ADR-0003/ADR-0006
+ *     deliberately inline a member name into for legibility.
+ *   - the `editable` block's member-reference fields (ADR-0015, #79), which hold
+ *     display NAMES because that is what the write tools take, so the block stays a
+ *     verbatim copy-back.
+ *
+ * In both cases the STRUCTURED copy alongside them must still be wrapped, and that is
+ * exactly what a non-zero bare count outside these keys catches.
  */
-function bareOccurrences(
-	node: unknown,
-	needle: string,
-	proseKeys: Set<string> = new Set()
-): number {
+function bareOccurrences(node: unknown, needle: string, bareKeys: Set<string> = new Set()): number {
 	if (typeof node === 'string') return node === needle ? 1 : 0;
 	if (Array.isArray(node)) {
-		return node.reduce((sum, child) => sum + bareOccurrences(child, needle, proseKeys), 0);
+		return node.reduce((sum, child) => sum + bareOccurrences(child, needle, bareKeys), 0);
 	}
 	if (node && typeof node === 'object') {
 		const obj = node as Record<string, unknown>;
 		const isEnvelope = obj._untrusted === true;
 		let sum = 0;
 		for (const [key, child] of Object.entries(obj)) {
-			// The envelope's own `value` is the marked copy — allowed. Prose fields are the
-			// documented legibility exception. Everything else is walked.
+			// The envelope's own `value` is the marked copy — allowed. The exception keys are
+			// the documented ones above. Everything else is walked.
 			if (isEnvelope && key === 'value') continue;
-			if (proseKeys.has(key)) continue;
-			sum += bareOccurrences(child, needle, proseKeys);
+			if (bareKeys.has(key)) continue;
+			sum += bareOccurrences(child, needle, bareKeys);
 		}
 		return sum;
 	}
 	return 0;
 }
+
+/**
+ * The `editable` block's member-reference fields (ADR-0015, #79): a member DISPLAY
+ * NAME, bare, because `update_transaction` takes bare names and this block exists to
+ * be copied into it unchanged. Every name here also rides WRAPPED in the same
+ * payload's `payers` / `shares` lines — which the sweeps below still enforce, since
+ * only these three keys are exempted, not the `editable` block as a whole.
+ */
+const EDITABLE_MEMBER_KEYS = ['paidBy', 'splitBetween', 'memberName'];
 
 describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)', () => {
 	let s: ApiScenario;
@@ -1063,11 +1080,13 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				})
 			});
 
+			// The filter is a DISPLAY NAME since ADR-0015 (#79) — the same string
+			// `list_members` and `get_transaction` show, resolved server-side.
 			// Either side — and 'Shared dinner' appears ONCE despite Alice being both
 			// payer and beneficiary (the EXISTS semi-join, not a join).
 			const mine = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice
+				memberName: s.user.name
 			});
 			expect(mine.transactions.map((t) => t.title.value).sort()).toEqual([
 				'Bob only',
@@ -1078,7 +1097,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// `role: 'owes'` drops the one Alice merely paid for.
 			const owes = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice,
+				memberName: s.user.name,
 				role: 'owes'
 			});
 			expect(owes.transactions.map((t) => t.title.value)).toEqual(['Shared dinner']);
@@ -1086,7 +1105,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// `role: 'paid'` keeps both of Alice's, and never Bob's own.
 			const paid = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: s.alice,
+				memberName: s.user.name,
 				role: 'paid'
 			});
 			expect(paid.transactions.map((t) => t.title.value).sort()).toEqual([
@@ -1094,13 +1113,146 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				'Shared dinner'
 			]);
 
-			// NO EXISTENCE ORACLE: an unknown member id is an empty page, not an error.
+			// A member ID in the name field matches NOBODY — it is not dual-accepted
+			// (ADR-0015), and being a read filter it is silently empty rather than an error.
+			const byId = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: s.alice
+			});
+			expect(byId.transactions).toEqual([]);
+
+			// NO EXISTENCE ORACLE: an unknown member name is an empty page, not an error.
 			const nobody = await callOk<TransactionListWire>('list_transactions', {
 				groupId: s.group.id,
-				memberId: 'mbr_does_not_exist'
+				memberName: 'Nobody At All'
 			});
 			expect(nobody.transactions).toEqual([]);
 			expect(nobody.hasMore).toBe(false);
+		});
+
+		it('the `memberName` filter names the SAME member `get_transaction` shows (#79)', async () => {
+			// The read side has one vocabulary: the name on a transaction's payer line is
+			// the name that filters for it, with no translation in between.
+			const txnId = await seed('Shared dinner');
+			const detail = await callOk<TransactionWire>('get_transaction', {
+				groupId: s.group.id,
+				transactionId: txnId
+			});
+			const payerName = detail.payers[0].displayName.value;
+			expect(detail.editable!.paidBy).toBe(payerName);
+
+			const found = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: payerName
+			});
+			expect(found.transactions.map((t) => t.id)).toContain(txnId);
+		});
+
+		it('matches a REMOVED member’s past transactions, and stops at an ambiguous name (#79)', async () => {
+			// §6.3: a removed member is still in the ledger, so their history stays
+			// findable — the id-based filter this replaced found it, and the rename must
+			// not quietly narrow what the tool can find.
+			const gone = (await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' }))
+				.id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [gone],
+					amount: 3000,
+					title: 'Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: gone });
+
+			const removed = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(removed.transactions.map((t) => t.title.value)).toEqual(['Nan owes']);
+
+			// The uniqueness index covers ACTIVE members only, so a SECOND removed member
+			// may legitimately come to hold the same name (renaming a deactivated row is
+			// exactly the §6.3 escape hatch) — and then no single member is named. The tool
+			// must not pick one, and must not error either: an empty page.
+			const alsoGone = (
+				await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan (2)' })
+			).id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [alsoGone],
+					amount: 2000,
+					title: 'The other Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: alsoGone });
+			await renameMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				memberId: alsoGone,
+				displayName: 'Nan'
+			});
+
+			const ambiguous = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(ambiguous.transactions).toEqual([]);
+			expect(ambiguous.hasMore).toBe(false);
+		});
+
+		it('an ACTIVE namesake of a REMOVED member does not win the filter — still an empty page (#79)', async () => {
+			// The uniqueness index covers ACTIVE members only (#75) and invite-accept
+			// suffixes against ACTIVE names only (#77), so a current member quite ordinarily
+			// holds a departed member's name. On the WRITE side the active row wins because
+			// the removed one is not a legal participant at all; on this READ filter both are
+			// real people whose history the filter exists to expose. Answering with the
+			// ACTIVE one's page would silently return the WRONG person's transactions, so the
+			// collision is ambiguous — and ambiguity is an empty page, never a guess.
+			const gone = (await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' }))
+				.id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [gone],
+					amount: 3000,
+					title: 'Departed Nan owes'
+				})
+			});
+			await removeMember({ userId: s.user.id, groupId: s.group.id, memberId: gone });
+
+			// A NEW, still-active member takes the same name — legal, the index exempts the
+			// deactivated row.
+			const current = (
+				await addMember({ userId: s.user.id, groupId: s.group.id, displayName: 'Nan' })
+			).id;
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				settlementCurrency: SETTLEMENT_CURRENCY,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [current],
+					amount: 2000,
+					title: 'Current Nan owes'
+				})
+			});
+
+			const collided = await callOk<TransactionListWire>('list_transactions', {
+				groupId: s.group.id,
+				memberName: 'Nan'
+			});
+			expect(collided.transactions).toEqual([]);
+			expect(collided.hasMore).toBe(false);
 		});
 
 		it('filters by an INCLUSIVE `from`/`to` date range on the real-world date (§7.1)', async () => {
@@ -2697,27 +2849,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					transactionId: txnId
 				});
 				const editable = readBack.editable!;
-				// `editable` is meant to be copied VERBATIM into `update_transaction` (ADR-0011).
-				// Since ADR-0015 the WRITE side takes member NAMES while this READ view still
-				// emits `memberId`, so the copy needs one translation step here. Closing that gap
-				// (`editable`'s member fields become names) is issue #79's job, deliberately not
-				// #78's: this test names the seam rather than pretending it is already gone.
-				const nameOf = (memberId: string) =>
-					({ [s.alice]: s.user.name, [s.bob]: 'Bob' })[memberId]!;
+				// `editable` is copied VERBATIM into `update_transaction` (ADR-0011), and since
+				// #79 both sides speak member NAMES — so this is a straight copy with NO
+				// translation step. The only fields touched are the two untrusted envelopes
+				// (`title`, item `label`), which is precisely what the tool asks to be unwrapped.
+				expect(editable.paidBy).toBe(s.user.name);
+				expect(editable.items[1].beneficiaries).toEqual([{ memberName: 'Bob' }]);
 				const unchangedArgs = {
 					txnId,
 					title: editable.title.value,
 					splitMode: editable.splitMode,
-					paidBy: nameOf(editable.paidBy!),
+					paidBy: editable.paidBy,
 					categoryId: editable.categoryId,
-					items: editable.items.map((item) => ({
-						...item,
-						label: item.label.value,
-						beneficiaries: item.beneficiaries.map(({ memberId, ...rest }) => ({
-							memberName: nameOf(memberId),
-							...rest
-						}))
-					})),
+					items: editable.items.map((item) => ({ ...item, label: item.label.value })),
 					charges: editable.charges
 				};
 				const unchanged = await callWriteOk<{ changed: string[] }>(
@@ -2759,12 +2903,12 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				]);
 				const firstItemWeights = Object.fromEntries(
 					persistedItems[0].beneficiaries.map((beneficiary) => [
-						beneficiary.memberId,
+						beneficiary.memberName,
 						beneficiary.shareWeight
 					])
 				);
-				expect(firstItemWeights).toEqual({ [s.alice]: 2, [s.bob]: 1 });
-				expect(persistedItems[1].beneficiaries).toEqual([{ memberId: s.bob }]);
+				expect(firstItemWeights).toEqual({ [s.user.name]: 2, Bob: 1 });
+				expect(persistedItems[1].beneficiaries).toEqual([{ memberName: 'Bob' }]);
 				expect(persisted.editable?.charges).toEqual([
 					{ kind: 'vat', mode: 'percent', percent: '8', base: 'items_subtotal' },
 					{ kind: 'discount', mode: 'absolute', amount: '3.00', base: 'running_total' },
@@ -3004,10 +3148,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 					// It must carry SOME member-authored text (else the sweep is vacuous for it) …
 					expect(wrapped.size, `${name} returned no wrapped text`).toBeGreaterThan(0);
-					// … and NONE of those wrapped strings may also appear bare, anywhere.
+					// … and NONE of those wrapped strings may also appear bare, anywhere outside
+					// the `editable` block's write-shaped member fields (ADR-0015).
 					for (const value of wrapped) {
 						expect(
-							bareOccurrences(payload, value),
+							bareOccurrences(payload, value, new Set(EDITABLE_MEMBER_KEYS)),
 							`${name}: "${value}" appears as a BARE string as well as wrapped`
 						).toBe(0);
 					}
@@ -3034,6 +3179,30 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				const txnWrapped = wrappedValues(txn);
 				expect(txnWrapped).toContain(TXN_TITLE);
 				expect(txnWrapped).toContain(MEMBER_NAME);
+			});
+
+			it('every BARE name in the `editable` copy-back is one the same payload also wraps (#79)', async () => {
+				// This is what bounds the sweep's exemption. `editable`'s member fields are
+				// bare because `update_transaction` takes bare names (ADR-0015) — but each one
+				// also rides WRAPPED in the same payload's payer/share lines, which is where
+				// the model learns the text is member-authored. A name that appeared ONLY
+				// bare would be the ADR-0003 hole, and this test is what would catch it.
+				const { group, txnId } = await seedTextRich();
+				const txn = await callOk<TransactionWire>('get_transaction', {
+					groupId: group.id,
+					transactionId: txnId
+				});
+				const editable = txn.editable!;
+				const bareNames = [
+					editable.paidBy!,
+					...editable.splitBetween,
+					...editable.items.flatMap((item) => item.beneficiaries.map((b) => b.memberName))
+				];
+
+				// Not vacuous: the block really does carry the injection-flavoured name.
+				expect(bareNames).toContain(MEMBER_NAME);
+				const wrapped = wrappedValues(txn);
+				for (const name of bareNames) expect(wrapped).toContain(name);
 			});
 		});
 
@@ -3106,10 +3275,11 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 					expect(wrappedValues(payload), `${name}: Bob's name is never wrapped`).toContain(
 						MEMBER_NAME
 					);
-					// … and it appears BARE only inside the `echo` prose (the documented legibility
-					// exception). A bare copy anywhere in the structured content is the ADR-0003 hole.
+					// … and it appears BARE only inside the `echo` prose and the `editable`
+					// copy-back's member fields (the two documented exceptions). A bare copy
+					// anywhere else in the structured content is the ADR-0003 hole.
 					expect(
-						bareOccurrences(payload, MEMBER_NAME, new Set(['echo'])),
+						bareOccurrences(payload, MEMBER_NAME, new Set(['echo', ...EDITABLE_MEMBER_KEYS])),
 						`${name}: Bob's name appears BARE in the structured payload`
 					).toBe(0);
 					// And the payload always restates that such strings are data, not instructions.

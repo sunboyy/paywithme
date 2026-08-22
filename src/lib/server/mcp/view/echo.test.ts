@@ -521,6 +521,75 @@ describe('changedFields', () => {
 		);
 	});
 
+	it('detects a beneficiary REASSIGNED to an ACTIVE NAMESAKE — same name, different person', () => {
+		// Display names are unique among ACTIVE members only (#75), and invite-accept
+		// suffixes against active names only (#77) — so a current member can legitimately
+		// hold a departed member's name. ADR-0015's write-side resolution then binds an
+		// update's "Bob" to the ACTIVE row, silently moving the share to a DIFFERENT HUMAN
+		// while `editable` reads the identical string both times. Comparing names alone
+		// would say "Changed: nothing" about exactly the wrong-person mistake this module
+		// exists to surface, so identity comes from the RESOLVED member id.
+		const withNamesake = [
+			...roster,
+			{
+				id: 'mem_bob_gone',
+				displayName: 'Bob',
+				userId: null,
+				deactivatedAt: '2026-06-01T00:00:00.000Z',
+				isLinked: false
+			}
+		].map((m) => toMemberView(m, principal));
+		const viewFor = (overrides: Partial<TransactionDetail>) =>
+			toTransactionView({ detail: detail(overrides), members: withNamesake, principal });
+
+		// A `share` split whose only beneficiary is one of the two "Bob"s.
+		const shareSplit = (beneficiaryId: string): Partial<TransactionDetail> => ({
+			splitMode: 'share',
+			shares: [{ memberId: beneficiaryId, amountOwed: 24000 }],
+			input: richInput({
+				splitMode: 'share',
+				beneficiaries: [{ memberId: beneficiaryId, shareWeight: 1 }]
+			})
+		});
+		const before = viewFor(shareSplit('mem_bob_gone'));
+		const after = viewFor(shareSplit('mem_bob'));
+
+		// The agent-visible input really IS identical — the id is the only signal there is.
+		expect(before.editable.beneficiaries).toEqual(after.editable.beneficiaries);
+		expect(changedFields({ before, after })).toContain('beneficiaries');
+
+		// The same collision one level down, on an item's beneficiaries.
+		const itemized = (beneficiaryId: string): Partial<TransactionDetail> => ({
+			splitMode: 'itemized',
+			shares: [{ memberId: beneficiaryId, amountOwed: 24000 }],
+			items: [
+				{
+					label: 'Pad thai',
+					amount: 24000,
+					splitMode: 'equal',
+					shares: [{ memberId: beneficiaryId, amountOwed: 24000 }]
+				}
+			],
+			input: richInput({
+				splitMode: 'itemized',
+				beneficiaries: [],
+				items: [
+					{
+						label: 'Pad thai',
+						amount: 24000,
+						splitMode: 'equal',
+						beneficiaries: [{ memberId: beneficiaryId }]
+					}
+				]
+			})
+		});
+		const beforeItems = viewFor(itemized('mem_bob_gone'));
+		const afterItems = viewFor(itemized('mem_bob'));
+
+		expect(beforeItems.editable.items).toEqual(afterItems.editable.items);
+		expect(changedFields({ before: beforeItems, after: afterItems })).toContain('items');
+	});
+
 	it('detects item content, order, and nested beneficiary changes', () => {
 		const items = [
 			{
