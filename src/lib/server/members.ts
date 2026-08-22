@@ -33,6 +33,7 @@ import { db } from './db';
 import { members } from './db/groups-schema';
 import { transactionPayers, transactionShares } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
+import { displayNameValues } from './member-name';
 import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
@@ -224,7 +225,11 @@ export async function addMember({
 			.insert(members)
 			.values({
 				groupId,
-				displayName,
+				// Writes the name AND its canonical key, which backs the active-member
+				// uniqueness index (ADR-0015). A duplicate raises a Postgres
+				// unique-violation; mapping that to an actionable validation error is
+				// issue #76's job, not this insert's.
+				...displayNameValues(displayName),
 				// Explicitly unlinked — a participant slot, not a user link (§6.1).
 				userId: null
 			})
@@ -268,7 +273,12 @@ export async function renameMember({
 
 		const [updated] = await tx
 			.update(members)
-			.set({ displayName })
+			// The canonical key moves WITH the name (ADR-0015) — a rename that left the
+			// old key behind would silently disable the uniqueness index for this row.
+			// Renaming a DEACTIVATED member still can't collide: the index is partial on
+			// `deactivated_at IS NULL`, which is exactly what makes it the escape hatch
+			// for a blocked reactivation (§6.3).
+			.set(displayNameValues(displayName))
 			.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
 			.returning();
 
@@ -405,6 +415,12 @@ export async function removeMember(
  * `deactivated_at`, restoring the slot (and, if linked, the user's access — the
  * access primitive re-admits them once `deactivated_at IS NULL`). Access-checked
  * + cross-group verified. Returns the updated member.
+ *
+ * NOTE (issue #76): clearing the flag can now trip
+ * `members_group_id_normalized_display_name_unique` (ADR-0015) when an ACTIVE
+ * member has since taken this member's name. Turning that raw unique-violation
+ * into an actionable "rename the deactivated member first" error belongs to the
+ * collision-handling task, not here.
  */
 export async function reactivateMember({
 	userId,

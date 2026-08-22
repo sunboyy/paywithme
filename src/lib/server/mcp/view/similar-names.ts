@@ -52,6 +52,7 @@
 // and `''` is a prefix of everything, which would collide with the entire roster. So
 // an empty key on EITHER side is excluded outright (see `matchKey`).
 
+import { normalizeDisplayName } from '$lib/server/member-name';
 import type { MemberView } from './member';
 import type { UntrustedText } from './untrusted';
 
@@ -67,18 +68,21 @@ export interface SimilarMemberView {
 }
 
 /**
- * The comparison key for one display name: NFC → trim → lowercase → the text before
- * the first run of whitespace. `''` for a name with no usable text, which callers
- * MUST treat as "never collides" rather than "collides with everything".
+ * The comparison key for one display name: the shared canonical form (NFC → trim →
+ * lowercase — `normalizeDisplayName`, the same folding the active-member uniqueness
+ * index stores, ADR-0015) → then the text before the first run of whitespace. `''`
+ * for a name with no usable text, which callers MUST treat as "never collides"
+ * rather than "collides with everything".
  *
- * Plain `toLowerCase` (not the locale-aware form) is deliberate: the result must be
- * identical on every server, and a locale-dependent fold would make this hint's
- * output depend on where the process happens to run.
+ * THE TOKEN SPLIT IS THIS MODULE'S ALONE and is where the two rules part company:
+ * the constraint is an equality test on the WHOLE name, this is a similarity hint on
+ * the first token (see the header). Sharing only the folding keeps the two from
+ * drifting on what counts as the same characters, while leaving the judgement call
+ * that follows entirely here — where the header can keep arguing for it.
  */
 function matchKey(name: string): string {
-	const normalized = name.normalize('NFC').trim().toLowerCase();
 	// `split` always yields at least one element; `?? ''` is for the type, not the case.
-	return normalized.split(/\s+/u)[0] ?? '';
+	return normalizeDisplayName(name).split(/\s+/u)[0] ?? '';
 }
 
 /** Whether two normalized keys collide: either is a prefix of the other. Both non-empty. */

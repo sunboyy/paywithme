@@ -190,6 +190,21 @@ describe('addMember (PLAN §6.1 — inserts a NEW UNLINKED slot)', () => {
 		expect(member.id).toBe('member-1');
 	});
 
+	it('writes the canonical name key alongside the name (ADR-0015)', async () => {
+		// The uniqueness index compares STORED keys, so an insert that omitted this
+		// column (or wrote an unfolded value) would leave the constraint unable to see
+		// a case/whitespace-only duplicate. Padded + mixed case on purpose.
+		queueSelects(ACCESS_OK);
+		await addMember({ userId: 'u1', groupId: 'g1', displayName: '  ALEX  ' });
+
+		const values = insertCalls.filter((c) => c.table !== auditLog)[0].values as Record<
+			string,
+			unknown
+		>;
+		expect(values.displayName).toBe('  ALEX  ');
+		expect(values.normalizedDisplayName).toBe('alex');
+	});
+
 	it('writes exactly ONE add/member audit row in the same transaction', async () => {
 		queueSelects(ACCESS_OK);
 		await addMember({ userId: 'u1', groupId: 'g1', displayName: 'Alex' });
@@ -252,6 +267,18 @@ describe('renameMember (PLAN §6.2 — display name editable)', () => {
 		expect(updateCalls).toHaveLength(1);
 		expect((updateCalls[0].set as Record<string, unknown>).displayName).toBe('New');
 		expect(updated.id).toBe('member-1');
+	});
+
+	it('moves the canonical name key WITH the name (ADR-0015)', async () => {
+		// A rename that left the old key behind would silently disable the uniqueness
+		// index for that row: it would keep matching its former name and stop matching
+		// its current one.
+		queueSelects(ACCESS_OK, TARGET_MEMBER);
+		await renameMember({ userId: 'u1', groupId: 'g1', memberId: 'm1', displayName: 'NEW Name' });
+
+		const set = updateCalls[0].set as Record<string, unknown>;
+		expect(set.displayName).toBe('NEW Name');
+		expect(set.normalizedDisplayName).toBe('new name');
 	});
 });
 

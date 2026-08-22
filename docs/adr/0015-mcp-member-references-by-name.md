@@ -35,7 +35,7 @@ member-reference fields in MCP tools from id to name.**
 
 A partial unique index on `members.display_name`, normalized (NFC → trim →
 lowercase; compared as a full string, not `similar-names.ts`'s first-token prefix
-rule — that rule is a similarity *hint*, not an equality test), scoped to
+rule — that rule is a similarity _hint_, not an equality test), scoped to
 `WHERE deactivated_at IS NULL`. Deactivated members are exempt: their name is free
 to be reused, and renaming a deactivated member is never blocked by it, mirroring
 the existing `members_group_id_user_id_unique` partial-index pattern.
@@ -77,7 +77,7 @@ of requiring a translation step on the one payload meant to be copied faithfully
 
 Agent-facing read views that already show both (`list_members`,
 `get_transaction`'s `PayerView`/`ShareView`) **keep both** id and `displayName`.
-The id was never the problem; accepting it as *write input* was. Dropping it from
+The id was never the problem; accepting it as _write input_ was. Dropping it from
 read output would remove a debugging/cross-reference handle for no safety gain,
 since it's already inert as input everywhere else.
 

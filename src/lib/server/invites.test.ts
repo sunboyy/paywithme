@@ -453,6 +453,9 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		expect(values.groupId).toBe('g1');
 		expect(values.userId).toBe('u9');
 		expect(values.displayName).toBe('Dana');
+		// …with its canonical key, so the joining member takes part in the
+		// active-name uniqueness index like any other (ADR-0015).
+		expect(values.normalizedDisplayName).toBe('dana');
 		// 'new' does NOT touch members via UPDATE.
 		expect(updateCalls).toHaveLength(0);
 
@@ -488,6 +491,9 @@ describe('acceptInvite (PLAN §6.2 — member-agnostic, selection-driven outcome
 		const set = updateCalls[0].set as Record<string, unknown>;
 		expect(set.userId).toBe('u9');
 		expect(set).not.toHaveProperty('displayName');
+		// Claiming a slot keeps the slot's existing name, so its canonical key must be
+		// left alone too — rewriting one without the other would desync the pair.
+		expect(set).not.toHaveProperty('normalizedDisplayName');
 		// Existing-claim creates NO new member (the only insert is the audit row).
 		expect(nonAuditInserts()).toHaveLength(0);
 

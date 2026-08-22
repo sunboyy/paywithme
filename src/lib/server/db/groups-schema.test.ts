@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { getTableName, getTableColumns, type SQL } from 'drizzle-orm';
 import { getTableConfig, PgDialect } from 'drizzle-orm/pg-core';
 import { groups, members, invites } from './groups-schema';
@@ -73,6 +76,9 @@ describe('members drizzle table', () => {
 			'displayName',
 			'groupId',
 			'id',
+			// The app-computed canonical form of `displayName` (ADR-0015) — storage for
+			// the active-name uniqueness index only; no view projects it.
+			'normalizedDisplayName',
 			'userId'
 		]);
 	});
@@ -88,6 +94,15 @@ describe('members drizzle table', () => {
 		// display_name is required (§6.2).
 		expect(c.displayName.name).toBe('display_name');
 		expect(c.displayName.notNull).toBe(true);
+
+		// …and so is its canonical form: the uniqueness index has nothing to compare
+		// if a row may carry a NULL key (ADR-0015).
+		expect(c.normalizedDisplayName.name).toBe('normalized_display_name');
+		expect(c.normalizedDisplayName.notNull).toBe(true);
+		// NOT defaulted and NOT DB-generated: it is written by
+		// `displayNameValues()` on every name write, so a missing value is a loud
+		// not-null violation rather than a silently wrong key.
+		expect(c.normalizedDisplayName.hasDefault).toBe(false);
 
 		// user link is nullable (unlinked slots are valid).
 		expect(c.userId.name).toBe('user_id');
@@ -126,8 +141,83 @@ describe('members drizzle table', () => {
 		expect(rendered).toContain('"user_id" is not null');
 	});
 
+	it('declares the ACTIVE-only unique index over (group_id, normalized_display_name)', () => {
+		const { indexes } = getTableConfig(members);
+		const uniq = indexes.find(
+			(i) => i.config.name === 'members_group_id_normalized_display_name_unique'
+		);
+		expect(uniq).toBeDefined();
+		expect(uniq?.config.unique).toBe(true);
+
+		// Scoped PER GROUP, and compared on the NORMALIZED column — not on
+		// `display_name`, which would miss a case/whitespace-only collision (ADR-0015).
+		const cols = (uniq?.config.columns ?? []).map((col) => (col as { name?: string }).name);
+		expect(cols).toEqual(['group_id', 'normalized_display_name']);
+
+		// The PARTIAL predicate is the whole point: deactivated members are exempt, so
+		// their name is reusable and renaming them is never blocked (§6.3). Rendered via
+		// the Pg dialect for the same reason as the index above.
+		const where = uniq?.config.where as SQL | undefined;
+		expect(where).toBeDefined();
+		const rendered = new PgDialect().sqlToQuery(where!).sql.toLowerCase();
+		expect(rendered).toContain('"deactivated_at" is null');
+		// Guard against the predicate flipping to the wrong flag/sense: `IS NOT NULL`
+		// would constrain exactly the rows that must stay free.
+		expect(rendered).not.toContain('is not null');
+	});
+
 	it('is re-exported from the schema entry point', () => {
 		expect((schema as Record<string, unknown>).members).toBe(members);
+	});
+});
+
+// Guard the HAND-EDITED uniqueness migration (issue #75; ADR-0015). `drizzle-kit
+// generate` emits a single `ADD COLUMN "normalized_display_name" text NOT NULL`,
+// which cannot run against a table that already holds members; the committed
+// migration splits it into add-nullable → backfill → set-not-null. If someone
+// regenerates it and loses the backfill, `pnpm db:migrate` breaks on every existing
+// database — so assert the shape here, where the fast gate sees it (the real-DB
+// assertions live in `tests/integration/member-name-uniqueness.test.ts`).
+describe('member-name uniqueness migration', () => {
+	function readUniquenessMigration(): string {
+		const drizzleDir = join(dirname(fileURLToPath(import.meta.url)), '../../../../drizzle');
+		const matches = readdirSync(drizzleDir)
+			.filter((f) => f.endsWith('.sql'))
+			.map((f) => readFileSync(join(drizzleDir, f), 'utf8'))
+			.filter((sql) => /ADD COLUMN "normalized_display_name"/.test(sql));
+		expect(matches, 'exactly one migration should add normalized_display_name').toHaveLength(1);
+		return matches[0];
+	}
+
+	const sql = readUniquenessMigration();
+
+	it('adds `normalized_display_name` NULLABLE, then backfills, then sets NOT NULL', () => {
+		const addIdx = sql.indexOf('ADD COLUMN "normalized_display_name" text;');
+		const backfillIdx = sql.search(/UPDATE "members" SET "normalized_display_name" =/);
+		const notNullIdx = sql.indexOf('ALTER COLUMN "normalized_display_name" SET NOT NULL');
+
+		expect(addIdx, 'the column must be added NULLABLE').toBeGreaterThan(-1);
+		expect(backfillIdx, 'existing rows must be backfilled').toBeGreaterThan(addIdx);
+		expect(notNullIdx, 'the column must end up NOT NULL').toBeGreaterThan(backfillIdx);
+		// The generated `ADD COLUMN ... NOT NULL` one-liner must NOT be present.
+		expect(sql).not.toContain('ADD COLUMN "normalized_display_name" text NOT NULL');
+	});
+
+	it('backfills with the SAME rule the app applies (NFC → trim → lowercase)', () => {
+		// Drop any of the three and pre-existing rows carry a key the app would never
+		// have written, which silently lets a duplicate through: the index compares
+		// stored keys, so two rows whose keys differ are "different names" to Postgres.
+		expect(sql).toContain('lower(btrim(normalize("display_name", NFC)))');
+	});
+
+	it('creates the unique index PARTIAL on active members only', () => {
+		expect(sql).toMatch(
+			/CREATE UNIQUE INDEX "members_group_id_normalized_display_name_unique" ON "members"[\s\S]*"group_id","normalized_display_name"/
+		);
+		// Without the WHERE clause this would be a plain unique index that also
+		// constrains deactivated rows — burning a departed member's name for the group
+		// and blocking the rename that ADR-0015 relies on as the escape hatch.
+		expect(sql).toMatch(/WHERE "members"\."deactivated_at" is null/i);
 	});
 });
 
