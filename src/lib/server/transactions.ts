@@ -162,13 +162,45 @@ async function assertGroupAccess(
 	}
 }
 
-/** Active (non-deactivated) member ids of a group — the schema's member allow-list. */
-async function activeMemberIds(groupId: string, executor: DbExecutor = db): Promise<string[]> {
-	const rows = await executor
-		.select({ id: members.id })
+/**
+ * Active (non-deactivated) members of a group — id + current display name. The
+ * schema's member allow-list (`.map((r) => r.id)`) and, for a name-resolved write,
+ * what {@link validateTransactionForWrite}'s `expectedMemberNames` check compares
+ * against (see there for why the id alone is not enough).
+ *
+ * `forShare`, when true, takes the SAME `FOR SHARE` lock `resolveEntryCurrencies`
+ * takes on a custom currency row (issue #69 finding 1) — and for the identical
+ * reason (PR #80 review): an UNLOCKED read only NARROWS the rename race, it does not
+ * close it. `renameMember`'s `UPDATE` takes Postgres's ordinary row-exclusive lock;
+ * `FOR SHARE`, held to the end of this enclosing `db.transaction`, makes THAT lock
+ * wait for us — so once this read returns, the names it saw cannot change under this
+ * write before it commits. Conditional (unlike the schema's `memberIds` use of this
+ * same query, which always runs): a REST/web write resolved no name to re-verify, so
+ * it costs it nothing, exactly as an un-custom-currencied write costs no currency
+ * lock — see the seeded fast path this mirrors.
+ */
+async function activeMembers(
+	groupId: string,
+	executor: DbExecutor = db,
+	forShare = false
+): Promise<{ id: string; displayName: string }[]> {
+	const query = executor
+		.select({ id: members.id, displayName: members.displayName })
 		.from(members)
-		.where(and(eq(members.groupId, groupId), isNull(members.deactivatedAt)));
-	return rows.map((r) => r.id);
+		.where(and(eq(members.groupId, groupId), isNull(members.deactivatedAt)))
+		.orderBy(members.id);
+	return forShare ? query.for('share') : query;
+}
+
+/** Every member id `data` actually references — payers, flat beneficiaries, and (for an itemized split) each item's own beneficiaries. */
+function referencedMemberIds(data: TransactionInput): Set<string> {
+	const ids = new Set<string>();
+	for (const payer of data.payers) ids.add(payer.memberId);
+	for (const beneficiary of data.beneficiaries) ids.add(beneficiary.memberId);
+	for (const item of data.items) {
+		for (const beneficiary of item.beneficiaries) ids.add(beneficiary.memberId);
+	}
+	return ids;
 }
 
 /**
@@ -190,6 +222,7 @@ export async function createTransaction({
 	input,
 	settlementCurrency,
 	expectedDisplayCode,
+	expectedMemberNames,
 	via,
 	now = () => new Date()
 }: {
@@ -213,6 +246,8 @@ export async function createTransaction({
 	 * ordinary entry-currency 422 — see {@link gateByExpectedDisplayCode}.
 	 */
 	expectedDisplayCode?: string;
+	/** A NAME-RESOLVED caller's snapshot to re-verify — see `validateTransactionForWrite`. */
+	expectedMemberNames?: ReadonlyMap<string, string>;
 	/**
 	 * API-key provenance (PLAN §16.2) — passed ONLY by the `/api/v1` handlers. The
 	 * audit row then gains the "(via API key '<name>')" summary suffix +
@@ -230,7 +265,8 @@ export async function createTransaction({
 			groupId,
 			input,
 			settlementCurrency,
-			expectedDisplayCode
+			expectedDisplayCode,
+			expectedMemberNames
 		});
 
 		const transactionId = crypto.randomUUID();
@@ -797,12 +833,27 @@ async function validateTransactionForWrite(
 		groupId,
 		input,
 		settlementCurrency,
-		expectedDisplayCode
+		expectedDisplayCode,
+		expectedMemberNames
 	}: {
 		groupId: string;
 		input: unknown;
 		settlementCurrency?: SeededCurrencyCode;
 		expectedDisplayCode?: string;
+		/**
+		 * A NAME-RESOLVED caller's own snapshot of `id → current display name`, taken at
+		 * the moment it resolved names against the roster (ADR-0015; PR #80 review). The
+		 * MCP write tools resolve names to ids OUTSIDE this transaction — `loadMemberViews`
+		 * runs before it opens — so a rename that lands in that gap can hand this write an
+		 * id that is still active (the schema's `memberIds` check alone would not catch
+		 * it) but no longer means what the agent's `to` / `paidBy` / beneficiary name said.
+		 * Re-checked here, LOCKED inside the same write transaction the roster was already
+		 * about to commit against, mirroring `expectedDisplayCode`'s re-verification of a
+		 * currency resolved outside this same window, for the identical reason.
+		 *
+		 * Optional: REST callers pass ids directly and have no name to have resolved.
+		 */
+		expectedMemberNames?: ReadonlyMap<string, string>;
 	}
 ): Promise<{
 	currency: SeededCurrencyCode;
@@ -813,7 +864,12 @@ async function validateTransactionForWrite(
 	// fields. The fallback read keeps the service usable without a route-provided
 	// settlement currency.
 	const currency = settlementCurrency ?? (await loadSettlementCurrency(groupId, executor));
-	const memberIds = await activeMemberIds(groupId, executor);
+	const activeMembersSnapshot = await activeMembers(
+		groupId,
+		executor,
+		expectedMemberNames !== undefined
+	);
+	const memberIds = activeMembersSnapshot.map((m) => m.id);
 
 	// Custom descriptors are read and locked on the write transaction, then narrowed
 	// to the display code asserted by REST callers. The schema also binds the posted
@@ -836,6 +892,29 @@ async function validateTransactionForWrite(
 	// The schema checks the in-app category/type pairing; this is the matching DB
 	// existence check required before the transaction row is written.
 	await assertCategoryExists(data.categoryId, executor);
+
+	// The re-check `expectedMemberNames` documents above (PR #80 review): every id this
+	// write actually references, LOCKED to what the roster called it when the caller
+	// resolved it. A concurrent DEACTIVATION already fails the schema parse above (the
+	// id drops out of `memberIds`); this catches the id staying active but changing
+	// identity underneath the write — a RENAME frees the resolved name for someone else
+	// while this same request is still in flight.
+	if (expectedMemberNames !== undefined) {
+		const currentNameById = new Map(activeMembersSnapshot.map((m) => [m.id, m.displayName]));
+		for (const id of referencedMemberIds(data)) {
+			const expected = expectedMemberNames.get(id);
+			if (expected !== undefined && currentNameById.get(id) !== expected) {
+				throw new TransactionValidationError([
+					makeIssue(
+						[],
+						'A referenced member was renamed while this request was being processed, so ' +
+							'the name it was sent under no longer matches. Nothing was recorded — call ' +
+							'`list_members` and retry with the current names.'
+					)
+				]);
+			}
+		}
+	}
 
 	return { currency, data, entryDescriptor };
 }
@@ -1591,6 +1670,7 @@ export async function updateTransaction({
 	actorUserId,
 	settlementCurrency,
 	expectedDisplayCode,
+	expectedMemberNames,
 	via,
 	now = () => new Date()
 }: {
@@ -1605,6 +1685,8 @@ export async function updateTransaction({
 	settlementCurrency?: SeededCurrencyCode;
 	/** `/api/v1`'s display-code assertion — see {@link createTransaction}. */
 	expectedDisplayCode?: string;
+	/** A NAME-RESOLVED caller's snapshot to re-verify — see `validateTransactionForWrite`. */
+	expectedMemberNames?: ReadonlyMap<string, string>;
 	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
 	via?: AuditVia;
 	/** Injectable clock (tests). */
@@ -1625,7 +1707,8 @@ export async function updateTransaction({
 			groupId,
 			input,
 			settlementCurrency,
-			expectedDisplayCode
+			expectedDisplayCode,
+			expectedMemberNames
 		});
 
 		// Replace children: delete the existing payer / share / item / item-share /

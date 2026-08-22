@@ -241,6 +241,26 @@ describe('create_transaction rich wiring', () => {
 		expect(payload.echo).toContain('split by 1 item');
 	});
 
+	it('passes the FULL roster snapshot for `createTransaction` to re-verify (PR #80 review)', async () => {
+		// Unlike `settle_up`, this tool cannot cheaply tell which ids came from a NAME
+		// (`paidBy`, `splitBetween`) vs. a DEFAULT (the caller's own member) without
+		// reaching into the shared adapter — so it hands over every member it saw, and
+		// `transactions.ts` only checks the ones the resolved input actually references.
+		await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '12.00',
+			splitBetween: ['Alice']
+		});
+		expect(createTransaction.mock.calls[0][0].expectedMemberNames).toEqual(
+			new Map([
+				['mem_me', 'Alice'],
+				['mem_bob', 'Bob'],
+				['mem_inactive', 'Gone']
+			])
+		);
+	});
+
 	it('a PEEKED replay short-circuits before the roster loads or any name resolves (PR #80 review)', async () => {
 		// The exact bug this guards against: `paidBy` names nobody on the CURRENT
 		// roster (it would fail validation if reached) — but this call is a plain

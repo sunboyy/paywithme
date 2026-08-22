@@ -206,6 +206,10 @@ function queueSelects(...rowSets: unknown[][]) {
 
 const ACCESS_OK = [{ id: 'access-member' }];
 const ACTIVE_MEMBERS = [{ id: 'm1' }, { id: 'm2' }];
+const NAMED_MEMBERS = [
+	{ id: 'm1', displayName: 'Alice' },
+	{ id: 'm2', displayName: 'Bob' }
+];
 const CATEGORY_ROW = [{ id: 'spending-food-drink' }];
 
 /** A valid equal-split spending input (THB, 2 members, 90.00 total). */
@@ -2330,5 +2334,176 @@ describe('updateTransaction — re-editing a CUSTOM-currency transaction (§7.5.
 				settlementCurrency: 'THB'
 			})
 		).rejects.toBeInstanceOf(TransactionValidationError);
+	});
+});
+
+describe('createTransaction / updateTransaction — the member-name assertion (PR #80 review)', () => {
+	// Mirrors the display-code assertion above: `expectedMemberNames` is a NAME-RESOLVED
+	// caller's (an MCP write tool's) own snapshot of `id → display name`, taken OUTSIDE
+	// this transaction, before it opened. A rename that lands in the gap between that
+	// snapshot and this write leaves the id ACTIVE (so the ordinary member-id check
+	// passes) but no longer the person the caller's name resolved to.
+
+	it('LOCKS the active-members read `FOR SHARE` only when there is a snapshot to protect (PR #80 review)', async () => {
+		// The narrowed-but-not-closed gap the review flagged: an unlocked read only
+		// shrinks the race, it does not close it. `FOR SHARE`, held to this write's own
+		// transaction, makes a concurrent `renameMember` (a plain row-exclusive `UPDATE`)
+		// wait for us — mirroring `resolveEntryCurrencies`'s custom-currency lock exactly.
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB',
+			expectedMemberNames: new Map([
+				['m1', 'Alice'],
+				['m2', 'Bob']
+			])
+		});
+		expect(selectLocks).toEqual(['share']);
+	});
+
+	it('takes NO lock on the active-members read when there is no snapshot (a REST/web write)', async () => {
+		// The fast path this mirrors: a write that resolved no name has nothing to
+		// protect, so it costs nothing beyond the ordinary allow-list read.
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(selectLocks).toEqual([]);
+	});
+
+	it('REJECTS the write when an ITEMIZED beneficiary was renamed (referencedMemberIds walks items too)', async () => {
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		const itemizedInput = {
+			type: 'spending' as const,
+			title: 'Group dinner',
+			categoryId: 'spending-food-drink',
+			amountTotal: 100,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: 100,
+			splitMode: 'itemized' as const,
+			payers: [{ memberId: 'm1', amountPaid: 100 }],
+			beneficiaries: [],
+			items: [
+				{
+					label: 'Pizza',
+					amount: 100,
+					splitMode: 'equal' as const,
+					// m2 (Bob) is a beneficiary ONLY here — nowhere in `payers` or the
+					// (empty, itemized) top-level `beneficiaries` — so a check that missed
+					// item beneficiaries would let this renamed reference through silently.
+					beneficiaries: [{ memberId: 'm1' }, { memberId: 'm2' }]
+				}
+			],
+			charges: []
+		};
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: itemizedInput,
+				settlementCurrency: 'THB',
+				expectedMemberNames: new Map([
+					['m1', 'Alice'],
+					['m2', 'Someone Else']
+				])
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('accepts the write when every referenced member still carries the name it was resolved under', async () => {
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB',
+			expectedMemberNames: new Map([
+				['m1', 'Alice'],
+				['m2', 'Bob']
+			])
+		});
+		expect(typeof id).toBe('string');
+	});
+
+	it('REJECTS the write when a referenced member was renamed between resolution and the write', async () => {
+		// `equalInput()` pays and splits between m1/m2 — still active, but m1 no longer
+		// answers to the name `paidBy` was resolved from.
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		await expect(
+			createTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				input: equalInput(),
+				settlementCurrency: 'THB',
+				expectedMemberNames: new Map([
+					['m1', 'Someone Else'],
+					['m2', 'Bob']
+				])
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(inserts).toHaveLength(0);
+	});
+
+	it('ignores a snapshot entry for a member the write never references', async () => {
+		// The MCP tools pass the FULL roster snapshot, not just the ids this write
+		// touches (see `create-transaction.ts`) — an unrelated member's rename must
+		// never block a write that never named them.
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(), // references only m1 and m2
+			settlementCurrency: 'THB',
+			expectedMemberNames: new Map([
+				['m1', 'Alice'],
+				['m2', 'Bob'],
+				['m3', 'This member was renamed, but nothing here refers to them']
+			])
+		});
+		expect(typeof id).toBe('string');
+	});
+
+	it('a WEB write (no expected member names) is unaffected by a rename', async () => {
+		// The web UI and REST already speak ids, so the parameter is absent and no
+		// re-check runs — the same optionality `expectedDisplayCode` has.
+		queueSelects(ACCESS_OK, NAMED_MEMBERS, CATEGORY_ROW);
+		const id = await createTransaction({
+			userId: 'u1',
+			groupId: 'g1',
+			input: equalInput(),
+			settlementCurrency: 'THB'
+		});
+		expect(typeof id).toBe('string');
+	});
+
+	it('REJECTS an edit when a referenced member was renamed between resolution and the write', async () => {
+		queueSelects(
+			ACCESS_OK,
+			[{ title: 'Dinner', deletedAt: null, roundingSeq: 0 }],
+			NAMED_MEMBERS,
+			CATEGORY_ROW,
+			[]
+		);
+		await expect(
+			updateTransaction({
+				userId: 'u1',
+				groupId: 'g1',
+				txnId: 't1',
+				input: equalInput(),
+				settlementCurrency: 'THB',
+				expectedMemberNames: new Map([
+					['m1', 'Alice'],
+					['m2', 'Someone Else']
+				])
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+		expect(updatesTo('transactions')).toHaveLength(0);
 	});
 });

@@ -64,6 +64,7 @@ import { toolError, toolSuccess } from '../errors';
 import {
 	buildUpdateEchoBack,
 	changedFields,
+	memberNameSnapshot,
 	toTransactionView,
 	UNTRUSTED_NOTE,
 	type TransactionView
@@ -390,6 +391,10 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			txnId,
 			input,
 			settlementCurrency,
+			// See `create-transaction.ts` — the same re-verification, LOCKED inside this
+			// write's own transaction (PR #80 review), against the same roster `paidBy` /
+			// `splitBetween` / beneficiary names were resolved against.
+			expectedMemberNames: memberNameSnapshot(members),
 			via: auditVia(principal)
 		});
 

@@ -76,6 +76,7 @@ import { peekIdempotentReplay, withDerivedIdempotency } from '../idempotency';
 import {
 	buildEchoBack,
 	buildReplayEchoBack,
+	memberNameSnapshot,
 	selfMemberId,
 	toTransactionView,
 	UNTRUSTED_NOTE,
@@ -466,6 +467,14 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 						groupId,
 						input,
 						settlementCurrency,
+						// The names `paidBy` / `splitBetween` / beneficiary rows resolved against,
+						// re-verified LOCKED inside this write's own transaction (PR #80 review — see
+						// `expectedMemberNames` on `createTransaction`). The full roster snapshot,
+						// not just the resolved ids: `input` no longer distinguishes a NAME-resolved
+						// id from a DEFAULTED one (unlike `settle_up`, which never merged them), and
+						// checking a defaulted id too only ever costs a rare, self-correctable retry —
+						// never a wrong write.
+						expectedMemberNames: memberNameSnapshot(members),
 						via: auditVia(principal)
 					});
 				} catch (error) {
