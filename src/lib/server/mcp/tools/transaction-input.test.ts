@@ -1,26 +1,65 @@
 import { describe, expect, it } from 'vitest';
+import type { ApiKeyPrincipal } from '$lib/server/api/principal';
+import type { MemberListItem } from '$lib/server/members';
+import { toMemberView } from '../view';
 import {
 	McpTransactionArgumentError,
 	mcpTransactionArguments,
-	toTransactionInput
+	toTransactionInput,
+	type McpTransactionContext
 } from './transaction-input';
 
-const context = {
-	type: 'spending' as const,
+const principal: ApiKeyPrincipal = {
+	keyId: 'key_1',
+	name: 'test key',
+	userId: 'user_a',
+	permissions: null
+};
+
+/**
+ * A roster whose names exercise the normalization rule the uniqueness index uses:
+ * `Ann` is padded and mixed-case in the arguments below, `Céline` is composed, and
+ * `Gone` is DEACTIVATED — a name that exists but may not take part in a new write.
+ */
+const ROSTER: MemberListItem[] = [
+	{ id: 'mem_a', displayName: 'Ann', userId: 'user_a', deactivatedAt: null, isLinked: true },
+	{ id: 'mem_b', displayName: 'Bob', userId: 'user_b', deactivatedAt: null, isLinked: true },
+	{ id: 'mem_c', displayName: 'Céline', userId: 'user_c', deactivatedAt: null, isLinked: true },
+	{
+		id: 'mem_gone',
+		displayName: 'Gone',
+		userId: null,
+		deactivatedAt: '2026-06-01T00:00:00.000Z',
+		isLinked: false
+	}
+];
+
+const members = ROSTER.map((m) => toMemberView(m, principal));
+
+const context: McpTransactionContext = {
+	type: 'spending',
 	title: 'Dinner',
 	date: '2026-07-20',
 	categoryId: 'spending-other',
-	currency: 'THB' as const,
-	payerId: 'mem_a',
-	memberIds: ['mem_a', 'mem_b', 'mem_c']
+	currency: 'THB',
+	payer: { kind: 'name', memberName: 'Ann' },
+	members
 };
+
+/** Run the adapter expecting it to reject, and return the collected issues. */
+function issuesFor(args: unknown, overriddenContext: McpTransactionContext = context) {
+	try {
+		toTransactionInput(args, overriddenContext);
+		throw new Error('Expected adapter validation to fail.');
+	} catch (error) {
+		expect(error).toBeInstanceOf(McpTransactionArgumentError);
+		return (error as McpTransactionArgumentError).issues;
+	}
+}
 
 describe('MCP transaction argument contract', () => {
 	it('preserves the legacy equal-split shape', () => {
-		const input = toTransactionInput(
-			{ amount: '240.00', splitBetween: ['mem_a', 'mem_b'] },
-			context
-		);
+		const input = toTransactionInput({ amount: '240.00', splitBetween: ['Ann', 'Bob'] }, context);
 
 		expect(input).toMatchObject({
 			amountTotal: 24_000,
@@ -40,8 +79,8 @@ describe('MCP transaction argument contract', () => {
 				splitMode: 'amount',
 				amount: '10.00',
 				beneficiaries: [
-					{ memberId: 'mem_a', amount: '4.25' },
-					{ memberId: 'mem_b', amount: '5.75' }
+					{ memberName: 'Ann', amount: '4.25' },
+					{ memberName: 'Bob', amount: '5.75' }
 				]
 			},
 			context
@@ -59,8 +98,8 @@ describe('MCP transaction argument contract', () => {
 				splitMode: 'share',
 				amount: '10.00',
 				beneficiaries: [
-					{ memberId: 'mem_a', shareWeight: 0 },
-					{ memberId: 'mem_b', shareWeight: 3 }
+					{ memberName: 'Ann', shareWeight: 0 },
+					{ memberName: 'Bob', shareWeight: 3 }
 				]
 			},
 			context
@@ -75,8 +114,8 @@ describe('MCP transaction argument contract', () => {
 				splitMode: 'share',
 				amount: '10.00',
 				beneficiaries: [
-					{ memberId: 'mem_a', shareWeight: 0 },
-					{ memberId: 'mem_b', shareWeight: 0 }
+					{ memberName: 'Ann', shareWeight: 0 },
+					{ memberName: 'Bob', shareWeight: 0 }
 				]
 			}).success
 		).toBe(false);
@@ -92,8 +131,8 @@ describe('MCP transaction argument contract', () => {
 						amount: '100.00',
 						splitMode: 'amount',
 						beneficiaries: [
-							{ memberId: 'mem_a', amount: '60.00' },
-							{ memberId: 'mem_b', amount: '40.00' }
+							{ memberName: 'Ann', amount: '60.00' },
+							{ memberName: 'Bob', amount: '40.00' }
 						]
 					},
 					{
@@ -101,8 +140,8 @@ describe('MCP transaction argument contract', () => {
 						amount: '50.00',
 						splitMode: 'share',
 						beneficiaries: [
-							{ memberId: 'mem_a', shareWeight: 1 },
-							{ memberId: 'mem_c', shareWeight: 2 }
+							{ memberName: 'Ann', shareWeight: 1 },
+							{ memberName: 'Céline', shareWeight: 2 }
 						]
 					}
 				],
@@ -116,6 +155,11 @@ describe('MCP transaction argument contract', () => {
 
 		expect(input.amountTotal).toBe(16_000);
 		expect(input.payers).toEqual([{ memberId: 'mem_a', amountPaid: 16_000 }]);
+		// Every nested item beneficiary resolved to its own member, in order.
+		expect(input.items.map((item) => item.beneficiaries.map((row) => row.memberId))).toEqual([
+			['mem_a', 'mem_b'],
+			['mem_a', 'mem_c']
+		]);
 		expect(input.charges).toEqual([
 			{
 				kind: 'service',
@@ -142,7 +186,7 @@ describe('MCP transaction argument contract', () => {
 					label: 'Food',
 					amount: '10.00',
 					splitMode: 'equal' as const,
-					beneficiaries: [{ memberId: 'mem_a' }]
+					beneficiaries: [{ memberName: 'Ann' }]
 				}
 			],
 			charges: [
@@ -161,12 +205,12 @@ describe('MCP transaction argument contract', () => {
 	});
 
 	it('rejects currency overprecision at the MCP field path', () => {
-		expect(() => toTransactionInput({ amount: '1.001', splitBetween: ['mem_a'] }, context)).toThrow(
+		expect(() => toTransactionInput({ amount: '1.001', splitBetween: ['Ann'] }, context)).toThrow(
 			McpTransactionArgumentError
 		);
 
 		try {
-			toTransactionInput({ amount: '1.001', splitBetween: ['mem_a'] }, context);
+			toTransactionInput({ amount: '1.001', splitBetween: ['Ann'] }, context);
 		} catch (error) {
 			expect((error as McpTransactionArgumentError).issues[0].path).toEqual(['amount']);
 			expect((error as Error).message).toMatch(/decimal places/i);
@@ -183,7 +227,7 @@ describe('MCP transaction argument contract', () => {
 						label: 'Food',
 						amount: '10.00',
 						splitMode: 'equal',
-						beneficiaries: [{ memberId: 'mem_a' }]
+						beneficiaries: [{ memberName: 'Ann' }]
 					}
 				],
 				charges: [
@@ -199,47 +243,106 @@ describe('MCP transaction argument contract', () => {
 		).toBe(false);
 	});
 
-	it('reports membership failures only in MCP wire vocabulary', () => {
-		const issuesFor = (args: unknown, overriddenContext = context) => {
-			try {
-				toTransactionInput(args, overriddenContext);
-				throw new Error('Expected adapter validation to fail.');
-			} catch (error) {
-				expect(error).toBeInstanceOf(McpTransactionArgumentError);
-				return (error as McpTransactionArgumentError).issues;
-			}
-		};
+	// ── NAME RESOLUTION (ADR-0015) ────────────────────────────────────────────
 
-		expect(
-			issuesFor(
-				{ amount: '1.00', splitBetween: ['mem_a'] },
-				{ ...context, payerId: 'mem_unknown' }
-			)[0].path
-		).toEqual(['paidBy']);
-		expect(issuesFor({ amount: '1.00', splitBetween: ['mem_unknown'] })[0].path).toEqual([
-			'splitBetween',
-			0
-		]);
-		expect(
-			issuesFor({
+	describe('resolving member names', () => {
+		it('matches a name the way the uniqueness index does: normalized, exact, whole-string', () => {
+			// Padding and case fold away (`normalizeDisplayName`: NFC → trim → lowercase),
+			// and a DECOMPOSED `Céline` matches the composed roster entry.
+			const input = toTransactionInput(
+				{ amount: '3.00', splitBetween: ['  aNN  ', 'BOB', 'Céline'] },
+				context
+			);
+
+			expect(input.beneficiaries).toEqual([
+				{ memberId: 'mem_a' },
+				{ memberId: 'mem_b' },
+				{ memberId: 'mem_c' }
+			]);
+		});
+
+		it('never matches a PREFIX — that is `similar-names.ts`’s job, not the money path’s', () => {
+			// `Ann` is a real member; `An` is nobody, and a resolver that guessed would be
+			// making exactly the wrong-but-valid pick ADR-0015 refuses to make server-side.
+			const issues = issuesFor({ amount: '1.00', splitBetween: ['An'] });
+
+			expect(issues[0].path).toEqual(['splitBetween', 0]);
+			expect(issues[0].message).toMatch(/No active member of this group is named "An"/);
+		});
+
+		it('rejects a member ID passed where a name belongs — it is no longer accepted at all', () => {
+			// The pre-ADR-0015 wire. It matches no display name, so it is an ordinary,
+			// self-correctable validation issue rather than a silently accepted reference.
+			const issues = issuesFor({ amount: '1.00', splitBetween: ['mem_b'] });
+
+			expect(issues).toHaveLength(1);
+			expect(issues[0].path).toEqual(['splitBetween', 0]);
+			expect(issues[0].message).toMatch(/mem_b/);
+			expect(issues[0].message).toMatch(/list_members/);
+		});
+
+		it('names a DEACTIVATED member as removed, not as a name nobody has', () => {
+			const issues = issuesFor({
 				splitMode: 'share',
 				amount: '1.00',
-				beneficiaries: [{ memberId: 'mem_unknown', shareWeight: 1 }]
-			})[0].path
-		).toEqual(['beneficiaries', 0, 'memberId']);
-		expect(
-			issuesFor({
-				splitMode: 'itemized',
-				items: [
-					{
-						label: 'Food',
-						amount: '1.00',
-						splitMode: 'equal',
-						beneficiaries: [{ memberId: 'mem_unknown' }]
-					}
-				]
-			})[0].path
-		).toEqual(['items', 0, 'beneficiaries', 0, 'memberId']);
+				beneficiaries: [{ memberName: 'Gone', shareWeight: 1 }]
+			});
+
+			expect(issues[0].path).toEqual(['beneficiaries', 0, 'memberName']);
+			expect(issues[0].message).toMatch(/removed from this group/);
+		});
+
+		it('reports EVERY unresolvable name at once, at its exact MCP argument path', () => {
+			// Batched deliberately: one round trip must tell the agent about all of them, or
+			// a four-name typo costs four corrections.
+			const issues = issuesFor(
+				{ amount: '1.00', splitBetween: ['Ann', 'Nobody', 'Gone'] },
+				{ ...context, payer: { kind: 'name', memberName: 'Ghost' } }
+			);
+
+			expect(issues.map((issue) => issue.path)).toEqual([
+				['paidBy'],
+				['splitBetween', 1],
+				['splitBetween', 2]
+			]);
+		});
+
+		it('reports an unresolvable itemized beneficiary at its nested path', () => {
+			expect(
+				issuesFor({
+					splitMode: 'itemized',
+					items: [
+						{
+							label: 'Food',
+							amount: '1.00',
+							splitMode: 'equal',
+							beneficiaries: [{ memberName: 'Nobody' }]
+						}
+					]
+				})[0].path
+			).toEqual(['items', 0, 'beneficiaries', 0, 'memberName']);
+		});
+
+		it('reports a DEFAULTED payer who is no longer active under `paidBy`', () => {
+			// The tools default `paidBy` to an id they already hold (the caller on a create,
+			// the recorded payer on an update) — which the group may since have removed.
+			const issues = issuesFor(
+				{ amount: '1.00', splitBetween: ['Ann'] },
+				{ ...context, payer: { kind: 'default', memberId: 'mem_gone' } }
+			);
+
+			expect(issues[0].path).toEqual(['paidBy']);
+			expect(issues[0].message).toMatch(/Pass an explicit `paidBy` name/);
+		});
+
+		it('accepts a DEFAULTED payer that is an active member, without matching any name', () => {
+			const input = toTransactionInput(
+				{ amount: '1.00', splitBetween: ['Ann'] },
+				{ ...context, payer: { kind: 'default', memberId: 'mem_b' } }
+			);
+
+			expect(input.payers).toEqual([{ memberId: 'mem_b', amountPaid: 100 }]);
+		});
 	});
 
 	it('remaps invalid direct and server-derived totals to MCP amount/charge paths', () => {
@@ -253,7 +356,7 @@ describe('MCP transaction argument contract', () => {
 			}
 		};
 
-		const zero = capture({ amount: '0.00', splitBetween: ['mem_a'] });
+		const zero = capture({ amount: '0.00', splitBetween: ['Ann'] });
 		expect(zero.issues.map((issue) => issue.path)).toContainEqual(['amount']);
 		expect(zero.issues.flatMap((issue) => issue.path)).not.toContain('amountTotal');
 
@@ -264,7 +367,7 @@ describe('MCP transaction argument contract', () => {
 					label: 'Food',
 					amount: '10.00',
 					splitMode: 'equal',
-					beneficiaries: [{ memberId: 'mem_a' }]
+					beneficiaries: [{ memberName: 'Ann' }]
 				}
 			],
 			charges: [{ kind: 'discount', mode: 'absolute', amount: '10.01', base: 'running_total' }]

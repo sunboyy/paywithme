@@ -398,6 +398,12 @@ describe('toTransactionView — identity, deletion, and steering', () => {
 			{ kind: 'discount', mode: 'absolute', amount: '1.00', base: 'running_total' }
 		]);
 
+		// The `editable` object is meant to be copied VERBATIM into `update_transaction`
+		// (ADR-0011). Since ADR-0015 the write side takes member NAMES, so the copy needs
+		// one translation step here — the read view still emits `memberId`. Removing that
+		// step (`editable`'s member fields become names) is issue #79's job, deliberately
+		// not #78's: this test names the gap rather than pretending it closed.
+		const nameOf = (memberId: string) => members.find((m) => m.id === memberId)!.displayName.value;
 		const roundTripped = toTransactionInput(
 			{
 				splitMode: view.splitMode,
@@ -405,7 +411,10 @@ describe('toTransactionView — identity, deletion, and steering', () => {
 					label: item.label.value,
 					amount: item.amount,
 					splitMode: item.splitMode,
-					beneficiaries: item.beneficiaries
+					beneficiaries: item.beneficiaries.map(({ memberId, ...rest }) => ({
+						memberName: nameOf(memberId),
+						...rest
+					}))
 				})),
 				charges: view.charges
 			},
@@ -419,8 +428,8 @@ describe('toTransactionView — identity, deletion, and steering', () => {
 				// decision 7) and `mcpTransactionArguments` re-validates it against the
 				// seeded enum. This fixture's entry currency is the seeded 'THB'.
 				currency: view.currency as SeededCurrencyCode,
-				payerId: view.paidBy!,
-				memberIds: ['mem_me', 'mem_mal']
+				payer: { kind: 'name', memberName: nameOf(view.paidBy!) },
+				members
 			}
 		);
 		expect(roundTripped.items[0].beneficiaries).toEqual([

@@ -84,6 +84,18 @@ const ROSTER: MemberListItem[] = [
 	{ id: 'mem_bob', displayName: 'Bob', userId: 'user_bob', deactivatedAt: null, isLinked: true }
 ];
 
+/**
+ * A member REMOVED from the group (§6.3) — added only by the tests about what a name
+ * resolves to. Still in the ledger and still owed, but never a party to a NEW write.
+ */
+const GONE: MemberListItem = {
+	id: 'mem_gone',
+	displayName: 'Gone',
+	userId: null,
+	deactivatedAt: '2026-07-05T00:00:00.000Z',
+	isLinked: false
+};
+
 /** The second "Nan" — added only by the tests that are about the disambiguation. */
 const OTHER_NAN: MemberListItem = {
 	id: 'mem_nanthawat',
@@ -194,12 +206,13 @@ describe('settle_up — the tool declaration', () => {
 		});
 	});
 
-	it('tells the model that `from` defaults to it, and that ids are not names (ADR-0006)', () => {
+	it('tells the model that `from` defaults to it, and that names are not ids (ADR-0015)', () => {
 		const description = settleUpTool.definition.description;
-		expect(description).toMatch(/IDS ONLY, NEVER NAMES/);
+		expect(description).toMatch(/NAMES, NOT IDS/);
 		expect(description).toMatch(/defaults to you/i);
-		// The wrong-payee risk is stated where the model reads, not only in an ADR.
-		expect(description).toMatch(/similar names/i);
+		// The wrong-payee risk is stated where the model reads, not only in an ADR: a
+		// SHORTHAND for one of two full names is still ambiguous, and the model must ask.
+		expect(description).toMatch(/ASK which\s+one/i);
 	});
 
 	it('takes `to` and `amount`, but never a `from` it could be forced to guess', () => {
@@ -213,7 +226,12 @@ describe('settle_up — the tool declaration', () => {
 describe('settle_up — the argument schema', () => {
 	it('rejects a hallucinated argument rather than ignoring it (strictObject)', () => {
 		expect(() =>
-			settleUpTool.args.parse({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200', payee: 'Nan' })
+			settleUpTool.args.parse({
+				groupId: GROUP_ID,
+				to: 'Nan Suphaporn',
+				amount: '1200',
+				payee: 'Nan'
+			})
 		).toThrow();
 	});
 
@@ -224,7 +242,7 @@ describe('settle_up — the argument schema', () => {
 	it('rejects a non-decimal amount at the gate (ADR-0004)', () => {
 		for (const amount of ['-5', '1,200', '฿1200', 'abc', '1200.00000']) {
 			expect(
-				() => settleUpTool.args.parse({ groupId: GROUP_ID, to: 'mem_nan', amount }),
+				() => settleUpTool.args.parse({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount }),
 				amount
 			).toThrow();
 		}
@@ -233,7 +251,7 @@ describe('settle_up — the argument schema', () => {
 	it('accepts the decimal strings a model actually emits', () => {
 		for (const amount of ['1200', '1200.00', '1234.5', '0.01']) {
 			expect(
-				() => settleUpTool.args.parse({ groupId: GROUP_ID, to: 'mem_nan', amount }),
+				() => settleUpTool.args.parse({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount }),
 				amount
 			).not.toThrow();
 		}
@@ -244,7 +262,7 @@ describe('settle_up — the argument schema', () => {
 
 describe('settle_up — who paid', () => {
 	it('DEFAULTS `from` to the caller’s own member — the agent never picks the payer', async () => {
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		// `mem_me` is the member linked to the KEY's owner (`isYou`, server-derived). The
 		// common case — "I paid Nan back" — therefore cannot pick the wrong payer.
@@ -252,7 +270,7 @@ describe('settle_up — who paid', () => {
 	});
 
 	it('accepts an EXPLICIT `from`: recording that A paid B is a real flow', async () => {
-		await run({ groupId: GROUP_ID, from: 'mem_bob', to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, from: 'Bob', to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(inputPassed().payers).toEqual([{ memberId: 'mem_bob', amountPaid: 120000 }]);
 	});
@@ -262,7 +280,7 @@ describe('settle_up — who paid', () => {
 		const bobsKey: ApiKeyPrincipal = { ...principal, userId: 'user_bob' };
 		await settleUpTool.run(
 			{ principal: bobsKey },
-			settleUpTool.args.parse({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' })
+			settleUpTool.args.parse({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' })
 		);
 
 		expect(inputPassed().payers).toEqual([{ memberId: 'mem_bob', amountPaid: 120000 }]);
@@ -272,7 +290,7 @@ describe('settle_up — who paid', () => {
 		const stranger: ApiKeyPrincipal = { ...principal, userId: 'user_nobody' };
 		const result = await settleUpTool.run(
 			{ principal: stranger },
-			settleUpTool.args.parse({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' })
+			settleUpTool.args.parse({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' })
 		);
 
 		expect(result.isError).toBe(true);
@@ -283,9 +301,9 @@ describe('settle_up — who paid', () => {
 	});
 
 	it('refuses a SELF-settlement and says the default is why (nets to zero, phantom row)', async () => {
-		// The likely agent error: it omits `from` (so the payer is you) and passes YOUR id
-		// as `to`. `createTransaction` breaks no rule on this, so the tool must catch it.
-		const envelope = await runExpectingError({ groupId: GROUP_ID, to: 'mem_me', amount: '1200' });
+		// The likely agent error: it omits `from` (so the payer is you) and passes YOUR own
+		// name as `to`. `createTransaction` breaks no rule on this, so the tool must catch it.
+		const envelope = await runExpectingError({ groupId: GROUP_ID, to: 'Alice', amount: '1200' });
 
 		expect(envelope.code).toBe('validation_error');
 		expect(envelope.message).toMatch(/`from` defaults to YOUR own member/);
@@ -295,8 +313,111 @@ describe('settle_up — who paid', () => {
 	it('refuses an EXPLICIT self-settlement too, with the plainer message', async () => {
 		const envelope = await runExpectingError({
 			groupId: GROUP_ID,
+			from: 'Bob',
+			to: 'Bob',
+			amount: '1200'
+		});
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.message).toMatch(/must be different members/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+});
+
+// ── Member references are NAMES, resolved server-side (ADR-0015 / #78) ────
+//
+// This tool builds its §16.4 transfer by hand rather than through the shared
+// create/update adapter, so it owns its own two resolutions — and they must behave
+// exactly as the adapter's do, which is what these assert.
+
+describe('settle_up — naming the people', () => {
+	/** The full error envelope, including the `fieldErrors` an agent corrects against. */
+	async function envelopeFor(args: Record<string, unknown>) {
+		const result = await settleUpTool.run({ principal }, settleUpTool.args.parse(args));
+		expect(result.isError).toBe(true);
+		return JSON.parse(result.content[0].text).error as {
+			code: string;
+			message: string;
+			details?: { fieldErrors?: Record<string, string[]> };
+		};
+	}
+
+	it('resolves `to` and `from` DISPLAY NAMES to the member ids the ledger stores', async () => {
+		await run({ groupId: GROUP_ID, from: 'Bob', to: 'Nan Suphaporn', amount: '1200' });
+
+		expect(inputPassed().payers).toEqual([{ memberId: 'mem_bob', amountPaid: 120000 }]);
+		expect(inputPassed().beneficiaries).toEqual([{ memberId: 'mem_nan' }]);
+	});
+
+	it('matches by the SAME normalization the uniqueness index uses — trim and case', async () => {
+		await run({ groupId: GROUP_ID, to: '  nan suphaporn  ', amount: '1200' });
+
+		expect(inputPassed().beneficiaries).toEqual([{ memberId: 'mem_nan' }]);
+	});
+
+	it('never matches a PREFIX — an exact name or an error, never a guess between two Nans', async () => {
+		listMembers.mockResolvedValue([...ROSTER, OTHER_NAN]);
+
+		const envelope = await envelopeFor({ groupId: GROUP_ID, to: 'Nan', amount: '1200' });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.message).toMatch(/No active member of this group is named "Nan"/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('REFUSES a member id where a name belongs — the old wire is not dual-accepted', async () => {
+		// The pre-ADR-0015 payload. It must fail like any other unmatchable name: an
+		// ORDINARY `validation_error`, with no special path that could quietly accept it.
+		const envelope = await envelopeFor({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.message).toMatch(/No active member of this group is named "mem_nan"/);
+		expect(envelope.message).toMatch(/member names, not member ids/);
+		expect(envelope.details?.fieldErrors?.to?.[0]).toMatch(/No active member/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('refuses an id in `from` too, and reports it under `from`', async () => {
+		const envelope = await envelopeFor({
+			groupId: GROUP_ID,
 			from: 'mem_bob',
-			to: 'mem_bob',
+			to: 'Nan Suphaporn',
+			amount: '1200'
+		});
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.details?.fieldErrors?.from?.[0]).toMatch(/No active member/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('a name matching only a DEACTIVATED member says so — a different fix from a typo', async () => {
+		// Not "nobody is called that": re-reading `list_members` will never make this name
+		// work, because the person really is in the group's past (§6.3).
+		listMembers.mockResolvedValue([...ROSTER, GONE]);
+
+		const envelope = await envelopeFor({ groupId: GROUP_ID, to: 'Gone', amount: '1200' });
+
+		expect(envelope.code).toBe('validation_error');
+		expect(envelope.message).toMatch(/removed from this group/);
+		expect(envelope.details?.fieldErrors?.to?.[0]).toMatch(/removed from this group/);
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it('prefers the ACTIVE member when a deactivated one shares the name', async () => {
+		// A deactivated name is exempt from the uniqueness index, so it can legitimately be
+		// reused by an active member. The ACTIVE row must win.
+		listMembers.mockResolvedValue([...ROSTER, { ...GONE, displayName: 'Nan Suphaporn' }]);
+
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
+
+		expect(inputPassed().beneficiaries).toEqual([{ memberId: 'mem_nan' }]);
+	});
+
+	it('catches a self-settlement written as two SPELLINGS of one name (ids are compared)', async () => {
+		const envelope = await envelopeFor({
+			groupId: GROUP_ID,
+			from: 'Bob',
+			to: '  bob ',
 			amount: '1200'
 		});
 
@@ -310,7 +431,7 @@ describe('settle_up — who paid', () => {
 
 describe('settle_up — the transaction it records', () => {
 	it('builds the single-payer / single-beneficiary Transfer of §16.4 — no new domain logic', async () => {
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(inputPassed()).toEqual({
 			type: 'transfer',
@@ -331,7 +452,7 @@ describe('settle_up — the transaction it records', () => {
 	});
 
 	it('does the exponent math SERVER-SIDE from the group’s settlement currency (ADR-0004)', async () => {
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 		// THB exponent 2: "1200" is ฿1,200.00 = 120000 minor units. The model never
 		// multiplies by 100, and the currency is GROUP CONTEXT — never from the payload.
 		expect(inputPassed().amountTotal).toBe(120000);
@@ -348,7 +469,7 @@ describe('settle_up — the transaction it records', () => {
 			deletedAt: null
 		});
 
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(inputPassed().amountTotal).toBe(1200);
 	});
@@ -356,7 +477,7 @@ describe('settle_up — the transaction it records', () => {
 	it('OVER-PRECISION is a hard validation_error, never a silent round ("1200.005" in THB)', async () => {
 		const envelope = await runExpectingError({
 			groupId: GROUP_ID,
-			to: 'mem_nan',
+			to: 'Nan Suphaporn',
 			amount: '1200.005'
 		});
 
@@ -379,7 +500,7 @@ describe('settle_up — the transaction it records', () => {
 
 		const envelope = await runExpectingError({
 			groupId: GROUP_ID,
-			to: 'mem_nan',
+			to: 'Nan Suphaporn',
 			amount: '1200.50'
 		});
 
@@ -388,7 +509,7 @@ describe('settle_up — the transaction it records', () => {
 	});
 
 	it('carries the key’s `viaKey` provenance so the audit row is attributable (§12.1 / §16.2)', async () => {
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		// We never write audit ourselves — `createTransaction` does, in the SAME DB
 		// transaction as the insert. All we owe it is the provenance.
@@ -407,7 +528,7 @@ describe('settle_up — the transaction it records', () => {
 		await expect(
 			settleUpTool.run(
 				{ principal },
-				settleUpTool.args.parse({ groupId: 'grp_theirs', to: 'mem_nan', amount: '1200' })
+				settleUpTool.args.parse({ groupId: 'grp_theirs', to: 'Nan Suphaporn', amount: '1200' })
 			)
 		).rejects.toThrow();
 		expect(createTransaction).not.toHaveBeenCalled();
@@ -418,7 +539,7 @@ describe('settle_up — the transaction it records', () => {
 
 describe('settle_up — the echo-back', () => {
 	it('NAMES THE PAYEE IN FULL, with the money as a decimal string', async () => {
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(payload.echo).toBe(
 			'Recorded settle-up: you → Nan Suphaporn, THB 1200.00 (120000 minor units).'
@@ -431,7 +552,7 @@ describe('settle_up — the echo-back', () => {
 		// The ADR's example, end to end through the tool: the roster holds a second Nan.
 		listMembers.mockResolvedValue([...ROSTER, OTHER_NAN]);
 
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(payload.echo).toContain(
 			'(The other similarly-named member in this group is Nanthawat P. — not involved in this settle-up.)'
@@ -461,7 +582,7 @@ describe('settle_up — the echo-back', () => {
 			}
 		]);
 
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_alicia', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Alicia', amount: '1200' });
 
 		expect(payload.similarNames).toEqual([]);
 		expect(payload.echo).toBe(
@@ -470,7 +591,7 @@ describe('settle_up — the echo-back', () => {
 	});
 
 	it('ships the WRAPPED structured view alongside the prose (ADR-0003 holds on a write)', async () => {
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 		const recorded = payload.recorded as unknown as {
 			type: string;
 			shares: { memberId: string; displayName: { _untrusted: boolean; value: string } }[];
@@ -494,7 +615,9 @@ describe('settle_up — the echo-back', () => {
 			...ROSTER.slice(2)
 		]);
 
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		// The name is also the WIRE REFERENCE now (ADR-0015), so the injected text is what
+		// the agent must pass — resolution matches it exactly, payload and all.
+		const payload = await run({ groupId: GROUP_ID, to: attack, amount: '1200' });
 		const recorded = payload.recorded as unknown as {
 			shares: { displayName: { _untrusted: boolean; value: string } }[];
 		};
@@ -513,7 +636,7 @@ describe('settle_up — the echo-back', () => {
 
 describe('settle_up — the server-derived idempotency window', () => {
 	it('derives the key under its OWN tool name, from the RAW arguments', async () => {
-		await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(withDerivedIdempotency).toHaveBeenCalledOnce();
 		expect(withDerivedIdempotency.mock.calls[0][0]).toMatchObject({
@@ -525,12 +648,12 @@ describe('settle_up — the server-derived idempotency window', () => {
 			// The RAW arguments, not the resolved ones: the question is "did the model
 			// already send me exactly this?". Resolving `from` first would make an explicit
 			// `from` collide with an omitted one.
-			args: { groupId: GROUP_ID, to: 'mem_nan', from: undefined, amount: '1200' }
+			args: { groupId: GROUP_ID, to: 'Nan Suphaporn', from: undefined, amount: '1200' }
 		});
 	});
 
 	it('the ordinary path reports `replayed: false`', async () => {
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(payload.replayed).toBe(false);
 		expect(payload.echo).not.toMatch(/already recorded/i);
@@ -542,7 +665,7 @@ describe('settle_up — the server-derived idempotency window', () => {
 			replayedAfterMs: 3000
 		}));
 
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(payload.replayed).toBe(true);
 		expect(payload.recordedAgoSeconds).toBe(3);
@@ -559,7 +682,7 @@ describe('settle_up — the server-derived idempotency window', () => {
 			replayedAfterMs: 3000
 		}));
 
-		const payload = await run({ groupId: GROUP_ID, to: 'mem_nan', amount: '1200' });
+		const payload = await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
 
 		expect(payload.echo).toContain('Nanthawat P. — not involved');
 		expect(payload.similarNames).toHaveLength(1);

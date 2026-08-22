@@ -5,23 +5,39 @@ export const MONEY_PROPERTY = {
 	description: 'A non-negative decimal-string amount in the settlement currency.'
 } as const;
 
-export const MEMBER_ID_PROPERTY = { type: 'string', minLength: 1 } as const;
+/**
+ * How every write tool names a person (ADR-0015): the member's DISPLAY NAME, which is
+ * unique among a group's active members, and which the server resolves itself by an
+ * exact normalized match. Never a member id — an id in this field matches no name and
+ * is a plain `validation_error`.
+ */
+export const MEMBER_NAME_PROPERTY = {
+	type: 'string',
+	minLength: 1,
+	description:
+		'A member DISPLAY NAME, copied exactly from `list_members` (the `displayName.value` ' +
+		'string). Not a member id. The server matches it exactly against the active members ' +
+		'of this group and rejects a name that matches none.'
+} as const;
 const equalBeneficiary = {
 	type: 'object',
-	properties: { memberId: MEMBER_ID_PROPERTY },
-	required: ['memberId'],
+	properties: { memberName: MEMBER_NAME_PROPERTY },
+	required: ['memberName'],
 	additionalProperties: false
 } as const;
 export const AMOUNT_BENEFICIARY_PROPERTY = {
 	type: 'object',
-	properties: { memberId: MEMBER_ID_PROPERTY, amount: MONEY_PROPERTY },
-	required: ['memberId', 'amount'],
+	properties: { memberName: MEMBER_NAME_PROPERTY, amount: MONEY_PROPERTY },
+	required: ['memberName', 'amount'],
 	additionalProperties: false
 } as const;
 export const SHARE_BENEFICIARY_PROPERTY = {
 	type: 'object',
-	properties: { memberId: MEMBER_ID_PROPERTY, shareWeight: { type: 'integer', minimum: 0 } },
-	required: ['memberId', 'shareWeight'],
+	properties: {
+		memberName: MEMBER_NAME_PROPERTY,
+		shareWeight: { type: 'integer', minimum: 0 }
+	},
+	required: ['memberName', 'shareWeight'],
 	additionalProperties: false
 } as const;
 const beneficiaryArray = (
