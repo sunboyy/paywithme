@@ -444,6 +444,23 @@ describe('update_transaction — the transaction it writes', () => {
 		});
 	});
 
+	it('passes the FULL roster snapshot for `updateTransaction` to re-verify (PR #80 review)', async () => {
+		// See the identical test on `create-transaction.test.ts`: the id a NAME resolved
+		// to (`paidBy`, `splitBetween`) and the id a DEFAULT carries (the existing payer)
+		// are indistinguishable by the time `input` is built, so the whole roster this
+		// call saw is handed over; `transactions.ts` only checks the ids it references.
+		await run(CORRECT_THE_AMOUNT);
+
+		expect(updateTransaction.mock.calls[0][0].expectedMemberNames).toEqual(
+			new Map([
+				['mem_me', 'Alice'],
+				['mem_nan', 'Nan Suphaporn'],
+				['mem_bob', 'Bob'],
+				['mem_gone', 'Gone']
+			])
+		);
+	});
+
 	it('a currency other than the group settlement currency is refused (FX deferred)', async () => {
 		const envelope = await runExpectingError({ ...CORRECT_THE_AMOUNT, currency: 'JPY' });
 

@@ -125,6 +125,18 @@ export function resolveMemberByName(members: readonly MemberView[], name: string
 }
 
 /**
+ * A snapshot of `id → current display name`, for a write tool to hand `createTransaction`
+ * / `updateTransaction` as `expectedMemberNames` (PR #80 review). `resolveMemberByName`
+ * runs against this SAME roster, outside the write's own DB transaction; passing the
+ * snapshot along lets the write re-verify, LOCKED inside that transaction, that a
+ * resolved id hasn't been renamed out from under the request before it commits — the
+ * member-identity analogue of `expectedDisplayCode`.
+ */
+export function memberNameSnapshot(members: readonly MemberView[]): ReadonlyMap<string, string> {
+	return new Map(members.map((m) => [m.id, m.displayName.value]));
+}
+
+/**
  * Resolve a member NAME for a READ-SIDE FILTER — `list_transactions`' `memberName`
  * (ADR-0015). Returns the one member's id, or `null` when the name identifies no
  * single member. PURE.

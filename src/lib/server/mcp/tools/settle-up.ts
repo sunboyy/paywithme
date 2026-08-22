@@ -66,6 +66,7 @@ import {
 	buildReplayEchoBack,
 	buildSettleUpEchoBack,
 	memberNameIssueMessage,
+	memberNameSnapshot,
 	resolveMemberByName,
 	selfMemberId,
 	similarlyNamedMembers,
@@ -245,6 +246,21 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		}
 		const payeeId = payee.id;
 
+		// The snapshot every NAME-RESOLVED id below is checked against, LOCKED inside
+		// `createTransaction`'s own write transaction (`expectedMemberNames`, PR #80
+		// review) — closing the gap between resolving here and committing there, where a
+		// rename could otherwise hand the write an id that is still active but no longer
+		// the person `to` / `from` named. Built once, from the same roster both resolved
+		// against; entries are added below only for ids that came from a NAME (never the
+		// `from` default), since a default was never a claim about who the name meant.
+		const rosterSnapshot = memberNameSnapshot(members);
+		const expectedMemberNames = new Map<string, string>();
+		const expectMember = (memberId: string) => {
+			const name = rosterSnapshot.get(memberId);
+			if (name !== undefined) expectedMemberNames.set(memberId, name);
+		};
+		expectMember(payeeId);
+
 		// ── The DEFAULT PAYER (ADR-0006) ───────────────────────────────────────────
 		// The overwhelmingly common case — "I paid Nan back" — cannot pick the wrong
 		// payer, because the agent does not pick it: it is the key owner's own member,
@@ -269,6 +285,7 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 				return toolError('validation_error', message, { fieldErrors: { from: [message] } });
 			}
 			payerId = payer.id;
+			expectMember(payerId);
 		}
 
 		// A self-settlement is meaningless: it nets to zero and puts a phantom payment on
@@ -354,6 +371,7 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 					groupId,
 					input,
 					settlementCurrency,
+					expectedMemberNames,
 					via: auditVia(principal)
 				});
 

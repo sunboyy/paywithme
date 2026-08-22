@@ -40,7 +40,8 @@ export {
 	selfMemberId,
 	resolveMemberByName,
 	resolveMemberNameForFilter,
-	memberNameIssueMessage
+	memberNameIssueMessage,
+	memberNameSnapshot
 } from './member';
 export {
 	type BalanceDirection,

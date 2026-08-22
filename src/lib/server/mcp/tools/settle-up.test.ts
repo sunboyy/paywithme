@@ -526,6 +526,27 @@ describe('settle_up — the transaction it records', () => {
 		});
 	});
 
+	it('passes the NAME-RESOLVED payee for `createTransaction` to re-verify (PR #80 review)', async () => {
+		// `from` is DEFAULTED here (never a name), so only the payee — resolved from `to`
+		// — is a claim about who a name meant.
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
+
+		expect(createTransaction.mock.calls[0][0].expectedMemberNames).toEqual(
+			new Map([['mem_nan', 'Nan Suphaporn']])
+		);
+	});
+
+	it('also snapshots an EXPLICIT `from`, since that too is a name the caller resolved', async () => {
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', from: 'Bob', amount: '1200' });
+
+		expect(createTransaction.mock.calls[0][0].expectedMemberNames).toEqual(
+			new Map([
+				['mem_nan', 'Nan Suphaporn'],
+				['mem_bob', 'Bob']
+			])
+		);
+	});
+
 	it('a group the caller cannot see THROWS the conflated not_found — no existence oracle', async () => {
 		// `loadGroupView` turns `null` into `GroupAccessError`, which the dispatcher maps.
 		// Absent / deleted / not-yours are ONE outcome (§16.5).

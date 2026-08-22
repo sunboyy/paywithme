@@ -16,11 +16,18 @@ import { GroupAccessError } from '$lib/server/groups';
 import { scopeToPermissions } from '$lib/server/api/scope';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 
-const { listGroupsForUser, consumeRateLimit, loadGroupView, loadMemberViews } = vi.hoisted(() => ({
+const {
+	listGroupsForUser,
+	consumeRateLimit,
+	loadGroupView,
+	loadMemberViews,
+	peekIdempotentReplay
+} = vi.hoisted(() => ({
 	listGroupsForUser: vi.fn(),
 	consumeRateLimit: vi.fn(),
 	loadGroupView: vi.fn(),
-	loadMemberViews: vi.fn()
+	loadMemberViews: vi.fn(),
+	peekIdempotentReplay: vi.fn()
 }));
 
 vi.mock('$lib/server/groups', async (importOriginal) => ({
@@ -32,6 +39,19 @@ vi.mock('$lib/server/api/rate-limit', async (importOriginal) => ({
 	consumeRateLimit
 }));
 vi.mock('./tools/load', () => ({ loadGroupView, loadMemberViews }));
+// `create_transaction` / `settle_up` PEEK the idempotency store on RAW arguments before
+// any name/roster validation (ADR-0015, PR #80 review) — real tools run through
+// `dispatchToolCall` here, so without this mock that peek would hit a real DB
+// connection this suite never provisions. Every test below reaches it as a MISS
+// (`null`), so validation and roster-dependent errors surface exactly as before.
+vi.mock('./idempotency', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./idempotency')>()),
+	peekIdempotentReplay
+}));
+vi.mock('$lib/server/api/idempotency', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/server/api/idempotency')>()),
+	createDbIdempotencyStore: () => ({}) as never
+}));
 
 // Imported AFTER the mocks are registered.
 import { MCP_TOOLS, dispatchToolCall, filterToolsByScope, findTool, registerTool } from './tools';
@@ -97,6 +117,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	consumeRateLimit.mockResolvedValue(allowed);
 	probeSpy.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
+	peekIdempotentReplay.mockResolvedValue(null);
 });
 
 describe('the shipped registry (#28 + #29)', () => {
