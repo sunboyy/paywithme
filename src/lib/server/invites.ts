@@ -44,6 +44,7 @@ import { db } from './db';
 import { isUniqueViolation } from './db/pg-errors';
 import { groups, invites, members } from './db/groups-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
+import { displayNameValues } from './member-name';
 import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
@@ -513,7 +514,8 @@ export async function acceptInvite({
 		try {
 			const [created] = await tx
 				.insert(members)
-				.values({ groupId: invite.groupId, userId, displayName: userName })
+				// `displayNameValues` writes the name AND its canonical key (ADR-0015).
+				.values({ groupId: invite.groupId, userId, ...displayNameValues(userName) })
 				.returning({ id: members.id });
 
 			// Audit row — IN THE SAME TRANSACTION (PLAN §12.1). New member created +
@@ -532,6 +534,14 @@ export async function acceptInvite({
 		} catch (e) {
 			// Race backstop: the partial unique index `(group_id, user_id)` rejects a
 			// concurrent second link for the same user → friendly `already_member`.
+			//
+			// KNOWN GAP, owned by issue #79: `members_group_id_normalized_display_name_unique`
+			// (ADR-0015) can now also fire here, when the joining user's account name
+			// already belongs to an active member — and this branch would mislabel that
+			// as `already_member`. ADR-0015 is explicit that a name coincidence must
+			// NEVER refuse a real person entry; the fix is #79's auto-suffix
+			// (`Nan (2)`, `Nan (3)`), which resolves the collision BEFORE the insert so
+			// this catch goes back to meaning only what it says.
 			if (isUniqueViolation(e)) {
 				return { status: 'already_member', groupId: invite.groupId };
 			}

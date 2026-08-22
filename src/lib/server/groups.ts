@@ -34,6 +34,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { groups, members } from './db/groups-schema';
 import { currencyCodeSchema } from '$lib/schemas/currency';
+import { displayNameValues } from './member-name';
 import { writeAuditLog } from './audit';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
@@ -190,7 +191,10 @@ export async function createGroup({
 		await tx.insert(members).values({
 			groupId: group.id,
 			userId,
-			displayName: userName
+			// `displayNameValues` writes the name AND its canonical key together — the
+			// key backs the active-member uniqueness index (ADR-0015). A brand-new group
+			// has exactly one member, so this insert can never trip it.
+			...displayNameValues(userName)
 		});
 
 		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).

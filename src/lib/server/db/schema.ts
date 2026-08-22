@@ -22,7 +22,11 @@
 //   - groups / members / invites (task 3.1) → re-exported from `groups-schema.ts`,
 //     hand-authored domain tables (PLAN §6, §9): groups (+ soft-delete), member
 //     slots (+ soft-deactivate, partial-unique one-member-per-user-per-group),
-//     and reusable 7-day invite links (+ revoke).
+//     and reusable 7-day invite links (+ revoke). Members also carry
+//     `normalized_display_name` — the app-computed NFC→trim→lowercase key behind a
+//     second partial unique index that keeps ACTIVE member names unique per group
+//     (ADR-0015); it is written by `displayNameValues()` in
+//     `src/lib/server/member-name.ts` and never rendered.
 //   - currencies (task 3.2, widened by issue #59) → re-exported from
 //     `currencies-schema.ts`, hand-authored (PLAN §7.5.1, §7.5.2): the 29 supported
 //     fiat currencies (code PK, name, exponent, symbol) PLUS group-defined custom
