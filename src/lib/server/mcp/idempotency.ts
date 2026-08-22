@@ -129,6 +129,125 @@ export interface DerivedIdempotencyOutcome {
 	replayedAfterMs: number | null;
 }
 
+/** What a single stored row means for the call looking at it right now. PURE. */
+type StoredRowVerdict =
+	| {
+			readonly kind: 'replay';
+			readonly response: IdempotentResponse;
+			readonly replayedAfterMs: number;
+	  }
+	| { readonly kind: 'in-progress' }
+	| { readonly kind: 'none' };
+
+/**
+ * Classify one loaded row (or its absence). Shared by both lookup call sites
+ * below so "what a completed/pending/missing row means" is written once.
+ *
+ * `gateByElapsedWindow` is true only for a PREVIOUS-bucket row: a bucket one
+ * window back can still hold something up to ~2 windows stale, so it only
+ * counts if it is ALSO within the window by wall-clock elapsed time (the header
+ * comment's "the clock decides" step). A CURRENT-bucket row needs no such gate —
+ * `bucket = floor(t / W)` already bounds every row in it to under one window old
+ * relative to any `at` that maps to the same bucket.
+ */
+function classifyStoredRow(
+	record: IdempotencyRecord | null,
+	at: Date,
+	gateByElapsedWindow: boolean
+): StoredRowVerdict {
+	if (!record) return { kind: 'none' };
+	if (
+		gateByElapsedWindow &&
+		at.getTime() - record.createdAt.getTime() > MCP_IDEMPOTENCY_WINDOW_MS
+	) {
+		// Deliberately ignored, not a fresher lookup: a previous-bucket row OLDER than
+		// the window is a genuinely repeated expense, and falling through records it.
+		return { kind: 'none' };
+	}
+	if (record.status === 'completed') {
+		return {
+			kind: 'replay',
+			response: { status: record.responseStatus ?? 200, body: record.responseBody },
+			// Clamped at 0: a stored `createdAt` marginally in the future (clock skew
+			// between app instances) must not report a NEGATIVE age to the agent.
+			replayedAfterMs: Math.max(0, at.getTime() - record.createdAt.getTime())
+		};
+	}
+	// Still pending: a concurrent retry (or, for `peekIdempotentReplay`, the
+	// ORIGINAL call) is in flight. Running a fresh write now would duplicate it.
+	return { kind: 'in-progress' };
+}
+
+/**
+ * A READ-ONLY look for an already-completed identical write — never an insert,
+ * so it can run BEFORE any validation that resolves mutable state (a member
+ * NAME, ADR-0015) and might reject a call that already succeeded once.
+ *
+ * Why this exists: `withDerivedIdempotency` (below) is called AFTER a tool has
+ * turned its raw arguments into a validated domain input, because deriving the
+ * idempotency key from resolved values (rather than the RAW arguments) would
+ * make an explicit `paidBy` collide with an omitted one (see its header). But
+ * name resolution is exactly the kind of validation that can start FAILING
+ * between an original successful call and an agent's plain retry of the exact
+ * same arguments — a member gets renamed or deactivated in between — and a
+ * validation_error on a call that already recorded the transaction is wrong:
+ * the retry should replay the stored success, not re-derive whether the name
+ * still resolves. So a tool calls this FIRST, on the raw arguments, before
+ * doing any resolution; only a `null` result means "no completed match yet —
+ * proceed to validate, then call `withDerivedIdempotency` as normal."
+ *
+ * Mirrors `withDerivedIdempotency`'s two-bucket lookup exactly (same
+ * `classifyStoredRow`, same bucket derivation) but calls `store.load` only —
+ * never `store.insertPending`. That is the one property that makes it safe to
+ * call speculatively, ahead of validation that might still reject the call: it
+ * can find an existing completed or pending row, but it can never CREATE one,
+ * so a call that goes on to fail validation leaves no dangling pending row
+ * behind to block a later, corrected retry (see `withDerivedIdempotency`'s own
+ * "never inserts an idempotency row" guarantee, which this preserves by
+ * construction rather than by duplicating its reasoning).
+ *
+ * A caller that gets a non-null result back returns it directly, exactly as a
+ * replay from `withDerivedIdempotency` — including surfacing `in_progress`,
+ * should a concurrent retry already be mid-flight. Unlike
+ * {@link DerivedIdempotencyOutcome}, `replayedAfterMs` here is never `null`: a
+ * `peekIdempotentReplay` result is BY DEFINITION a replay (the only other
+ * outcome, no match, is the `null` return), so there is no "ran fresh, `null`"
+ * case for the type to leave room for.
+ */
+export async function peekIdempotentReplay({
+	keyId,
+	groupId,
+	toolName,
+	args,
+	store,
+	now = () => new Date()
+}: {
+	keyId: string;
+	groupId: string;
+	toolName: string;
+	args: unknown;
+	store: IdempotencyStore;
+	now?: () => Date;
+}): Promise<{ response: IdempotentResponse; replayedAfterMs: number } | null> {
+	const at = now();
+	const bucket = Math.floor(at.getTime() / MCP_IDEMPOTENCY_WINDOW_MS);
+	const derive = (b: number) => deriveIdempotencyKey({ keyId, groupId, toolName, args, bucket: b });
+
+	const previous = classifyStoredRow(await store.load(keyId, derive(bucket - 1)), at, true);
+	if (previous.kind === 'replay') {
+		return { response: previous.response, replayedAfterMs: previous.replayedAfterMs };
+	}
+	if (previous.kind === 'in-progress') throw new IdempotencyConflictError('in_progress');
+
+	const current = classifyStoredRow(await store.load(keyId, derive(bucket)), at, false);
+	if (current.kind === 'replay') {
+		return { response: current.response, replayedAfterMs: current.replayedAfterMs };
+	}
+	if (current.kind === 'in-progress') throw new IdempotencyConflictError('in_progress');
+
+	return null;
+}
+
 /**
  * Run `fn` at most once per (calling key + group + tool + arguments) within the
  * ~60s sliding window, via the existing `withIdempotency` store (ADR-0005).
@@ -146,6 +265,13 @@ export interface DerivedIdempotencyOutcome {
  *
  * Neither hit → `fn` runs, exactly once, and its response is stored for the rest of
  * the window.
+ *
+ * A tool that calls `peekIdempotentReplay` first (to stay safe against
+ * validation resolving mutable state ahead of this guard) will almost always
+ * reach this function with both bucket lookups coming back empty a second
+ * time — that's expected, not wasted work: the two functions answer different
+ * questions ("is there already an answer?" vs. "run this, exactly once, and
+ * arbitrate concurrent retries"), and only this one may ever insert.
  *
  * Pure aside from the injected `store` and `now`, so every branch — including the
  * boundary case — unit-tests without a database.
@@ -182,20 +308,11 @@ export async function withDerivedIdempotency({
 	const rawBody = canonicalJson(args);
 
 	// ── 1. The PREVIOUS bucket — the straddling retry. Load only, never insert.
-	const previous = await store.load(keyId, derive(bucket - 1));
-	if (previous && at.getTime() - previous.createdAt.getTime() <= MCP_IDEMPOTENCY_WINDOW_MS) {
-		if (previous.status === 'completed') {
-			return {
-				response: { status: previous.responseStatus ?? 200, body: previous.responseBody },
-				replayedAfterMs: at.getTime() - previous.createdAt.getTime()
-			};
-		}
-		// Still pending: a concurrent retry that straddles the boundary. The original is
-		// in flight — running the create now would duplicate it.
-		throw new IdempotencyConflictError('in_progress');
+	const previous = classifyStoredRow(await store.load(keyId, derive(bucket - 1)), at, true);
+	if (previous.kind === 'replay') {
+		return { response: previous.response, replayedAfterMs: previous.replayedAfterMs };
 	}
-	// A previous-bucket row OLDER than the window is deliberately ignored: it is a
-	// genuinely repeated expense, and falling through records it (the second coffee).
+	if (previous.kind === 'in-progress') throw new IdempotencyConflictError('in_progress');
 
 	// ── 2. The CURRENT bucket — pending-first, so concurrent retries race safely.
 	const replayed: { record: IdempotencyRecord | null } = { record: null };

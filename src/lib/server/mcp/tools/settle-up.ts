@@ -59,9 +59,9 @@ import { z } from 'zod';
 import { parseAmount } from '$lib/money';
 import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
-import { createDbIdempotencyStore } from '$lib/server/api/idempotency';
+import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
-import { withDerivedIdempotency } from '../idempotency';
+import { peekIdempotentReplay, withDerivedIdempotency } from '../idempotency';
 import {
 	buildReplayEchoBack,
 	buildSettleUpEchoBack,
@@ -210,6 +210,23 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// §16.5), so this write path inherits it by construction.
 		const { settlementCurrency } = await loadGroupView(principal, groupId);
 
+		// ── Idempotency PEEK — before any name resolution (ADR-0015 / see `../idempotency`)
+		//
+		// A plain retry of an already-successful settle-up must replay that success even if
+		// `to`/`from` names a member who was renamed or deactivated in between — this is a
+		// READ-ONLY lookup on the RAW arguments, so it can run ahead of the name resolution
+		// below that might now reject a call the roster used to accept. `null` means "no
+		// completed match yet"; fall through to resolve names and reach the write guard.
+		const idempotencyStore = createDbIdempotencyStore();
+		const peeked = await peekIdempotentReplay({
+			keyId: principal.keyId,
+			groupId,
+			toolName: TOOL_NAME,
+			args: { groupId, to, from, amount },
+			store: idempotencyStore
+		});
+		if (peeked) return replaySuccess(peeked);
+
 		// The roster is what the `to` / `from` NAMES are resolved against, where the `from`
 		// default comes from, where the echo's names come from, and where the "other Nan"
 		// check looks. It includes deactivated members, so paying one back can be refused
@@ -314,9 +331,11 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// Everything above is validation and none of it has touched the ledger — which is
-		// why the guard starts HERE: a settle-up that was going to be rejected never
-		// inserts an idempotency row, so the agent's corrected retry meets a clean path.
+		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
+		// arguments; everything between it and here is validation that has now succeeded,
+		// and none of it has touched the ledger — which is why the guard starts HERE: a
+		// settle-up that was going to be rejected never inserts an idempotency row, so the
+		// agent's corrected retry meets a clean path.
 		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it answers "did the model already send me exactly this?", and resolving `from`
@@ -326,7 +345,7 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			groupId,
 			toolName: TOOL_NAME,
 			args: { groupId, to, from, amount },
-			store: createDbIdempotencyStore(),
+			store: idempotencyStore,
 			fn: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's `viaKey` provenance into the audit row — we never write audit ourselves.
@@ -370,11 +389,9 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			}
 		});
 
-		const payload = response.body as SettledPayload;
-
 		// The ordinary path: the settle-up was recorded, exactly once.
 		if (replayedAfterMs === null) {
-			return toolSuccess({ ...payload, replayed: false });
+			return toolSuccess({ ...(response.body as SettledPayload), replayed: false });
 		}
 
 		// A REPLAY: the window absorbed a retry. A SUCCESS — the user's intent (one
@@ -383,11 +400,28 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 		// ship; only the leading prose changes, and `replayed` states it machine-readably.
 		// (The replay prose carries the original echo verbatim, disambiguation included:
 		// the "other Nan" is exactly as relevant on the retry as it was on the create.)
-		return toolSuccess({
-			...payload,
-			replayed: true,
-			recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
-			echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
-		});
+		return replaySuccess({ response, replayedAfterMs });
 	}
 };
+
+/**
+ * The REPLAY response shape, shared by the early `peekIdempotentReplay` exit and
+ * the ordinary `withDerivedIdempotency` replay branch above — the two answer the
+ * same question ("this exact call already succeeded, `replayedAfterMs` ago") from
+ * two different lookup points, and must render identically to the agent either way.
+ */
+function replaySuccess({
+	response,
+	replayedAfterMs
+}: {
+	response: IdempotentResponse;
+	replayedAfterMs: number;
+}) {
+	const payload = response.body as SettledPayload;
+	return toolSuccess({
+		...payload,
+		replayed: true,
+		recordedAgoSeconds: Math.round(replayedAfterMs / 1000),
+		echo: buildReplayEchoBack({ recordedEcho: payload.echo, replayedAfterMs })
+	});
+}

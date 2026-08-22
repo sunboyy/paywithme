@@ -7,12 +7,14 @@ const {
 	loadMemberViews,
 	createTransaction,
 	getTransactionDetail,
+	peekIdempotentReplay,
 	withDerivedIdempotency
 } = vi.hoisted(() => ({
 	loadGroupView: vi.fn(),
 	loadMemberViews: vi.fn(),
 	createTransaction: vi.fn(),
 	getTransactionDetail: vi.fn(),
+	peekIdempotentReplay: vi.fn(),
 	withDerivedIdempotency: vi.fn()
 }));
 
@@ -24,6 +26,7 @@ vi.mock('$lib/server/transactions', async (importOriginal) => ({
 }));
 vi.mock('../idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../idempotency')>()),
+	peekIdempotentReplay,
 	withDerivedIdempotency
 }));
 vi.mock('$lib/server/api/idempotency', async (importOriginal) => ({
@@ -129,6 +132,9 @@ beforeEach(() => {
 		response: await fn(),
 		replayedAfterMs: null
 	}));
+	// Its own suite lives in `../idempotency.test.ts`; by default there is no earlier
+	// completed match, so the ordinary path (validate, then the guard above) runs.
+	peekIdempotentReplay.mockResolvedValue(null);
 });
 
 describe('create_transaction rich wiring', () => {
@@ -233,6 +239,58 @@ describe('create_transaction rich wiring', () => {
 		);
 		const payload = result.structuredContent as { echo: string };
 		expect(payload.echo).toContain('split by 1 item');
+	});
+
+	it('a PEEKED replay short-circuits before the roster loads or any name resolves (PR #80 review)', async () => {
+		// The exact bug this guards against: `paidBy` names nobody on the CURRENT
+		// roster (it would fail validation if reached) — but this call is a plain
+		// retry of one that already succeeded when the roster was different (the
+		// member since renamed or deactivated). The peek must return the stored
+		// success WITHOUT ever loading members or attempting to resolve that name.
+		peekIdempotentReplay.mockResolvedValue({
+			response: {
+				status: 200,
+				body: { recorded: { id: 'txn_1' }, echo: 'Recorded: stub', _note: 'stub' }
+			},
+			replayedAfterMs: 4200
+		});
+
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['Alice'],
+			paidBy: 'Nobody On The Roster Anymore'
+		});
+
+		expect(result.isError).toBeUndefined();
+		const payload = result.structuredContent as {
+			replayed: boolean;
+			recordedAgoSeconds: number;
+			echo: string;
+		};
+		expect(payload.replayed).toBe(true);
+		expect(payload.recordedAgoSeconds).toBe(4);
+		expect(payload.echo).toContain('already recorded');
+		// The whole point: neither the roster nor the write path was ever touched.
+		expect(loadMemberViews).not.toHaveBeenCalled();
+		expect(createTransaction).not.toHaveBeenCalled();
+		expect(withDerivedIdempotency).not.toHaveBeenCalled();
+	});
+
+	it('a peek MISS still validates and reaches the write guard normally', async () => {
+		// The default `beforeEach` mock already resolves `peekIdempotentReplay` to
+		// `null`; this asserts the ordinary path is unaffected by its presence.
+		const result = await run({
+			groupId: GROUP_ID,
+			title: 'Lunch',
+			amount: '240.00',
+			splitBetween: ['Alice']
+		});
+
+		expect(result.isError).toBeUndefined();
+		expect(loadMemberViews).toHaveBeenCalled();
+		expect(withDerivedIdempotency).toHaveBeenCalled();
 	});
 
 	it('returns nested inactive members as self-correctable MCP validation paths before idempotency', async () => {

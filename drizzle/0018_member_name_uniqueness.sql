@@ -11,13 +11,45 @@ ALTER TABLE "members" ADD COLUMN "normalized_display_name" text;--> statement-br
 -- place the rule is written in SQL; from here on the app computes it
 -- (`displayNameValues` in `src/lib/server/member-name.ts`), which is what ADR-0015
 -- pins down so the write path and the name-resolution path share one rule.
+-- Using SQL here does not reopen ADR-0015's choice: the decision it records is
+-- about where the LIVE column value is computed on every write, not about a
+-- migration that runs once.
 --
--- `normalize(..., NFC)` (Postgres 13+) is used ONLY here, so this one-shot backfill
--- produces byte-for-byte what JS `.normalize('NFC').trim().toLowerCase()` would.
--- Using it does not reopen ADR-0015's choice: the decision it records is about
--- where the LIVE column value is computed on every write, not about a migration
--- that runs once.
-UPDATE "members" SET "normalized_display_name" = lower(btrim(normalize("display_name", NFC)))
+-- This has to earn "byte-for-byte matches JS `.normalize('NFC').trim().toLowerCase()`"
+-- rather than assume it, because plain `lower()`/`btrim()` do NOT:
+--   - `lower()` folds case per the DATABASE's collation. Under a non-Unicode-aware
+--     collation this under-folds (e.g. accented Latin letters pass through
+--     unchanged), and under a locale-specific one it can fold WRONG (Turkish
+--     `İ` -> ASCII `i`, not `i` + combining dot above) — exactly the
+--     "depends on where it ran" instability `normalizeDisplayName`'s own header
+--     comment rejects `toLocaleLowerCase` for. `COLLATE "und-x-icu"` (the ICU ROOT
+--     locale, bundled with Postgres's ICU support since core shipped
+--     `--with-icu`, PG10+) is what actually reproduces JS's locale-independent
+--     Unicode default case folding — verified directly against Node for `İ`,
+--     accented Latin, and plain ASCII, byte-for-byte.
+--   - `btrim()` strips only the ASCII space (0x20) by default — NOT tab, NBSP, or
+--     any of the other characters JS's `.trim()` treats as whitespace. The
+--     `regexp_replace` below strips exactly that set (U+0009-000D, U+0020,
+--     U+00A0, U+1680, U+2000-200A, U+2028-2029, U+202F, U+205F, U+3000, U+FEFF),
+--     via `chr()` rather than literal characters so the migration file stays
+--     grep-able and immune to editor/encoding mangling.
+--
+-- `normalize(..., NFC)` (Postgres 13+) still matches JS's NFC step exactly — only
+-- the fold and the trim needed correcting.
+WITH ws(cls) AS (
+	VALUES (
+		chr(9) || '-' || chr(13) || chr(32) || chr(160) || chr(5760) ||
+		chr(8192) || '-' || chr(8202) || chr(8232) || '-' || chr(8233) ||
+		chr(8239) || chr(8287) || chr(12288) || chr(65279)
+	)
+)
+UPDATE "members" SET "normalized_display_name" = lower(
+		regexp_replace(
+			normalize("display_name", NFC),
+			'^[' || ws.cls || ']+|[' || ws.cls || ']+$', '', 'g'
+		) COLLATE "und-x-icu"
+	)
+	FROM ws
 	WHERE "normalized_display_name" IS NULL;--> statement-breakpoint
 ALTER TABLE "members" ALTER COLUMN "normalized_display_name" SET NOT NULL;--> statement-breakpoint
 -- The constraint itself: no two ACTIVE members of a group share a normalized display

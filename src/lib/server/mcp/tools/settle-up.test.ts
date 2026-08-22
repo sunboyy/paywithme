@@ -24,12 +24,14 @@ const {
 	listMembers,
 	createTransaction,
 	getTransactionDetail,
+	peekIdempotentReplay,
 	withDerivedIdempotency
 } = vi.hoisted(() => ({
 	getGroupForUser: vi.fn(),
 	listMembers: vi.fn(),
 	createTransaction: vi.fn(),
 	getTransactionDetail: vi.fn(),
+	peekIdempotentReplay: vi.fn(),
 	withDerivedIdempotency: vi.fn()
 }));
 
@@ -48,6 +50,7 @@ vi.mock('$lib/server/transactions', async (importOriginal) => ({
 }));
 vi.mock('../idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../idempotency')>()),
+	peekIdempotentReplay,
 	withDerivedIdempotency
 }));
 // The store is a DB handle the stubbed guard never uses.
@@ -190,6 +193,9 @@ beforeEach(() => {
 		response: await fn(),
 		replayedAfterMs: null
 	}));
+	// Its own suite lives in `../idempotency.test.ts`; by default there is no earlier
+	// completed match, so the ordinary path (validate, then the guard above) runs.
+	peekIdempotentReplay.mockResolvedValue(null);
 });
 
 // ── The registry contract ──────────────────────────────────────────────────
@@ -686,5 +692,48 @@ describe('settle_up — the server-derived idempotency window', () => {
 
 		expect(payload.echo).toContain('Nanthawat P. — not involved');
 		expect(payload.similarNames).toHaveLength(1);
+	});
+
+	it('a PEEKED replay short-circuits before the roster loads or any name resolves (PR #80 review)', async () => {
+		// The exact bug this guards against: `to` names nobody on the CURRENT roster
+		// (it would fail as a self-correctable validation_error if reached) — but
+		// this call is a plain retry of one that already succeeded when the roster
+		// was different (the payee since renamed or deactivated). The peek must
+		// return the stored success WITHOUT ever loading members or resolving `to`.
+		peekIdempotentReplay.mockResolvedValue({
+			response: {
+				status: 200,
+				body: {
+					recorded: { id: 'txn_1' },
+					echo: 'Recorded settle-up: stub',
+					similarNames: [],
+					_note: 'stub'
+				}
+			},
+			replayedAfterMs: 4200
+		});
+
+		const payload = await run({
+			groupId: GROUP_ID,
+			to: 'Nobody On The Roster Anymore',
+			amount: '1200'
+		});
+
+		expect(payload.replayed).toBe(true);
+		expect((payload as unknown as { recordedAgoSeconds: number }).recordedAgoSeconds).toBe(4);
+		expect(payload.echo).toContain('already recorded');
+		// The whole point: neither the roster nor the write path was ever touched.
+		expect(listMembers).not.toHaveBeenCalled();
+		expect(createTransaction).not.toHaveBeenCalled();
+		expect(withDerivedIdempotency).not.toHaveBeenCalled();
+	});
+
+	it('a peek MISS still resolves names and reaches the write guard normally', async () => {
+		// The default `beforeEach` mock already resolves `peekIdempotentReplay` to
+		// `null`; this asserts the ordinary path is unaffected by its presence.
+		await run({ groupId: GROUP_ID, to: 'Nan Suphaporn', amount: '1200' });
+
+		expect(listMembers).toHaveBeenCalled();
+		expect(withDerivedIdempotency).toHaveBeenCalled();
 	});
 });

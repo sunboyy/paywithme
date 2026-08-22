@@ -1864,6 +1864,47 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(first.replayed).toBe(false);
 		});
 
+		it('a retry after the referenced member was RENAMED still replays — the guard runs before name resolution (PR #80 review)', async () => {
+			// The bug this closes: `paidBy`/`splitBetween` names are resolved AFTER the raw
+			// arguments are hashed but the OLD guard ran only AFTER that resolution — so an
+			// identical retry whose name no longer resolves (the member was renamed or
+			// deactivated in between) got a fresh `validation_error` instead of replaying
+			// the already-successful create. `peekIdempotentReplay` runs BEFORE resolution
+			// specifically so this cannot happen.
+			freezeAt('2026-07-16T12:00:00.000Z');
+			const carol = await addMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				displayName: 'Carol'
+			});
+			const args = { groupId: s.group.id, ...LUNCH, splitBetween: [s.user.name, 'Carol'] };
+
+			const first = await mcpToolCall('create_transaction', args, { key: s.writeKey.key });
+			expect(first.body.result?.isError, JSON.stringify(first.body.result)).toBeUndefined();
+			const firstPayload = first.body.result?.structuredContent as unknown as CreatedWire;
+
+			// "Carol" no longer resolves to anybody — a FRESH call with these exact
+			// arguments would now fail as a self-correctable validation_error.
+			await renameMember({
+				userId: s.user.id,
+				groupId: s.group.id,
+				memberId: carol.id,
+				displayName: 'Carolina'
+			});
+
+			// "That didn't seem to go through, let me try again." — 3 seconds later, with
+			// the model none the wiser that the roster changed underneath it.
+			advance(3);
+			const retry = await mcpToolCall('create_transaction', args, { key: s.writeKey.key });
+
+			expect(retry.body.result?.isError, JSON.stringify(retry.body.result)).toBeUndefined();
+			const retryPayload = retry.body.result?.structuredContent as unknown as CreatedWire;
+			expect(retryPayload.recorded.id).toBe(firstPayload.recorded.id);
+			expect(retryPayload.replayed).toBe(true);
+			// Still one lunch — the retry never reached `createTransaction` a second time.
+			expect(await rows()).toHaveLength(1);
+		});
+
 		it('fingerprints complete nested rich arguments: identical itemized retries replay, a nested change does not', async () => {
 			freezeAt('2026-07-16T12:00:00.000Z');
 			const args = {
