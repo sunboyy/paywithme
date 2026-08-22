@@ -26,6 +26,7 @@ const {
 	revokeInvite,
 	GroupAccessError,
 	MemberNotFoundError,
+	DisplayNameTakenError,
 	InviteNotFoundError
 } = vi.hoisted(() => {
 	class GroupAccessError extends Error {
@@ -33,6 +34,17 @@ const {
 	}
 	class MemberNotFoundError extends Error {
 		readonly code = 'member_not_found' as const;
+	}
+	/** Mirrors the real service error's shape (ADR-0015): a fixable, quotable message. */
+	class DisplayNameTakenError extends Error {
+		readonly code = 'display_name_taken' as const;
+		constructor(
+			readonly groupId: string,
+			readonly displayName: string,
+			readonly source: 'add' | 'rename' | 'reactivate'
+		) {
+			super(`Another active member is already called '${displayName}'.`);
+		}
 	}
 	class InviteNotFoundError extends Error {
 		readonly code = 'invite_not_found' as const;
@@ -50,6 +62,7 @@ const {
 		revokeInvite: vi.fn(),
 		GroupAccessError,
 		MemberNotFoundError,
+		DisplayNameTakenError,
 		InviteNotFoundError
 	};
 });
@@ -61,7 +74,8 @@ vi.mock('$lib/server/members', () => ({
 	renameMember,
 	removeMember,
 	reactivateMember,
-	MemberNotFoundError
+	MemberNotFoundError,
+	DisplayNameTakenError
 }));
 vi.mock('$lib/server/invites', () => ({
 	createInvite,
@@ -100,6 +114,18 @@ function makeActionEvent(fields: Record<string, string>, user: User | null, id =
 }
 
 const AUTH_USER: User = { id: 'u1', name: 'Alice' };
+
+/** The superForm payload an action returns, whether it succeeded or failed. */
+type ActionForm = {
+	valid: boolean;
+	errors: Record<string, string[]>;
+	message?: { type: string; text: string };
+};
+type ActionResult = { status?: number; form?: ActionForm; data?: { form: ActionForm } };
+function formOf(result: unknown): ActionForm {
+	const r = result as ActionResult;
+	return r.data?.form ?? r.form!;
+}
 
 beforeEach(() => {
 	getGroupForUser.mockReset();
@@ -259,6 +285,20 @@ describe('/groups/[id]/members ?/addMember action', () => {
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
 	});
+
+	it('renders a name clash on the displayName field, not as a 500 (ADR-0015)', async () => {
+		// The add form is the one control that renders `Form.FieldErrors`, so the error
+		// belongs ON the field the user is looking at. 400, not 500: it is fixable.
+		addMember.mockRejectedValueOnce(new DisplayNameTakenError('g1', 'Alex', 'add'));
+
+		const result = await actions.addMember(makeActionEvent({ displayName: 'Alex' }, AUTH_USER));
+
+		expect((result as ActionResult).status).toBe(400);
+		const form = formOf(result);
+		// The SERVICE's message is passed through verbatim — a generic one would strip
+		// the only part that tells the admin what to do.
+		expect(form.errors.displayName?.join(' ')).toContain("already called 'Alex'");
+	});
 });
 
 describe('/groups/[id]/members ?/renameMember action', () => {
@@ -308,6 +348,22 @@ describe('/groups/[id]/members ?/renameMember action', () => {
 			expect(isHttpError(e)).toBe(true);
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
+	});
+
+	it('surfaces a name clash as a 400 status message, NOT a field error', async () => {
+		// One `superForm` backs every row's rename form, so a `displayName` field error
+		// would light up every row on the page. The shared banner is the honest surface.
+		renameMember.mockRejectedValueOnce(new DisplayNameTakenError('g1', 'Taken', 'rename'));
+
+		const result = await actions.renameMember(
+			makeActionEvent({ memberId: 'm1', displayName: 'Taken' }, AUTH_USER)
+		);
+
+		expect((result as ActionResult).status).toBe(400);
+		const form = formOf(result);
+		expect(form.message?.type).toBe('error');
+		expect(form.message?.text).toContain("already called 'Taken'");
+		expect(form.errors.displayName).toBeUndefined();
 	});
 });
 
@@ -419,6 +475,20 @@ describe('/groups/[id]/members ?/reactivate action', () => {
 			expect(isHttpError(e)).toBe(true);
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
+	});
+
+	it('surfaces a blocked reactivation as a 400 status message with the remedy', async () => {
+		// The submit carries a member id only, so there is no field to mark — and the
+		// generic 500 text would have hidden the one thing that unblocks the admin.
+		reactivateMember.mockRejectedValueOnce(new DisplayNameTakenError('g1', 'Nan', 'reactivate'));
+
+		const result = await actions.reactivate(makeActionEvent({ memberId: 'm1' }, AUTH_USER));
+
+		expect((result as ActionResult).status).toBe(400);
+		const form = formOf(result);
+		expect(form.message?.type).toBe('error');
+		expect(form.message?.text).toContain("already called 'Nan'");
+		expect(form.message?.text).not.toContain('Please try again');
 	});
 });
 

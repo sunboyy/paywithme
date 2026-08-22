@@ -20,6 +20,9 @@
 //   - `MemberNotFoundError` (defined here)         → 404: the target member does
 //     not exist in this group (or was hard-deleted). Same not-found outcome, but
 //     a distinct `code` so the route layer can branch without string matching.
+//   - `DisplayNameTakenError` (defined here)       → 400 / form error: the name
+//     collides with an ACTIVE member of the same group (ADR-0015). Self-correctable
+//     — the message says what clashed and how to fix it.
 //
 // AUDIT LOG (task 6.1 — DONE): per PLAN §12.1 every mutation appends an immutable
 // `audit_log` row in the SAME DB transaction as the mutation. Each mutation below
@@ -35,6 +38,7 @@ import { transactionPayers, transactionShares } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { displayNameValues } from './member-name';
 import { writeAuditLog } from './audit';
+import { isUniqueViolation } from './db/pg-errors';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete'>;
@@ -51,6 +55,62 @@ export class MemberNotFoundError extends Error {
 		super(message);
 		this.name = 'MemberNotFoundError';
 	}
+}
+
+/** Which write ran into the collision — only the REMEDY differs between them. */
+export type DisplayNameCollisionSource = 'add' | 'rename' | 'reactivate';
+
+/**
+ * The display name is already held by an ACTIVE member of this group
+ * (`members_group_id_normalized_display_name_unique`; ADR-0015). A HARD REJECT for
+ * all three admin actions — the plan's auto-suffix escape hatch belongs to
+ * invite-accept, where the joiner did not choose the name, not here where an admin
+ * typed it and can retype it.
+ *
+ * `source` picks the remedy the message states, which is the whole point of the
+ * error (ADR-0009: an error is only self-correctable if it says how to correct it):
+ *   - add / rename → the name in hand is the wrong one; pick another.
+ *   - reactivate   → the name is NOT in hand (nothing in the request carries it),
+ *     so "pick another" is not an instruction the admin can act on. The fix is the
+ *     one the partial index leaves open: rename the DEACTIVATED member first — the
+ *     constraint only covers `deactivated_at IS NULL`, so that rename always
+ *     succeeds — then reactivate.
+ *
+ * The route layer maps `code === 'display_name_taken'` to a **400** form error.
+ */
+export class DisplayNameTakenError extends Error {
+	readonly code = 'display_name_taken' as const;
+	constructor(
+		readonly groupId: string,
+		readonly displayName: string,
+		readonly source: DisplayNameCollisionSource
+	) {
+		super(
+			source === 'reactivate'
+				? `Another active member is already called '${displayName}', so this member can't be reactivated under that name. Rename the inactive member first, then reactivate them.`
+				: `Another active member is already called '${displayName}'. Choose a different name.`
+		);
+		this.name = 'DisplayNameTakenError';
+	}
+}
+
+/**
+ * Was this write refused by the active-name uniqueness index? Every member write
+ * below reaches exactly ONE unique index it can newly violate, so a plain SQLSTATE
+ * 23505 is already unambiguous here and needs no index-name discrimination:
+ *   - `addMember` inserts with `user_id = null`, which the partial
+ *     `members_group_id_user_id_unique` (on `user_id IS NOT NULL`) does not cover.
+ *   - `renameMember` writes only the two name columns, so it cannot newly violate a
+ *     constraint over `user_id`.
+ *   - `reactivateMember` writes only `deactivated_at`, and the user-id index is
+ *     partial on `user_id IS NOT NULL` — NOT on the active flag — so a deactivated
+ *     linked member already occupies its `(group_id, user_id)` slot and clearing
+ *     the flag cannot collide there.
+ * Invite-accept is the path that CAN trip either index (it inserts a linked row
+ * with a name); it is issue #77's problem and deliberately not handled here.
+ */
+function isDisplayNameCollision(e: unknown): boolean {
+	return isUniqueViolation(e);
 }
 
 /**
@@ -208,6 +268,13 @@ export async function listMembers({
  * someone who may not have an account). Access-checked. `user_id` is left null;
  * linking to a real user happens only via invite accept (task 3.6/3.7). Returns
  * the created member. Runs in a transaction so the 6.1 audit row can join it.
+ *
+ * A name already held by an ACTIVE member is a hard reject
+ * (`DisplayNameTakenError`; ADR-0015). There is deliberately NO pre-check read
+ * before the insert: the index has to be the authority under a race anyway, and —
+ * unlike `createCustomCurrency`, whose pre-check exists to distinguish a seeded
+ * clash from a custom one — there is only one kind of clash here, so a pre-check
+ * would buy an extra query and the identical message.
  */
 export async function addMember({
 	userId,
@@ -221,19 +288,25 @@ export async function addMember({
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 
-		const [member] = await tx
-			.insert(members)
-			.values({
-				groupId,
-				// Writes the name AND its canonical key, which backs the active-member
-				// uniqueness index (ADR-0015). A duplicate raises a Postgres
-				// unique-violation; mapping that to an actionable validation error is
-				// issue #76's job, not this insert's.
-				...displayNameValues(displayName),
-				// Explicitly unlinked — a participant slot, not a user link (§6.1).
-				userId: null
-			})
-			.returning();
+		let member: Member;
+		try {
+			[member] = await tx
+				.insert(members)
+				.values({
+					groupId,
+					// Writes the name AND its canonical key, which backs the active-member
+					// uniqueness index (ADR-0015).
+					...displayNameValues(displayName),
+					// Explicitly unlinked — a participant slot, not a user link (§6.1).
+					userId: null
+				})
+				.returning();
+		} catch (e) {
+			if (isDisplayNameCollision(e)) {
+				throw new DisplayNameTakenError(groupId, displayName, 'add');
+			}
+			throw e;
+		}
 
 		// Audit row — IN THE SAME TRANSACTION (PLAN §12.1).
 		await writeAuditLog(tx, {
@@ -271,16 +344,26 @@ export async function renameMember({
 		// Capture the OLD name (already loaded here) for a before/after audit snapshot.
 		const before = await getGroupMemberOrThrow(groupId, memberId, tx);
 
-		const [updated] = await tx
-			.update(members)
-			// The canonical key moves WITH the name (ADR-0015) — a rename that left the
-			// old key behind would silently disable the uniqueness index for this row.
-			// Renaming a DEACTIVATED member still can't collide: the index is partial on
-			// `deactivated_at IS NULL`, which is exactly what makes it the escape hatch
-			// for a blocked reactivation (§6.3).
-			.set(displayNameValues(displayName))
-			.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
-			.returning();
+		let updated: Member;
+		try {
+			[updated] = await tx
+				.update(members)
+				// The canonical key moves WITH the name (ADR-0015) — a rename that left the
+				// old key behind would silently disable the uniqueness index for this row.
+				// Renaming a DEACTIVATED member still can't collide: the index is partial on
+				// `deactivated_at IS NULL`, which is exactly what makes it the escape hatch
+				// for a blocked reactivation (§6.3).
+				.set(displayNameValues(displayName))
+				.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
+				.returning();
+		} catch (e) {
+			// An ACTIVE member already holds the name (ADR-0015) — hard reject, same as
+			// `addMember`: the admin has the name in hand and can pick another.
+			if (isDisplayNameCollision(e)) {
+				throw new DisplayNameTakenError(groupId, displayName, 'rename');
+			}
+			throw e;
+		}
 
 		if (!updated) {
 			// A concurrent hard-delete between the check and the update — surface as
@@ -416,11 +499,14 @@ export async function removeMember(
  * access primitive re-admits them once `deactivated_at IS NULL`). Access-checked
  * + cross-group verified. Returns the updated member.
  *
- * NOTE (issue #76): clearing the flag can now trip
- * `members_group_id_normalized_display_name_unique` (ADR-0015) when an ACTIVE
- * member has since taken this member's name. Turning that raw unique-violation
- * into an actionable "rename the deactivated member first" error belongs to the
- * collision-handling task, not here.
+ * NOT ACTUALLY A BARE FLAG FLIP any more (ADR-0015): clearing the flag re-enters
+ * the active set, so it can trip
+ * `members_group_id_normalized_display_name_unique` when an ACTIVE member has
+ * since taken this member's name — a failure mode the flip never had before the
+ * index existed. It is a hard reject with the remedy spelled out
+ * (`DisplayNameTakenError`, `source: 'reactivate'`), and the whole transaction
+ * rolls back, so a refused reactivation leaves the member deactivated rather than
+ * half-restored.
  */
 export async function reactivateMember({
 	userId,
@@ -433,13 +519,23 @@ export async function reactivateMember({
 }): Promise<Member> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
-		await getGroupMemberOrThrow(groupId, memberId, tx);
+		// The name the error has to report comes from THIS row: the request carries a
+		// member id only, and the failed UPDATE returns nothing to name it with.
+		const target = await getGroupMemberOrThrow(groupId, memberId, tx);
 
-		const [updated] = await tx
-			.update(members)
-			.set({ deactivatedAt: null })
-			.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
-			.returning();
+		let updated: Member;
+		try {
+			[updated] = await tx
+				.update(members)
+				.set({ deactivatedAt: null })
+				.where(and(eq(members.id, memberId), eq(members.groupId, groupId)))
+				.returning();
+		} catch (e) {
+			if (isDisplayNameCollision(e)) {
+				throw new DisplayNameTakenError(groupId, target.displayName, 'reactivate');
+			}
+			throw e;
+		}
 
 		if (!updated) {
 			throw new MemberNotFoundError();
