@@ -34,6 +34,15 @@ describe('initializeResult', () => {
 		expect(result.instructions).not.toContain('never send or infer a decimal amount');
 	});
 
+	// ADR-0015: every write tool says it, but a client that reads only the server-level
+	// instructions must not be left guessing that a member id would work.
+	it('says member references are display names, not ids (ADR-0015)', () => {
+		const result = initializeResult({ protocolVersion: '2025-06-18' });
+
+		expect(result.instructions).toContain('DISPLAY NAME');
+		expect(result.instructions).toContain('never by a member id');
+	});
+
 	it('carries NO session id — the server is stateless (ADR-0001)', () => {
 		const result = initializeResult({}) as unknown as Record<string, unknown>;
 		expect(result.sessionId).toBeUndefined();

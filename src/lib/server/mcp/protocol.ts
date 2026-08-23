@@ -31,14 +31,18 @@ export const MCP_SERVER_INFO = {
  * Server-level guidance shown to the model. Deliberately short and money-safe:
  * the MCP VIEW and WRITE contracts both use decimal strings (ADR-0004); integer minor
  * units remain an internal ledger detail and appear only as an explicit echo-back aid.
- * A read key simply has no write tools to reach for (ADR-0002).
+ * Member references are display names, not ids (ADR-0015), so a client that reads only
+ * these instructions is not left to guess. A read key simply has no write tools to reach
+ * for (ADR-0002).
  */
 export const MCP_SERVER_INSTRUCTIONS =
 	'Pay with me is a shared-expense tracker. Groups contain members, transactions ' +
 	'and balances. MCP money amounts are DECIMAL STRINGS paired with a currency. When ' +
 	'calling a write tool, send the decimal string exactly as the user stated it (for ' +
 	'example, "12.50" USD); never multiply by 100 or convert currency exponents yourself. ' +
-	'Percentages are decimal strings too. Transaction writes accept the legacy equal shape ' +
+	'Percentages are decimal strings too. Write tools name a person by their member ' +
+	'DISPLAY NAME copied exactly from `list_members`, never by a member id, and the server ' +
+	'resolves it by exact match. Transaction writes accept the legacy equal shape ' +
 	'(`amount` plus `splitBetween`) and mode-specific amount, share, or itemized shapes. ' +
 	'Preserve array order: item and charge order is significant. The server derives itemized ' +
 	'totals, ordered-charge arithmetic, payer totals, and resolved shares; never calculate ' +
