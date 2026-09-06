@@ -119,3 +119,8 @@ the catch-all `other`. A rail owns its own fields, validation, display format an
 QR encoding, because all four vary by country and none of them generalise
 (ADR-0016). A rail is always a **registry entry in code**, never an enum value in
 a `switch`, and no rail is privileged over another.
+
+An entry also carries **field descriptors** — the name, label and control of each
+of its fields, as plain data. That is what lets the owner's editor build an
+add/edit form for a rail it has never heard of, so adding a country stays a new
+registry entry and never a change to a screen.

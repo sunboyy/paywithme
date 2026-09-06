@@ -14,6 +14,7 @@
 // nothing in this module or its callers branches on a specific rail id.
 
 import type { z } from 'zod';
+import type { RailField } from '$lib/payout-rail-fields';
 
 /**
  * A registry entry, with its `details` type ERASED.
@@ -30,6 +31,17 @@ export interface PayoutRail {
 	readonly label: string;
 	/** The rail's field schema (authored in `lib/schemas/receiving-method.ts`). */
 	readonly detailsSchema: z.ZodType;
+	/**
+	 * How to RENDER this rail's fields — one descriptor per key of
+	 * `detailsSchema`, in form order (issue #85).
+	 *
+	 * Pure data (`$lib/payout-rail-fields`), so `load` can hand it to the editor
+	 * and the editor can walk it. This is what lets `/settings/receiving` build an
+	 * add/edit form for a rail it has never heard of: it branches on a field's
+	 * CONTROL, never on the rail. A drift guard in `index.test.ts` asserts these
+	 * names are exactly the schema's keys.
+	 */
+	readonly fields: readonly RailField[];
 	/**
 	 * Render stored `details` as one human-readable line.
 	 *
@@ -53,12 +65,14 @@ export function defineRail<Schema extends z.ZodType>(definition: {
 	id: string;
 	label: string;
 	detailsSchema: Schema;
+	fields: readonly RailField[];
 	format: (details: z.output<Schema>) => string;
 }): PayoutRail {
 	return {
 		id: definition.id,
 		label: definition.label,
 		detailsSchema: definition.detailsSchema,
+		fields: definition.fields,
 		format: (details) => definition.format(definition.detailsSchema.parse(details))
 	};
 }

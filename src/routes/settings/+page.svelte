@@ -180,6 +180,23 @@
 		</Card.Content>
 	</Card.Root>
 
+	<!-- Receiving methods (PLAN §17.4) — the editor lives on its own route because
+	     it is a list with its own add/edit/reorder steps, not a single form. -->
+	<Card.Root>
+		<Card.Header>
+			<Card.Title>How you get paid</Card.Title>
+			<Card.Description>
+				Record where people should send money when they settle up with you. Only people you share a
+				group with can see it.
+			</Card.Description>
+		</Card.Header>
+		<Card.Content>
+			<Button variant="outline" class="w-full" href={resolve('/settings/receiving')}>
+				Manage receiving methods
+			</Button>
+		</Card.Content>
+	</Card.Root>
+
 	<!-- API keys (PLAN §16.8) — the sibling section to passkeys. -->
 	<Card.Root>
 		<Card.Header>

@@ -183,3 +183,64 @@ describe('formatRailDetails', () => {
 		);
 	});
 });
+
+// ── Field descriptors (issue #85) ────────────────────────────────────────────
+// The descriptors are what `/settings/receiving` renders instead of a per-rail
+// `if`. They are only worth anything if they stay pinned to the rail's OWN schema,
+// so the checks below are all drift guards, written over `RAILS` rather than
+// naming a rail.
+
+/** The keys a rail's object schema declares, in declaration order. */
+function shapeKeysOf(rail: (typeof RAILS)[number]): string[] {
+	return Object.keys((rail.detailsSchema as unknown as { shape: Record<string, unknown> }).shape);
+}
+
+describe('rail field descriptors', () => {
+	it('describes exactly the keys of the rail’s own schema', () => {
+		// A renamed schema key that nobody mirrored here would leave the editor
+		// posting a field the schema ignores — saving nothing, silently.
+		for (const rail of RAILS) {
+			expect(rail.fields.map((field) => field.name).sort(), rail.id).toEqual(
+				shapeKeysOf(rail).sort()
+			);
+		}
+	});
+
+	it('gives every field a label and a control, with options only where they belong', () => {
+		for (const rail of RAILS) {
+			for (const field of rail.fields) {
+				const where = `${rail.id}.${field.name}`;
+				expect(field.label.trim(), where).not.toBe('');
+				expect(['text', 'select', 'textarea'], where).toContain(field.control);
+				if (field.control === 'select') {
+					expect(field.options?.length, where).toBeGreaterThan(0);
+				} else {
+					expect(field.options, where).toBeUndefined();
+				}
+			}
+		}
+	});
+
+	it('offers only select options the rail’s schema accepts', () => {
+		// The picker may not offer a bank (or a proxy type) that the schema would
+		// reject on submit — the user would fill the form and be refused for a choice
+		// the app itself put in front of them.
+		for (const rail of RAILS) {
+			const valid = VALID_DETAILS[rail.id] as Record<string, unknown>;
+			for (const field of rail.fields) {
+				for (const option of field.options ?? []) {
+					const result = parseRailDetails(rail.id, { ...valid, [field.name]: option.value });
+					expect(result.success, `${rail.id}.${field.name}=${option.value}`).toBe(true);
+				}
+			}
+		}
+	});
+
+	it('is plain serializable data, because `load` sends it to the browser', () => {
+		for (const rail of RAILS) {
+			expect(JSON.parse(JSON.stringify(rail.fields)), rail.id).toEqual(
+				rail.fields.map((field) => ({ ...field }))
+			);
+		}
+	});
+});
