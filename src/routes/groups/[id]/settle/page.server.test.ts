@@ -10,16 +10,32 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 //   - suggestions mapped to display names + formatted amounts + raw minor amounts
 //     (for the §8.4 prefill);
 //   - the all-settled (no-suggestions) case sets `allSettled` and an empty list.
+//
+// Issue #86 adds the creditor's receiving details (PLAN §8.4, §17.3–§17.4). The
+// view builder is mocked here — its own spec is `lib/server/receiving-view.test.ts`
+// — so what this file checks is the WIRING that only the route can get wrong:
+// WHOSE details are read (creditors, nobody else), that they are read through the
+// `listForViewer`-only builder, and when the invite link is fetched at all.
 
-const { requireGroupAccess, getGroupBalances, listMembers } = vi.hoisted(() => ({
+const {
+	requireGroupAccess,
+	getGroupBalances,
+	listMembers,
+	loadReceivingProfiles,
+	listActiveInvites
+} = vi.hoisted(() => ({
 	requireGroupAccess: vi.fn(),
 	getGroupBalances: vi.fn(),
-	listMembers: vi.fn()
+	listMembers: vi.fn(),
+	loadReceivingProfiles: vi.fn(),
+	listActiveInvites: vi.fn()
 }));
 
 vi.mock('$lib/server/access', () => ({ requireGroupAccess }));
 vi.mock('$lib/server/balances', () => ({ getGroupBalances }));
 vi.mock('$lib/server/members', () => ({ listMembers }));
+vi.mock('$lib/server/receiving-view', () => ({ loadReceivingProfiles }));
+vi.mock('$lib/server/invites', () => ({ listActiveInvites }));
 
 import { load } from './+page.server';
 
@@ -66,15 +82,31 @@ type LoadResult = {
 		amountFormatted: string;
 	}[];
 	allSettled: boolean;
+	receiving: Record<string, { state: string }>;
+	inviteUrl: string | null;
 };
+
+/** Bob (m2) and Carol (m3) each owe Alice (m1) — Alice is the only creditor. */
+function balancesOwedToAlice() {
+	getGroupBalances.mockResolvedValue([
+		{ memberId: 'm1', balance: 15000 },
+		{ memberId: 'm2', balance: -12000 },
+		{ memberId: 'm3', balance: -3000 }
+	]);
+}
 
 beforeEach(() => {
 	requireGroupAccess.mockReset();
 	getGroupBalances.mockReset();
 	listMembers.mockReset();
 
+	loadReceivingProfiles.mockReset();
+	listActiveInvites.mockReset();
+
 	requireGroupAccess.mockResolvedValue({ user: { id: 'u1', name: 'Alice' }, group: GROUP });
 	listMembers.mockResolvedValue(MEMBERS);
+	loadReceivingProfiles.mockResolvedValue({});
+	listActiveInvites.mockResolvedValue([]);
 });
 
 describe('/groups/[id]/settle load', () => {
@@ -159,5 +191,75 @@ describe('/groups/[id]/settle load', () => {
 		const result = (await load(makeLoadEvent())) as LoadResult;
 		const unnamed = result.balances.find((b) => b.memberId === 'mX');
 		expect(unnamed?.displayName).toBe('mX');
+	});
+});
+
+describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§17.4)', () => {
+	it('reads only the members a suggestion names as the creditor', async () => {
+		balancesOwedToAlice();
+
+		await load(makeLoadEvent());
+
+		// Alice (m1) is owed; Bob and Carol are paying. Only Alice's details belong
+		// on this page — nobody's account is loaded because they happen to be in the
+		// group.
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm1', userId: 'u1' }]);
+	});
+
+	it('loads nobody’s details when the group is all settled', async () => {
+		getGroupBalances.mockResolvedValue([
+			{ memberId: 'm1', balance: 0 },
+			{ memberId: 'm2', balance: 0 }
+		]);
+
+		await load(makeLoadEvent());
+
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', []);
+	});
+
+	it('hands the page the view keyed by member id', async () => {
+		balancesOwedToAlice();
+		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'methods', methods: [] } });
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.receiving.m1.state).toBe('methods');
+	});
+
+	it('fetches the group’s newest invite link when a creditor is unlinked', async () => {
+		// Empty state 1 (§17.4): the only thing that will ever help here is an invite.
+		balancesOwedToAlice();
+		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'unlinked' } });
+		listActiveInvites.mockResolvedValue([
+			{ id: 'i1', token: 'tok_new', expiresAt: '', createdAt: '' },
+			{ id: 'i2', token: 'tok_old', expiresAt: '', createdAt: '' }
+		]);
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(listActiveInvites).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
+		expect(result.inviteUrl).toBe('http://localhost/invite/tok_new');
+	});
+
+	it('does not go looking for an invite link when every creditor has an account', async () => {
+		balancesOwedToAlice();
+		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'no-methods' } });
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(listActiveInvites).not.toHaveBeenCalled();
+		expect(result.inviteUrl).toBeNull();
+	});
+
+	it('renders the page without an invite link rather than failing on one', async () => {
+		// A transient invites failure costs the nudge, not the settle screen.
+		balancesOwedToAlice();
+		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'unlinked' } });
+		listActiveInvites.mockRejectedValue(new Error('boom'));
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		expect(result.inviteUrl).toBeNull();
+		expect(result.suggestions).toHaveLength(2);
 	});
 });

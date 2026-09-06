@@ -34,7 +34,10 @@ export const thBankAccountRail = defineRail({
 			control: 'text',
 			inputMode: 'numeric',
 			maxLength: ACCOUNT_NUMBER_MAX_DIGITS,
-			placeholder: 'Digits only'
+			placeholder: 'Digits only',
+			// What the payer types into their banking app — so this is the field that
+			// gets the copy affordance on the settle screen (issue #86).
+			payerRole: 'copy'
 		},
 		{
 			name: 'accountHolderName',
@@ -44,7 +47,10 @@ export const thBankAccountRail = defineRail({
 			// The load-bearing field (PLAN §17.2): it is what the payer compares
 			// against their banking app, so the hint says where the value comes from —
 			// the bank's record — rather than describing a format.
-			hint: 'Exactly as your bank has it. People pay you by checking this name.'
+			hint: 'Exactly as your bank has it. People pay you by checking this name.',
+			// The comparison PLAN §17.2 calls the only defence against a valid-but-wrong
+			// account number: the settle screen states it as an instruction (issue #86).
+			payerRole: 'name-check'
 		}
 	],
 	// Bank · account number · holder name. The holder name is LAST and always

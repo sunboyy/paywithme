@@ -29,6 +29,25 @@ export interface RailFieldOption {
 export type RailFieldControl = 'text' | 'select' | 'textarea';
 
 /**
+ * What one field means to the PAYER who is about to make the transfer (issue #86).
+ *
+ * The owner's editor ignores this; the settle screen and member detail read it, and
+ * it is what keeps THOSE surfaces free of per-rail conditionals too:
+ *
+ *   - `'copy'` — the value a payer types into their banking app (an account
+ *     number, a PromptPay proxy). It gets the copy affordance; nothing else does,
+ *     because copying "KBank · 1234567890 · Somchai Jaidee" into an account-number
+ *     box helps nobody.
+ *   - `'name-check'` — the account holder name the payer must compare against what
+ *     their banking app displays before confirming (PLAN §17.2). This is the
+ *     feature's only defence against a valid-but-wrong account number.
+ *
+ * At most one role per field, and a rail may declare neither (`other` has no
+ * holder name to check — PLAN §17.2 requires one on every rail except that one).
+ */
+export type RailFieldPayerRole = 'copy' | 'name-check';
+
+/**
  * One field of a rail's `details`, described well enough to render.
  *
  * `name` MUST be a key of the rail's own `detailsSchema` — that is how a submitted
@@ -55,4 +74,9 @@ export interface RailField {
 	readonly maxLength?: number;
 	/** Mobile keyboard hint. `numeric` for the digits-only fields. */
 	readonly inputMode?: 'text' | 'numeric';
+	/**
+	 * What this field is to a payer reading the method (issue #86). Absent for a
+	 * field that is neither the value they copy nor the name they check.
+	 */
+	readonly payerRole?: RailFieldPayerRole;
 }

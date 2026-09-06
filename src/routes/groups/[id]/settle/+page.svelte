@@ -10,6 +10,11 @@
 	//      `/groups/[id]/transactions/new` (payer = debtor, recipient = creditor,
 	//      category = Debt settlement). On save it's a normal transaction (§8.4).
 	//
+	// Each suggestion row also EXPANDS to the creditor's receiving details (issue
+	// #86; PLAN §8.4, §17.3–§17.4) — the account the debtor is about to transfer to.
+	// A native `<details>` per row, closed by default: §17.3 says shown on demand,
+	// never printed inline, and a native disclosure keeps that true with JS off.
+	//
 	// shadcn-svelte components are used from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored / edited here). Mirrors the transactions / members pages.
 	import { resolve } from '$app/paths';
@@ -18,9 +23,11 @@
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
+	import ReceivingMethodsPanel from '$lib/components/ReceivingMethodsPanel.svelte';
 	import { network } from '$lib/pwa/online.svelte';
 	import { OFFLINE_WRITE_MESSAGE } from '$lib/pwa/offline-writes';
 	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import HandshakeIcon from '@lucide/svelte/icons/handshake';
 	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
@@ -29,6 +36,7 @@
 	let { data }: { data: PageData } = $props();
 
 	const newPath = $derived(resolve('/groups/[id]/transactions/new', { id: data.group.id }));
+	const membersPath = $derived(resolve('/groups/[id]/members', { id: data.group.id }));
 
 	/**
 	 * Build the §8.4 "Settle up" prefill link for a suggestion: the add-transaction
@@ -134,61 +142,90 @@
 			<Card.Content>
 				<ul class="space-y-2" aria-label="Suggested settlements">
 					{#each data.suggestions as s (s.fromMemberId + '→' + s.toMemberId)}
+						{@const receiving = data.receiving[s.toMemberId]}
 						<!-- The action sits INLINE on the right at every width. It used to stack
 						     below the row on phones as a full-width primary button, so three
 						     suggestions filled the viewport with three equally-loud black CTAs
 						     and each row cost three lines instead of one. `outline` because
 						     these are peers, not the page's single primary action; the 44px
 						     touch target is unchanged. -->
-						<li class="flex items-center justify-between gap-3 rounded-lg border bg-card p-3">
-							<span class="flex min-w-0 flex-1 items-center gap-2">
-								<HandshakeIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-								<span class="min-w-0">
-									<span class="flex flex-wrap items-center gap-1.5 font-medium">
-										<span class="truncate">{s.fromDisplayName}</span>
-										<ArrowRightIcon
-											class="size-4 shrink-0 text-muted-foreground"
-											aria-hidden="true"
-										/>
-										<span class="sr-only">pays</span>
-										<span class="truncate">{s.toDisplayName}</span>
-									</span>
-									<span class="block text-sm text-muted-foreground tabular-nums">
-										{s.amountFormatted}
+						<li class="rounded-lg border bg-card">
+							<div class="flex items-center justify-between gap-3 p-3">
+								<span class="flex min-w-0 flex-1 items-center gap-2">
+									<HandshakeIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+									<span class="min-w-0">
+										<span class="flex flex-wrap items-center gap-1.5 font-medium">
+											<span class="truncate">{s.fromDisplayName}</span>
+											<ArrowRightIcon
+												class="size-4 shrink-0 text-muted-foreground"
+												aria-hidden="true"
+											/>
+											<span class="sr-only">pays</span>
+											<span class="truncate">{s.toDisplayName}</span>
+										</span>
+										<span class="block text-sm text-muted-foreground tabular-nums">
+											{s.amountFormatted}
+										</span>
 									</span>
 								</span>
-							</span>
-							<!-- §8.4: prefill a Transfer (payer=debtor, recipient=creditor, amount,
+								<!-- §8.4: prefill a Transfer (payer=debtor, recipient=creditor, amount,
 							     category=Debt settlement). The href is a `resolve()`d path with an
 							     appended query string (already a resolved URL). -->
-							<!-- Offline (PLAN §11 — no offline creation): "Settle up" starts a write
+								<!-- Offline (PLAN §11 — no offline creation): "Settle up" starts a write
 							     flow, so it's disabled offline as a real <button> with an accessible
 							     reason; online it's the prefill navigation link. -->
-							{#if network.offline}
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									class="min-h-11 shrink-0"
-									disabled
-									title={OFFLINE_WRITE_MESSAGE}
-								>
-									Settle up
-								</Button>
-							{:else}
-								{@const settleHref = settleUrl(s)}
-								<!-- `settleHref` is a `resolve()`d path with an appended query string, so
+								{#if network.offline}
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										class="min-h-11 shrink-0"
+										disabled
+										title={OFFLINE_WRITE_MESSAGE}
+									>
+										Settle up
+									</Button>
+								{:else}
+									{@const settleHref = settleUrl(s)}
+									<!-- `settleHref` is a `resolve()`d path with an appended query string, so
 								     it is already a resolved URL. Disable/enable PAIR, not `-next-line`:
 								     the <a> now spans several lines and the single-line form only covers
 								     the tag's first line, leaving the href itself flagged. -->
-								<!-- eslint-disable svelte/no-navigation-without-resolve -->
-								<a
-									href={settleHref}
-									class={buttonVariants({ variant: 'outline', size: 'sm' }) + ' min-h-11 shrink-0'}
-								>
-									Settle up
-								</a>
-								<!-- eslint-enable svelte/no-navigation-without-resolve -->
+									<!-- eslint-disable svelte/no-navigation-without-resolve -->
+									<a
+										href={settleHref}
+										class={buttonVariants({ variant: 'outline', size: 'sm' }) +
+											' min-h-11 shrink-0'}
+									>
+										Settle up
+									</a>
+									<!-- eslint-enable svelte/no-navigation-without-resolve -->
+								{/if}
+							</div>
+
+							<!-- §8.4 / §17.3: the account details the debtor needs in order to
+							     actually send the money. ON DEMAND — a native <details>, closed by
+							     default, never printed in the row itself. It opens without JS. -->
+							{#if receiving}
+								<details class="group border-t" data-testid="how-to-pay">
+									<summary
+										class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-sm font-medium hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+									>
+										How to pay {s.toDisplayName}
+										<ChevronDownIcon
+											class="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
+											aria-hidden="true"
+										/>
+									</summary>
+									<div class="px-3 pt-1 pb-3">
+										<ReceivingMethodsPanel
+											view={receiving}
+											displayName={s.toDisplayName}
+											inviteUrl={data.inviteUrl}
+											invitesHref={membersPath}
+										/>
+									</div>
+								</details>
 							{/if}
 						</li>
 					{/each}

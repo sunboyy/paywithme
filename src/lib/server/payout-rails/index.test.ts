@@ -236,6 +236,34 @@ describe('rail field descriptors', () => {
 		}
 	});
 
+	it('names one value to copy per rail, and at most one name to check (issue #86)', () => {
+		// The payer-facing surfaces branch on these roles and nothing else, so a rail
+		// with two copy targets (or two holder names) would make them ambiguous —
+		// and a rail with none would leave a payer with nothing to put in their bank.
+		for (const rail of RAILS) {
+			const roles = rail.fields.map((field) => field.payerRole);
+
+			expect(
+				roles.filter((role) => role === 'copy'),
+				rail.id
+			).toHaveLength(1);
+			expect(roles.filter((role) => role === 'name-check').length, rail.id).toBeLessThanOrEqual(1);
+		}
+	});
+
+	it('marks the holder name as the name to check on every rail that has one', () => {
+		// PLAN §17.2: the holder name is required on every rail except `other`, and it
+		// is the ONLY defence against a valid-but-wrong account number — so wherever a
+		// rail collects one, the payer surfaces must be told which field it is.
+		for (const rail of RAILS) {
+			const holderNames = rail.fields.filter((field) => /holder name/i.test(field.label));
+
+			for (const field of holderNames) {
+				expect(field.payerRole, `${rail.id}.${field.name}`).toBe('name-check');
+			}
+		}
+	});
+
 	it('is plain serializable data, because `load` sends it to the browser', () => {
 		for (const rail of RAILS) {
 			expect(JSON.parse(JSON.stringify(rail.fields)), rail.id).toEqual(

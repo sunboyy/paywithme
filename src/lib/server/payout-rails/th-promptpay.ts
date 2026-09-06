@@ -35,14 +35,17 @@ export const thPromptPayRail = defineRail({
 			control: 'text',
 			inputMode: 'numeric',
 			maxLength: PROXY_VALUE_MAX_DIGITS,
-			placeholder: 'Digits only'
+			placeholder: 'Digits only',
+			// The proxy the payer enters — the copy affordance goes here (issue #86).
+			payerRole: 'copy'
 		},
 		{
 			name: 'accountHolderName',
 			label: 'Account holder name',
 			control: 'text',
 			maxLength: ACCOUNT_HOLDER_NAME_MAX_LENGTH,
-			hint: 'Exactly as your bank has it. People pay you by checking this name.'
+			hint: 'Exactly as your bank has it. People pay you by checking this name.',
+			payerRole: 'name-check'
 		}
 	],
 	// Proxy type · value · holder name — the holder name last, for the same

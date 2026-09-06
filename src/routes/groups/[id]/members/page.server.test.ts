@@ -27,7 +27,8 @@ const {
 	GroupAccessError,
 	MemberNotFoundError,
 	DisplayNameTakenError,
-	InviteNotFoundError
+	InviteNotFoundError,
+	loadReceivingProfiles
 } = vi.hoisted(() => {
 	class GroupAccessError extends Error {
 		readonly code = 'group_access' as const;
@@ -63,7 +64,8 @@ const {
 		GroupAccessError,
 		MemberNotFoundError,
 		DisplayNameTakenError,
-		InviteNotFoundError
+		InviteNotFoundError,
+		loadReceivingProfiles: vi.fn()
 	};
 });
 
@@ -83,6 +85,10 @@ vi.mock('$lib/server/invites', () => ({
 	revokeInvite,
 	InviteNotFoundError
 }));
+// Member detail also shows HOW TO PAY each member (issue #86; PLAN §17.4). The
+// view builder has its own spec (`lib/server/receiving-view.test.ts`); what the
+// route owes is that it asks for every member and degrades instead of 500-ing.
+vi.mock('$lib/server/receiving-view', () => ({ loadReceivingProfiles }));
 
 import { load, actions } from './+page.server';
 
@@ -140,6 +146,8 @@ beforeEach(() => {
 	revokeInvite.mockReset();
 	// Default the invite list to empty so member-focused load tests don't 500.
 	listActiveInvites.mockResolvedValue([]);
+	loadReceivingProfiles.mockReset();
+	loadReceivingProfiles.mockResolvedValue({});
 	// Default: the acting user STILL has access after a removal (the common,
 	// non-self case), so `removeMember` returns its success message. Self-removal
 	// tests override this to `false` to exercise the §10 redirect.
@@ -569,5 +577,56 @@ describe('/groups/[id]/members ?/revokeInvite action', () => {
 			expect(isHttpError(e)).toBe(true);
 			if (isHttpError(e)) expect(e.status).toBe(404);
 		}
+	});
+});
+
+describe('member detail — how to pay them (issue #86; PLAN §17.3–§17.4)', () => {
+	const ROSTER = [
+		{ id: 'm1', displayName: 'Alice', userId: 'u1', deactivatedAt: null, isLinked: true },
+		{ id: 'm2', displayName: 'Bob', userId: null, deactivatedAt: null, isLinked: false }
+	];
+
+	beforeEach(() => {
+		getGroupForUser.mockResolvedValue({ id: 'g1', name: 'Trip', settlementCurrency: 'THB' });
+		listMembers.mockResolvedValue(ROSTER);
+	});
+
+	it('asks for every member on the roster, linked or not', async () => {
+		// An unlinked slot costs no query inside the builder, but it still needs an
+		// answer — that answer is the "invite them" empty state.
+		await load(makeLoadEvent(AUTH_USER));
+
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [
+			{ id: 'm1', userId: 'u1' },
+			{ id: 'm2', userId: null }
+		]);
+	});
+
+	it('hands the page the view keyed by member id', async () => {
+		loadReceivingProfiles.mockResolvedValue({
+			m1: { state: 'no-methods' },
+			m2: { state: 'unlinked' }
+		});
+
+		const result = (await load(makeLoadEvent(AUTH_USER))) as {
+			receiving: Record<string, { state: string }>;
+		};
+
+		expect(result.receiving.m1.state).toBe('no-methods');
+		expect(result.receiving.m2.state).toBe('unlinked');
+	});
+
+	it('still renders the roster when the receiving read fails', async () => {
+		// This screen's job is membership. A transient receiving failure must not
+		// take it down — and must not invent a method that isn't there.
+		loadReceivingProfiles.mockRejectedValue(new Error('boom'));
+
+		const result = (await load(makeLoadEvent(AUTH_USER))) as {
+			members: unknown[];
+			receiving: Record<string, unknown>;
+		};
+
+		expect(result.members).toHaveLength(2);
+		expect(result.receiving).toEqual({});
 	});
 });

@@ -18,12 +18,29 @@
 // `createTransaction` action unchanged (§8.4: "on save it's a normal
 // transaction, so balances recompute and the suggestion list shrinks"). The
 // audit-log UI (Phase 6) is NOT built here.
+//
+// ── The creditor's receiving details (issue #86; PLAN §17.3–§17.4) ───────────
+// §8.4: "the suggested-transfer row also surfaces the creditor's receiving
+// method — the account details the debtor needs to make the real-world
+// transfer." They are loaded ONLY for the members a suggestion actually names as
+// a creditor, and only through `loadReceivingProfiles` → `listForViewer`, which
+// re-derives visibility from shared co-membership on every read. This route never
+// queries `receiving_method` itself.
+//
+// They are loaded here rather than fetched on tap so the disclosure opens with JS
+// disabled; the row itself never prints them (§17.3).
+//
+// The group's newest active invite link rides along for the unlinked-creditor
+// empty state (§17.4 case 1). Reading it is a read; CREATING one is a mutation
+// and stays on the members screen.
 
 import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
 import { getGroupBalances } from '$lib/server/balances';
 import { listMembers } from '$lib/server/members';
+import { listActiveInvites } from '$lib/server/invites';
+import { loadReceivingProfiles } from '$lib/server/receiving-view';
 import {
 	orderByWhoShouldPay,
 	suggestSettlements,
@@ -97,8 +114,32 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		amountFormatted: formatAmount(s.amount, settlementCurrency, { code: false })
 	}));
 
+	// §17.4: only the members a suggestion names as the CREDITOR — nobody else's
+	// details belong on this page, and an all-settled group loads none at all.
+	const creditorIds = new Set(suggestions.map((s) => s.toMemberId));
+	const receiving = await loadReceivingProfiles(
+		user.id,
+		members.filter((m) => creditorIds.has(m.id)).map((m) => ({ id: m.id, userId: m.userId }))
+	);
+
+	// The invite link the unlinked-creditor empty state offers (§17.4 case 1,
+	// §6.2). Degrade to null on failure: a missing link costs the nudge, not the
+	// settle screen — the panel falls back to a link to the members page.
+	let inviteUrl: string | null = null;
+	if (Object.values(receiving).some((profile) => profile.state === 'unlinked')) {
+		try {
+			const [newest] = await listActiveInvites({ userId: user.id, groupId: params.id });
+			inviteUrl = newest ? `${url.origin}/invite/${newest.token}` : null;
+		} catch {
+			inviteUrl = null;
+		}
+	}
+
 	return {
 		group: { id: group.id, name: group.name, settlementCurrency },
+		// memberId → the §17.4 view of that creditor's receiving details.
+		receiving,
+		inviteUrl,
 		currency: currency
 			? { code: currency.code, symbol: currency.symbol, exponent: currency.exponent }
 			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },

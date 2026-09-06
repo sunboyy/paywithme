@@ -32,7 +32,10 @@ export const otherRail = defineRail({
 			control: 'textarea',
 			maxLength: OTHER_TEXT_MAX_LENGTH,
 			placeholder: 'Whatever someone needs in order to pay you',
-			hint: 'Written out for a person to read — this is copied as-is.'
+			hint: 'Written out for a person to read — this is copied as-is.',
+			// Copyable, but NO `name-check` anywhere on this rail: there is no holder
+			// name to compare (PLAN §17.2 requires one on every rail except this one).
+			payerRole: 'copy'
 		}
 	],
 	// Member-authored on both sides: the label is whatever the owner called it, and

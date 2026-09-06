@@ -9,8 +9,14 @@
 	// nicety with the link text as the no-JS fallback). The accept flow
 	// (`/invite/[token]`) is task 3.7 and is not here.
 	//
+	// MEMBER DETAIL (issue #86; PLAN §17.3–§17.4): the per-member disclosure is also
+	// where "how to pay them" lives. Same panel as the settle screen, opened by the
+	// same tap that already reveals this row's controls — §17.3 wants it on demand,
+	// never printed in the list.
+	//
 	// shadcn-svelte components are used from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored / edited here).
+	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import { zod4Client } from 'sveltekit-superforms/adapters';
 	import { toast } from 'svelte-sonner';
@@ -26,6 +32,7 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
+	import ReceivingMethodsPanel from '$lib/components/ReceivingMethodsPanel.svelte';
 	import UsersIcon from '@lucide/svelte/icons/users';
 	import LinkIcon from '@lucide/svelte/icons/link';
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
@@ -97,6 +104,12 @@
 	function inviteUrl(token: string): string {
 		return `${data.origin}/invite/${token}`;
 	}
+
+	// The link the unlinked-member empty state offers (PLAN §17.4 case 1). Newest
+	// active one; null when the group has none, and the panel then points at the
+	// create control further down this same page.
+	const newestInviteUrl = $derived(data.invites.length ? inviteUrl(data.invites[0].token) : null);
+	const membersPath = $derived(resolve('/groups/[id]/members', { id: data.group.id }));
 
 	// Absolute + relative expiry text (PLAN §6.2 — show the expiry).
 	const relativeFormatter =
@@ -199,6 +212,7 @@
 					{#each data.members as member (member.id)}
 						{@const isYou = member.isLinked && member.userId === data.viewerUserId}
 						{@const isInactive = member.deactivatedAt != null}
+						{@const receiving = data.receiving[member.id]}
 						<li class="py-1">
 							<details class="group/member">
 								<summary
@@ -226,14 +240,30 @@
 									<!-- The chevron is decorative; the accessible name for the toggle is
 									     the visually-hidden text, so screen readers hear which member
 									     this row's controls belong to. -->
-									<span class="sr-only">Manage {member.displayName}</span>
+									<span class="sr-only">Details for {member.displayName}</span>
 									<ChevronDownIcon
 										class="size-4 shrink-0 text-muted-foreground transition-transform group-open/member:rotate-180"
 										aria-hidden="true"
 									/>
 								</summary>
 
-								<div class="space-y-3 px-1 pt-1 pb-3 pl-12">
+								<div class="space-y-4 px-1 pt-1 pb-3 pl-12">
+									<!-- How to pay them (issue #86; PLAN §17.4). Read-only, so it sits
+									     ABOVE the management controls: the common reason to open a member
+									     is "where do I send the money?", not "rename them". -->
+									{#if receiving}
+										<div class="space-y-2">
+											<p class="text-sm font-medium">How to pay {member.displayName}</p>
+											<ReceivingMethodsPanel
+												view={receiving}
+												displayName={member.displayName}
+												inviteUrl={newestInviteUrl}
+												invitesHref={membersPath}
+											/>
+										</div>
+										<Separator />
+									{/if}
+
 									<!-- Rename (works without JS): a real form, name pre-filled. -->
 									<form
 										method="POST"

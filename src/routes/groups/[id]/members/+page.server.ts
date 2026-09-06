@@ -16,6 +16,13 @@
 // and `InviteNotFoundError` (invite not in group) all map to `error(404)`; any
 // other failure is a generic message (never leaking the raw cause — §12).
 //
+// MEMBER DETAIL (issue #86; PLAN §17.3–§17.4): each member row's disclosure also
+// shows HOW TO PAY that member — the same panel the settle screen opens. `load`
+// builds it through `loadReceivingProfiles`, which reads only via `listForViewer`
+// (visibility re-derived from shared co-membership on every read); this route
+// never queries `receiving_method`. Unlinked members cost no query and land on the
+// "invite them" empty state, which the invite links already loaded here fill in.
+//
 // `DisplayNameTakenError` (ADR-0015) is the exception to "generic message": it is
 // a USER-FIXABLE 400 whose whole value is its text, so the service message is
 // passed through verbatim. It surfaces wherever the submitting form can show it —
@@ -49,6 +56,8 @@ import {
 	InviteNotFoundError,
 	type ActiveInvite
 } from '$lib/server/invites';
+import { loadReceivingProfiles } from '$lib/server/receiving-view';
+import type { ReceivingProfileView } from '$lib/receiving-method-view';
 import type { Actions, PageServerLoad } from './$types';
 
 /** Maps the service error model to HTTP: not-found errors → 404, else rethrow. */
@@ -100,9 +109,25 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		invites = [];
 	}
 
+	// memberId → how to pay them (PLAN §17.4). Degrade to "no details" rather than
+	// 500-ing the roster: the members screen's own job is membership, and a
+	// transient receiving read must not take it down. An EMPTY map is the honest
+	// fallback — the page renders no panel at all for a member it has no entry for,
+	// rather than claiming they have nothing on file.
+	let receiving: Record<string, ReceivingProfileView>;
+	try {
+		receiving = await loadReceivingProfiles(
+			user.id,
+			members.map((m) => ({ id: m.id, userId: m.userId }))
+		);
+	} catch {
+		receiving = {};
+	}
+
 	return {
 		// The viewer's own user id so the page can mark their linked member "You".
 		viewerUserId: user.id,
+		receiving,
 		group: { id: group.id, name: group.name, settlementCurrency: group.settlementCurrency },
 		members,
 		invites,
