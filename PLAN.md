@@ -390,6 +390,9 @@ Rules:
   every member's list and its routes return not-found, but data is retained and
   recoverable. No hard-delete in v1.
 
+A member is a group-scoped slot and holds no payment details of its own; how a
+person is paid belongs to their **User** (§17).
+
 ---
 
 ## 7. Transactions
@@ -945,6 +948,8 @@ This yields a minimal set of "X pays Y amount Z" suggestions for the settle scre
   recipient = creditor, amount, category = "Debt settlement").
 - On save it's a normal transaction, so balances recompute and the suggestion list
   shrinks.
+- The suggested-transfer row also surfaces the creditor's **receiving method**
+  (§17) — the account details the debtor needs to make the real-world transfer.
 
 ---
 
@@ -1345,6 +1350,14 @@ init`, which also pulls in `@lucide/svelte`); add base components via the CLI;
   mutations, implies read). Set per key at creation (§16.3).
 - **Idempotency key** — a caller-supplied header on POST creates that lets a retry
   replay the original response instead of creating a duplicate (§16.7).
+- **Receiving method** — one way a user can be paid, recorded by that user: a
+  rail plus its fields. An instruction for a human; the app never moves or
+  verifies money (§17).
+- **Receiving profile** — a user's ordered list of receiving methods; the first
+  is the preferred one (§17.1).
+- **Rail** — the payment network a receiving method rides (e.g. Thai bank
+  transfer, PromptPay). A registry entry in code, never an enum value (§17.2,
+  ADR-0016).
 
 ---
 
@@ -1664,3 +1677,123 @@ and existing shadcn `dialog`/`select`/`input`/`label`.
 - **Contract test:** live responses validate against the OpenAPI component schemas;
   the quickstart curl request bodies are shape-checked. (A runnable end-to-end
   curl smoke test is a forward add, not v1.)
+
+---
+
+## 17. Receiving methods (how to pay someone)
+
+Settling a debt ends outside the app: the debtor opens a banking app and
+transfers real money. Today the creditor's account details travel by group chat.
+This section replaces that with details the creditor records **once, themselves**.
+
+The app never moves money, never verifies an account, and never contacts a bank.
+A receiving method is an **instruction for a human**, nothing more.
+
+### 17.1 Model
+
+- **Receiving method** — one way a **User** can be paid: a rail (§17.2) plus that
+  rail's fields. Belongs to a `user_id`, not to a member and not to a group.
+- **Receiving profile** — a user's **ordered** list of receiving methods. Order
+  _is_ the preference: the first is what the settle screen shows, the rest are
+  behind "other ways to pay". There is no separate default flag — a second source
+  of truth that could contradict the ordering.
+- A user may hold **several** methods (two banks, two countries).
+- Methods reach a group only through `members.user_id`. An **unlinked member has
+  none, by construction** (§6.2) — the fix is an invite, not data entry. Nobody
+  can record receiving details on someone else's behalf in v1.
+
+### 17.2 Rails — a code registry, not an enum
+
+A **rail** is the payment network a method rides. Each rail owns its own field
+schema, validation, display formatting and (later) QR encoder, because these vary
+by country and cannot be generalised — see ADR-0016.
+
+- Storage is rail-agnostic: `rail` (text) + `details` (jsonb).
+- The registry lives in `lib/server/payout-rails/`, one entry per rail, with its
+  Zod schema in `lib/schemas/`. Adding a country later is a new registry entry —
+  no migration, no enum change, no touching existing rows.
+- **No rail is privileged in code.** `th_promptpay` is one entry beside
+  `th_bank_account`; neither is the "default" type.
+
+**v1 rails:**
+
+| Rail              | Fields                                                                 | QR    |
+| ----------------- | ---------------------------------------------------------------------- | ----- |
+| `th_bank_account` | bank (shipped list of Thai banks), account number, account holder name | later |
+| `th_promptpay`    | proxy type, proxy value, account holder name                           | later |
+| `other`           | label + free text                                                      | never |
+
+**Validation is deliberately loose on the number and strict on the name.**
+
+- The account number is checked for digits only and a plausible length. **No
+  per-bank format rules** — they go stale silently and reject valid new formats.
+- **Account holder name is required** on every rail except `other`. This is the
+  load-bearing rule: no format check can catch a _valid but wrong_ account
+  number, and one transposed digit that happens to be a real account sends real
+  money to a stranger. The only thing that catches that is the payer comparing
+  the name their banking app displays against the name shown here — so the
+  settle screen states that comparison as an explicit instruction, not a hint.
+- The holder name is a **third, distinct name string**, next to `user.name` and
+  `members.display_name`. It is whatever the bank has on record, may be in Thai,
+  and is never defaulted from either of the others.
+
+### 17.3 Visibility
+
+- A user's receiving profile is visible to **any member of any group they share**
+  — the same people who would read it in the group chat today, except this copy
+  can be corrected and removed.
+- Shown **on demand** (a tap), never printed inline in member lists.
+- Visibility follows shared co-membership and is re-evaluated on every read, so
+  **leaving a group revokes it there** with no extra code.
+- Deleting a method is the only off switch needed; nothing references it, so it
+  vanishes cleanly (§17.5).
+- Receiving details are authenticated data — §11.1's "never cache authenticated
+  responses" applies unchanged.
+
+### 17.4 Surfaces and empty states
+
+- **`/settings/receiving`** — the owner's editor: add, reorder, edit, delete.
+- **`/groups/[id]/settle`** — a suggested-transfer row expands to show the
+  creditor's first method, with a copy affordance and the name-check instruction.
+- **Member detail** — the same, on demand.
+
+Three empty states, each saying a different thing:
+
+1. **Creditor is an unlinked member.** There will never be anything to show until
+   they join → _"No account yet — invite them"_, with the group's invite link
+   (§6.2). This doubles as the invite nudge the product already wants.
+2. **Creditor is linked but has no methods.** → _"Nan hasn't added a receiving
+   method."_ Nothing more: v1 has no notifications, so the app cannot nudge them
+   and must not pretend otherwise.
+3. **I am the creditor and my own profile is empty** → inline _"Add how people
+   should pay you →"_. **Nice to have, not required for v1.** It is the whole
+   adoption strategy — the one moment a user is looking at a screen saying people
+   owe them money — but the feature ships without it.
+
+### 17.5 Deliberately out of scope
+
+- **The ledger is untouched.** A settle-up transaction does **not** record which
+  receiving method was used. Balances, `transactions`, and the MCP write contract
+  gain no fields. This is a directory beside the ledger, not part of it.
+- **No `audit_log` row** for receiving-method changes — see ADR-0016. This is a
+  deliberate exception to §12.1, not an oversight.
+- **Not exposed to `/api/v1` or the Connector** (§16). A leaked read key today
+  exposes who owes what; it must not also export every co-member's bank details
+  in bulk. Revisit only for a demanded workflow, and then as a narrow
+  single-member read, never a list.
+- **QR with a fixed amount** is a separate issue, and its **first task is a
+  spike** (ADR-0016): confirm against real banking apps that an account-number
+  proxy QR actually scans cross-bank. A QR that silently fails to scan is worse
+  than no QR — the payer discovers it at the moment they are trying to pay.
+- **No verification, no micro-deposits, no bank APIs**, ever in v1.
+
+### 17.6 Data model sketch
+
+```
+receiving_method (id, user_id → user.id ON DELETE CASCADE,
+                  rail,            -- registry key, e.g. 'th_bank_account'
+                  details,         -- jsonb, validated by the rail's Zod schema
+                  position,        -- ordering within the profile; first = preferred
+                  created_at)
+                  -- index (user_id, position)
+```

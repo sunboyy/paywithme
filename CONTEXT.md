@@ -91,3 +91,31 @@ recorded, for how much, and **naming the humans involved** — "Recorded settle-
 you → Nan Suphaporn, THB 1,200.00." Its purpose is legibility, not confirmation:
 it turns a wrong amount or a wrong payee into something the user reads at the
 moment it happens, rather than discovers later in the ledger.
+
+## Receiving method
+
+One way a **User** can be paid — a Rail plus that rail's fields (an account
+number, a PromptPay proxy, or free text). It is an **instruction for a human**:
+the app never moves money, never verifies an account, and never contacts a bank.
+
+It belongs to a user, never to a Member or a group, so an unlinked member slot has
+none by construction — the answer to "how do I pay Nan?" when Nan has no account
+is an invite link, not data entry.
+
+_Avoid_: payout method (implies a platform disbursing funds — nothing here
+disburses anything), payment method (reads as _how you pay_, the opposite
+direction), bank account (only one of the rails).
+
+## Receiving profile
+
+A user's **ordered** list of Receiving methods. The order _is_ the preference —
+the first one is what the settle screen shows — so there is no separate "default"
+flag to contradict it.
+
+## Rail
+
+The payment network a Receiving method rides: Thai bank transfer, PromptPay, or
+the catch-all `other`. A rail owns its own fields, validation, display format and
+QR encoding, because all four vary by country and none of them generalise
+(ADR-0016). A rail is always a **registry entry in code**, never an enum value in
+a `switch`, and no rail is privileged over another.
