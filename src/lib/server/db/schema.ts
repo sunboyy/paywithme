@@ -68,6 +68,17 @@
 //     `oauthAccessToken`, `oauthConsent` — the drizzle adapter resolves each
 //     model via `schema['oauthApplication']` etc.
 
+//   - receiving_method (issue #83) → re-exported from `receiving-schema.ts`,
+//     hand-authored (PLAN §17.1–§17.2, §17.6; ADR-0016): a user's ordered list of
+//     ways to be paid. Storage is RAIL-AGNOSTIC — `rail` is plain text (a registry
+//     key, no enum / FK / check) and `details` is jsonb whose shape the database is
+//     deliberately never taught; the rail registry in `lib/server/payout-rails/`
+//     validates both on every write. `user_id` is `cascade` (unlike
+//     `members.user_id`'s `set null`) and `(user_id, position)` is a PLAIN index,
+//     not unique. Changes here write NO `audit_log` row — a documented exception
+//     to §12.1 (ADR-0016), because audit rows are group-scoped and this is
+//     user-scoped.
+
 export * from './auth-schema';
 export * from './api-key-schema';
 export * from './rate-limit-schema';
@@ -78,3 +89,4 @@ export * from './audit-schema';
 export * from './idempotency-schema';
 export * from './api-key-class-rate-limit-schema';
 export * from './oauth-schema';
+export * from './receiving-schema';

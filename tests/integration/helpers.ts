@@ -67,7 +67,13 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 					-- instead of erroring with a missing-relation).
 					to_regclass('public.api_key')                  as api_key,
 					to_regclass('public.idempotency_key')          as idempotency_key,
-					to_regclass('public.api_key_class_rate_limit') as api_key_class_rate_limit
+					to_regclass('public.api_key_class_rate_limit') as api_key_class_rate_limit,
+					-- Receiving methods (issue #83; PLAN §17.6). The schema suite below
+					-- proves the ON DELETE CASCADE and the NON-unique (user_id, position)
+					-- index against the real database, so the table must be migrated;
+					-- checking it here keeps the run SAFE on an older DB (the suite skips
+					-- cleanly instead of erroring with a missing-relation).
+					to_regclass('public.receiving_method')         as receiving_method
 		`);
 		const row = (res.rows?.[0] ?? {}) as Record<string, unknown>;
 		const missing = Object.entries(row)
