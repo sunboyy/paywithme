@@ -17,6 +17,12 @@
 		amountFormatted: string | null;
 		/** The real-world day (`YYYY-MM-DD`) the expense happened. */
 		capturedFor: string;
+		/**
+		 * Where "Record it" goes — the add-transaction form, prefilled from this note
+		 * (issue #51; PLAN §7.7 "Resolving"). Built by the page, which owns route
+		 * knowledge; a plain link, so it works with no JS and can be opened in a new tab.
+		 */
+		recordHref: string;
 	};
 </script>
 
@@ -32,14 +38,18 @@
 	// `note` is written by a member (CONTEXT.md). It is interpolated as TEXT — never
 	// `{@html}` — so Svelte escapes it, and it is always shown next to who wrote it.
 	//
-	// ── NO "RECORD IT" BUTTON HERE ───────────────────────────────────────────────
-	// Resolving a Capture into a transaction is its own slice (#51). This tray shows
-	// and discards; it does not convert.
+	// ── THE TWO ENDINGS ──────────────────────────────────────────────────────────
+	// "Record it" (#51) is a LINK to the add-transaction form prefilled from the
+	// note, not a form action: recording needs the split, the payers and the category
+	// that the note deliberately doesn't hold (ADR-0012), so the ending is decided on
+	// that form and stamped when it saves. "Discard" is the other ending, and it IS a
+	// destructive form action — hence the dialog on top of it.
 	//
 	// The word "Capture" appears nowhere a user can read — internal vocabulary
 	// (PLAN §7.7 / CONTEXT.md).
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
+	import { Button } from '$lib/components/ui/button';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import { dayLabel } from '$lib/date-groups';
 
@@ -96,18 +106,25 @@
 								{/if}
 							</p>
 						</div>
-						<!-- Destructive, so it is confirmed by an Alert Dialog naming the note
-						     (§10) — and the underlying form action still works without JS. -->
-						<ConfirmSubmit
-							action={discardAction}
-							{enhance}
-							hiddenName="captureId"
-							hiddenValue={capture.id}
-							triggerLabel="Discard"
-							title="Discard this note?"
-							description="“{capture.note}” will stop showing here. It won't be recorded, and the group's activity keeps a record that it was discarded."
-							confirmLabel="Discard"
-						/>
+						<!-- Mobile-first (§10): the two endings stack on a narrow screen so the
+						     note itself keeps the width, and sit side by side from `sm` up. -->
+						<div class="flex shrink-0 flex-col items-stretch gap-1 sm:flex-row sm:items-center">
+							<!-- The primary ending: opens the add-transaction form prefilled from
+							     this note (§7.7 "Resolving"). -->
+							<Button variant="secondary" size="sm" href={capture.recordHref}>Record it</Button>
+							<!-- Destructive, so it is confirmed by an Alert Dialog naming the note
+							     (§10) — and the underlying form action still works without JS. -->
+							<ConfirmSubmit
+								action={discardAction}
+								{enhance}
+								hiddenName="captureId"
+								hiddenValue={capture.id}
+								triggerLabel="Discard"
+								title="Discard this note?"
+								description="“{capture.note}” will stop showing here. It won't be recorded, and the group's activity keeps a record that it was discarded."
+								confirmLabel="Discard"
+							/>
+						</div>
 					</li>
 				{/each}
 			</ul>

@@ -122,12 +122,25 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
 
+// The LEDGER side of a resolve. `recordCaptureAsTransaction` composes with the real
+// `createTransaction` (issue #51), which is covered by its own suite + the real-DB
+// integration tests; here it is a spy, so these tests can assert the two things the
+// composition itself is responsible for: WHAT the ledger is handed, and that the
+// stamp runs through the `tx` the ledger hands BACK.
+const { createTransaction } = vi.hoisted(() => ({ createTransaction: vi.fn() }));
+vi.mock('./transactions', async () => {
+	const actual = await vi.importActual<typeof import('./transactions')>('./transactions');
+	return { ...actual, createTransaction };
+});
+
 import { PgDialect } from 'drizzle-orm/pg-core';
 import {
 	createCapture,
 	listOpenCaptures,
 	countOpenCapturesByGroup,
 	openCapturePredicate,
+	findOpenCapture,
+	recordCaptureAsTransaction,
 	resolveCapture,
 	discardCapture,
 	CaptureNotFoundError,
@@ -135,6 +148,7 @@ import {
 	CaptureValidationError,
 	type Capture
 } from './captures';
+import { db } from './db';
 import { GroupAccessError } from './groups';
 import { TransactionNotFoundError } from './transactions';
 import { captures } from './db/captures-schema';
@@ -192,6 +206,7 @@ beforeEach(() => {
 	calls.log.length = 0;
 	calls.inserts.length = 0;
 	calls.updates.length = 0;
+	createTransaction.mockReset();
 });
 
 describe('createCapture', () => {
@@ -587,5 +602,150 @@ describe('countOpenCapturesByGroup', () => {
 		const first = new PgDialect().sqlToQuery(openCapturePredicate()!).sql;
 		const second = new PgDialect().sqlToQuery(openCapturePredicate()!).sql;
 		expect(first).toBe(second);
+	});
+});
+
+describe('findOpenCapture', () => {
+	const FIND = { ...ARGS, captureId: 'cap-1' };
+
+	it('returns the row the prefill will seed the form from', async () => {
+		setAccess(true);
+		programSelects(captures, [captureRow({ amountMinor: 120000, currency: 'THB' })]);
+
+		const row = await findOpenCapture(FIND);
+
+		expect(row?.note).toBe('dinner at the night market');
+		expect(row?.amountMinor).toBe(120000);
+		// Membership (§12) FIRST, then one read. Nothing is written by a prefill.
+		expect(calls.log).toEqual(['select:members', 'select:captures']);
+		expect(calls.updates).toHaveLength(0);
+		expect(calls.inserts).toHaveLength(0);
+	});
+
+	it('returns null — never throws — for a row that is gone or already closed', async () => {
+		setAccess(true);
+		// The query carries the OPEN predicate, so a resolved, a discarded, another
+		// group's and a nonexistent id all come back the same way. (That the predicate
+		// really is in the WHERE is proved against a real database in
+		// `tests/integration/capture-service.test.ts`.)
+		programSelects(captures, []);
+
+		await expect(findOpenCapture(FIND)).resolves.toBeNull();
+	});
+
+	it('refuses a non-member before reading anything (§12)', async () => {
+		setAccess(false);
+
+		await expect(findOpenCapture(FIND)).rejects.toBeInstanceOf(GroupAccessError);
+		expect(calls.log).toEqual(['select:members']);
+	});
+});
+
+describe('recordCaptureAsTransaction', () => {
+	const RECORD = {
+		...ARGS,
+		captureId: 'cap-1',
+		input: { title: 'Dinner', amountTotal: 120000 },
+		settlementCurrency: 'THB' as const
+	};
+
+	/**
+	 * Stand in for the ledger: run the caller's same-transaction hook with the stub
+	 * executor (this is exactly what `createTransaction` does with its own `tx`) and
+	 * hand back the new transaction id.
+	 */
+	function ledgerWrites(transactionId = 'txn-9') {
+		createTransaction.mockImplementation(async ({ alsoWrite }) => {
+			await alsoWrite?.(db, transactionId);
+			return transactionId;
+		});
+	}
+
+	it("stamps the Capture through the ledger write's OWN transaction handle", async () => {
+		ledgerWrites();
+		programSelects(transactions, [{ id: 'txn-9' }]);
+		state.updateReturning = [captureRow({ resolvedTransactionId: 'txn-9' })];
+
+		await expect(recordCaptureAsTransaction(RECORD)).resolves.toBe('txn-9');
+
+		// The stamp + its audit row ran on the handle the create passed in — that is
+		// what puts them in the SAME DB transaction as the insert (§12.1).
+		expect(calls.log).toEqual(['select:transactions', 'update:captures', 'insert:audit_log']);
+		expect(calls.updates[0].set).toMatchObject({ resolvedTransactionId: 'txn-9' });
+		expect(auditInserts()[0].values).toMatchObject({
+			action: 'resolve',
+			entityType: 'capture',
+			entityId: 'cap-1',
+			metadata: { transactionId: 'txn-9' }
+		});
+		// Membership is NOT re-checked here: `createTransaction` gates the write, and a
+		// second round-trip per save would buy nothing.
+		expect(calls.log).not.toContain('select:members');
+	});
+
+	it('hands the ledger the prefilled input UNCHANGED, with no Capture fields added', async () => {
+		ledgerWrites();
+		programSelects(transactions, [{ id: 'txn-9' }]);
+		state.updateReturning = [captureRow()];
+
+		await recordCaptureAsTransaction(RECORD);
+
+		const arg = createTransaction.mock.calls[0][0];
+		// The prefill is a starting point, not a trusted payload: it goes through the
+		// ordinary create, which re-validates all of §7.4. Nothing about the Capture
+		// travels into the ledger row.
+		expect(arg.input).toBe(RECORD.input);
+		expect(arg.userId).toBe('user-42');
+		expect(arg.groupId).toBe('group-1');
+		expect(arg.settlementCurrency).toBe('THB');
+		expect(arg).not.toHaveProperty('captureId');
+	});
+
+	it('fails the WHOLE write when someone else already recorded that note', async () => {
+		ledgerWrites();
+		programSelects(transactions, [{ id: 'txn-9' }]);
+		state.updateReturning = []; // the conditional UPDATE matched nothing
+		programSelects(captures, [{ resolvedAt: new Date('2026-09-06T00:00:00Z'), discardedAt: null }]);
+
+		const error = await recordCaptureAsTransaction(RECORD).catch((e) => e);
+
+		// Thrown from INSIDE the create's transaction, so the half-written transaction
+		// goes down with it: the loser of a double-submit records nothing at all.
+		expect(error).toBeInstanceOf(CaptureNotOpenError);
+		expect((error as CaptureNotOpenError).reason).toBe('resolved');
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('fails the whole write for a discarded note, naming that ending', async () => {
+		ledgerWrites();
+		programSelects(transactions, [{ id: 'txn-9' }]);
+		state.updateReturning = [];
+		programSelects(captures, [{ resolvedAt: null, discardedAt: new Date('2026-09-06T00:00:00Z') }]);
+
+		const error = await recordCaptureAsTransaction(RECORD).catch((e) => e);
+
+		expect(error).toBeInstanceOf(CaptureNotOpenError);
+		expect((error as CaptureNotOpenError).reason).toBe('discarded');
+	});
+
+	it("fails the whole write for a note that is not this group's", async () => {
+		ledgerWrites();
+		programSelects(transactions, [{ id: 'txn-9' }]);
+		state.updateReturning = [];
+		programSelects(captures, []);
+
+		await expect(recordCaptureAsTransaction(RECORD)).rejects.toBeInstanceOf(CaptureNotFoundError);
+		expect(auditInserts()).toHaveLength(0);
+	});
+
+	it('never lets a ledger failure leave a Capture stamped', async () => {
+		// The create itself refuses the payload (§7.4). The hook never runs, so the
+		// Capture stays OPEN and in everyone's tray — where it belongs, since nothing
+		// was recorded.
+		createTransaction.mockRejectedValueOnce(new Error('validation'));
+
+		await expect(recordCaptureAsTransaction(RECORD)).rejects.toThrow('validation');
+		expect(calls.updates).toHaveLength(0);
+		expect(auditInserts()).toHaveLength(0);
 	});
 });

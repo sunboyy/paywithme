@@ -36,7 +36,7 @@ _resolved_ into a real transaction (ADR-0012). Deliberately shallow: if it could
 hold splits it would be a second transaction form.
 
 "Capture" is **internal vocabulary**. Nothing user-facing says it — the UI calls
-the tray and the count **"Not recorded yet"**. The noun exists to avoid colliding
+the tray and the count **"Not recorded yet"**, and _resolving_ one **"Record it"**. The noun exists to avoid colliding
 with "placeholder" (an unlinked member slot) and "pending" (an idempotency row).
 
 ## Connector

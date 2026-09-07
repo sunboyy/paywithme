@@ -23,6 +23,7 @@ function tray(overrides: Partial<TrayCapture> = {}): TrayCapture {
 		authorName: 'Sur',
 		amountFormatted: '฿1,200.00',
 		capturedFor: '2026-08-01',
+		recordHref: '/groups/g1/transactions/new?capture=cap-1',
 		...overrides
 	};
 }
@@ -48,6 +49,15 @@ describe('"Not recorded yet" tray — served WITHOUT JavaScript', () => {
 		// browser that never hydrates must not be left with an inert trigger button
 		// as its only control.
 		expect(body).not.toContain('data-slot="alert-dialog-trigger"');
+	});
+
+	// "Record it" (issue #51; PLAN §7.7 "Resolving") is a plain LINK, so the whole
+	// path from remembering to recording is reachable with JavaScript off — the
+	// prefilled form on the other end is itself server-rendered.
+	it('offers "Record it" as a real link to the prefilled form', () => {
+		const body = ssr([tray()]);
+		expect(body).toContain('href="/groups/g1/transactions/new?capture=cap-1"');
+		expect(body).toContain('Record it');
 	});
 
 	it('still attributes every note to its author', () => {

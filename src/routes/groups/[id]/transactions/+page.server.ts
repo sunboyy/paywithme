@@ -250,6 +250,11 @@ export type DiscardOutcome = { message: App.Superforms.Message };
  * resolves. "Someone" is the last resort, mirroring the activity feed's fallback
  * rather than printing a raw user id at a reader.
  *
+ * ── Everything but the link ──────────────────────────────────────────────────
+ * `recordHref` is the one field the page adds instead of the server: where "Record
+ * it" goes is route knowledge (issue #51), and it carries nothing but this row's
+ * id — the add-transaction form re-reads the note itself.
+ *
  * ── The amount is FORMATTED, never converted ─────────────────────────────────
  * Rendering it needs the exponent of a currency that may exist only as a
  * `currencies` row, which is why it is done here where the group's set is loaded.
@@ -264,7 +269,7 @@ function toTrayCaptures(
 	memberRows: readonly { displayName: string; userId: string | null }[],
 	entryCurrencies: readonly CurrencyDescriptor[],
 	settlementCurrency: SeededCurrencyCode
-): TrayCapture[] {
+): Omit<TrayCapture, 'recordHref'>[] {
 	const authorNames = new Map(
 		memberRows.filter((m) => m.userId !== null).map((m) => [m.userId as string, m.displayName])
 	);

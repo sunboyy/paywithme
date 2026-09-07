@@ -2,11 +2,13 @@
 // (issue #49; PLAN §7.7, §9, §12, §12.1; ADR-0012). CLAUDE.md: "Business logic in
 // lib/server/".
 //
-// Four operations, and deliberately only four: `createCapture`,
-// `listOpenCaptures`, `resolveCapture`, `discardCapture`. A Capture has no edit
-// path and no delete path — it is a note you either record or give up on, and
-// both endings are STAMPS on the row, never a row delete, so the trail from
-// "I remembered this on Saturday" to "I recorded it on Tuesday" survives (§7.7).
+// One way in (`createCapture`), three ways to read (`listOpenCaptures`,
+// `countOpenCapturesByGroup`, `findOpenCapture`) and exactly two endings
+// (`resolveCapture` / `recordCaptureAsTransaction`, and `discardCapture`). A
+// Capture has no edit path and no delete path — it is a note you either record or
+// give up on, and both endings are STAMPS on the row, never a row delete, so the
+// trail from "I remembered this on Saturday" to "I recorded it on Tuesday"
+// survives (§7.7).
 //
 // ── THE SHALLOWNESS IS THE SPEC (ADR-0012) ───────────────────────────────────
 // Nothing here resolves a payer, a beneficiary, a split or a rate, because there
@@ -19,9 +21,12 @@
 // ── NEVER IN THE LEDGER (PLAN §7.7) ──────────────────────────────────────────
 // §8 balance math, `/settle`, `/api/v1` and the MCP transaction tools do not read
 // `captures` — not even as a provisional "±฿1,200 pending" note on a balance. The
-// dependency direction proves it: this module imports from `transactions.ts`
-// (to verify the transaction a resolve points at), and nothing in the ledger
-// imports from here.
+// dependency direction proves it: this module imports from `transactions.ts` (to
+// verify the transaction a resolve points at, and to CREATE the one a resolve
+// records), and nothing in the ledger imports from here. That is also why
+// `recordCaptureAsTransaction` lives on this side of the line and reaches into the
+// create through a hook, rather than `createTransaction` learning what a Capture
+// is.
 //
 // ── AUTHORIZATION (PLAN §12) ─────────────────────────────────────────────────
 // Group-membership only, no per-action roles. Every operation takes the acting
@@ -47,11 +52,11 @@ import { currencies } from './db/currencies-schema';
 import { members } from './db/groups-schema';
 import { transactions } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
-import { TransactionNotFoundError } from './transactions';
+import { createTransaction, TransactionNotFoundError } from './transactions';
 import { writeAuditLog, type AuditVia } from './audit';
 import { buildCreateCaptureSchema } from '$lib/schemas/capture';
 import type { EntryCurrencyOption } from '$lib/schemas/currency';
-import { CURRENCY_CODES, getCurrency } from '$lib/money';
+import { CURRENCY_CODES, getCurrency, type SeededCurrencyCode } from '$lib/money';
 
 /** A query runner: either the lazy `db` proxy or an open transaction handle. */
 type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update'>;
@@ -360,47 +365,164 @@ export async function resolveCapture({
 }): Promise<Capture> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
+		return stampCaptureResolved(tx, { userId, groupId, captureId, transactionId, via });
+	});
+}
 
-		const [transaction] = await tx
-			.select({ id: transactions.id })
-			.from(transactions)
-			.where(
-				and(
-					eq(transactions.id, transactionId),
-					eq(transactions.groupId, groupId),
-					isNull(transactions.deletedAt)
-				)
+/**
+ * The stamp itself, on an ALREADY-OPEN executor — the shared body of both resolve
+ * paths (`resolveCapture` against a transaction that already exists, and
+ * {@link recordCaptureAsTransaction} against one being written right now).
+ *
+ * Takes `tx` rather than reaching for `db`: the caller owns the transaction, and
+ * that is the whole point (§12.1) — the stamp and the audit row commit with
+ * whatever else that transaction is doing, or with none of it.
+ *
+ * Does NOT check group access. Both callers gate first (`resolveCapture` directly,
+ * `recordCaptureAsTransaction` through `createTransaction`), and doing it here as
+ * well would be a second membership round-trip inside every write.
+ */
+async function stampCaptureResolved(
+	tx: DbExecutor,
+	{
+		userId,
+		groupId,
+		captureId,
+		transactionId,
+		via
+	}: {
+		userId: string;
+		groupId: string;
+		captureId: string;
+		transactionId: string;
+		via?: AuditVia;
+	}
+): Promise<Capture> {
+	const [transaction] = await tx
+		.select({ id: transactions.id })
+		.from(transactions)
+		.where(
+			and(
+				eq(transactions.id, transactionId),
+				eq(transactions.groupId, groupId),
+				isNull(transactions.deletedAt)
 			)
-			.limit(1);
-		if (!transaction) throw new TransactionNotFoundError();
+		)
+		.limit(1);
+	if (!transaction) throw new TransactionNotFoundError();
 
-		const [row] = await tx
-			.update(captures)
-			.set({ resolvedTransactionId: transactionId, resolvedAt: new Date() })
-			.where(
-				and(
-					eq(captures.id, captureId),
-					eq(captures.groupId, groupId),
-					isNull(captures.resolvedAt),
-					isNull(captures.discardedAt)
-				)
+	const [row] = await tx
+		.update(captures)
+		.set({ resolvedTransactionId: transactionId, resolvedAt: new Date() })
+		.where(
+			and(
+				eq(captures.id, captureId),
+				eq(captures.groupId, groupId),
+				isNull(captures.resolvedAt),
+				isNull(captures.discardedAt)
 			)
-			.returning();
+		)
+		.returning();
 
-		if (!row) throw await closedCaptureError(captureId, groupId, tx);
+	if (!row) throw await closedCaptureError(captureId, groupId, tx);
 
-		await writeAuditLog(tx, {
-			groupId,
-			actorUserId: userId,
-			action: 'resolve',
-			entityType: 'capture',
-			entityId: row.id,
-			summary: `Recorded '${row.note}' from not recorded yet`,
-			metadata: { note: row.note, transactionId },
-			via
-		});
+	await writeAuditLog(tx, {
+		groupId,
+		actorUserId: userId,
+		action: 'resolve',
+		entityType: 'capture',
+		entityId: row.id,
+		summary: `Recorded '${row.note}' from not recorded yet`,
+		metadata: { note: row.note, transactionId },
+		via
+	});
 
-		return row;
+	return row;
+}
+
+/**
+ * ONE open Capture, for the prefill "Record it" opens (PLAN §7.7 "Resolving").
+ *
+ * Returns `null` — never throws — for a capture id that is missing, another
+ * group's, or already resolved/discarded, because the caller is a `load` seeding a
+ * form from an UNTRUSTED query parameter: a stale link should land on the ordinary
+ * blank add-transaction form, not on an error page. (The `?capture=` id is only a
+ * pointer at a row; nothing about it is trusted, and the resolve itself re-checks
+ * everything inside its own write.)
+ *
+ * Membership (§12) is still asserted, so a non-member cannot use this to learn
+ * whether a capture id exists.
+ */
+export async function findOpenCapture({
+	userId,
+	groupId,
+	captureId
+}: {
+	userId: string;
+	groupId: string;
+	captureId: string;
+}): Promise<Capture | null> {
+	await assertGroupAccess(userId, groupId);
+
+	const [row] = await db
+		.select()
+		.from(captures)
+		.where(and(eq(captures.id, captureId), eq(captures.groupId, groupId), openCapturePredicate()))
+		.limit(1);
+
+	return row ?? null;
+}
+
+/**
+ * "Record it": create the real transaction a Capture became, and stamp the Capture
+ * with it — IN ONE DB TRANSACTION (PLAN §7.7 "Resolving", §12.1).
+ *
+ * ── The prefill is a STARTING POINT, NOT A TRUSTED PAYLOAD ────────────────────
+ * `input` goes through `createTransaction` unchanged, so every §7.4 rule runs in
+ * full — payers summing to the total, the settlement side tying out, members
+ * belonging to this group, the FX rate. A Capture carries no split information at
+ * all (ADR-0012), so there is nothing here that could shortcut any of it: the
+ * resulting row is an ORDINARY transaction and hits balances exactly as a
+ * directly-entered one does.
+ *
+ * ── Why the stamp rides INSIDE the create ────────────────────────────────────
+ * The two writes are one fact. Split across two transactions, a failure between
+ * them leaves either a transaction whose Capture is still in everyone's tray
+ * (§7.7's deduplication now actively causing the double entry it exists to
+ * prevent) or a Capture pointing at a transaction that was rolled back. So the
+ * stamp runs through `createTransaction`'s own `tx` (its `alsoWrite` hook), and a
+ * Capture that someone else closed in the meantime throws
+ * {@link CaptureNotOpenError} from INSIDE that transaction — taking the
+ * half-written transaction with it. The double-submit's loser records nothing at
+ * all, which is exactly what it should record.
+ *
+ * Returns the new transaction's id.
+ */
+export async function recordCaptureAsTransaction({
+	userId,
+	groupId,
+	captureId,
+	input,
+	settlementCurrency,
+	via
+}: {
+	userId: string;
+	groupId: string;
+	captureId: string;
+	/** The RAW transaction input, exactly as `createTransaction` takes it. */
+	input: unknown;
+	settlementCurrency?: SeededCurrencyCode;
+	via?: AuditVia;
+}): Promise<string> {
+	return createTransaction({
+		userId,
+		groupId,
+		input,
+		settlementCurrency,
+		via,
+		alsoWrite: async (tx, transactionId) => {
+			await stampCaptureResolved(tx, { userId, groupId, captureId, transactionId, via });
+		}
 	});
 }
 

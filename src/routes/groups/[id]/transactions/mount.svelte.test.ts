@@ -235,6 +235,20 @@ describe('the "Not recorded yet" tray', () => {
 		expect(dialog.querySelector('[data-slot="alert-dialog-action"]')).not.toBeNull();
 	});
 
+	// "Record it" (issue #51; PLAN §7.7 "Resolving") — the OTHER ending. A plain
+	// link, carrying only the note's id: the add-transaction form re-reads the row
+	// and prefills itself server-side, so a link can never dictate what gets recorded.
+	it('offers "Record it" as a link to the prefilled add-transaction form', () => {
+		const { container } = render(Page, {
+			props: { data: pageData([], [tray()]), form: null }
+		});
+		const el = container.querySelector('[data-testid="not-recorded-yet-tray"]');
+
+		const link = el?.querySelector('a[href*="capture="]');
+		expect(link?.getAttribute('href')).toBe('/groups/g1/transactions/new?capture=cap-1');
+		expect(link?.textContent).toContain('Record it');
+	});
+
 	it('posts discard through a REAL form action, gated by an Alert Dialog', () => {
 		const { container } = render(Page, {
 			props: { data: pageData([], [tray()]), form: null }

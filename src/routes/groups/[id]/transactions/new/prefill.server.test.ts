@@ -1,8 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 
-// §8.4 settle-via-transfer PREFILL tests for the `new` transaction page `load`
-// (task 5.4). The settle page links here with `?type=transfer&from&to&amount&category`
+// PREFILL tests for the `new` transaction page `load` — both of them: the §8.4
+// settle-via-transfer link (task 5.4) and the §7.7 "Record it" link (issue #51).
+// A prefill is a CONVENIENCE built from untrusted URL params, so every case here
+// asks the same two questions: does a valid one seed exactly the right fields, and
+// does an invalid one fall back to the blank form WITHOUT throwing?
+//
+// The settle page links here with `?type=transfer&from&to&amount&category`
 // to seed a Transfer (payer = debtor, single beneficiary = creditor, amount,
 // category = Debt settlement). These tests use the REAL `superValidate` (NOT
 // mocked — unlike `page.server.test.ts`) so we assert the ACTUAL seeded `form.data`:
@@ -23,6 +28,16 @@ vi.mock('$lib/server/groups', async () => {
 	return { ...actual, getGroupForUser };
 });
 vi.mock('$lib/server/members', () => ({ listMembers }));
+
+// The Capture service (issue #51): `load` re-reads the note named by `?capture=`
+// and seeds the form from THE ROW, never from the URL — the link carries a pointer
+// and nothing else.
+const { findOpenCapture } = vi.hoisted(() => ({ findOpenCapture: vi.fn() }));
+vi.mock('$lib/server/captures', async () => {
+	const actual =
+		await vi.importActual<typeof import('$lib/server/captures')>('$lib/server/captures');
+	return { ...actual, findOpenCapture };
+});
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
 
 // The group-scoped ENTRY-CURRENCY set (#63; PLAN §7.5.2). The route reads it for
@@ -49,10 +64,14 @@ const MEMBERS = [
 ];
 
 type SeededForm = {
+	captureId: string | null;
 	form: {
 		data: {
 			type: string;
 			title: string;
+			date: string;
+			currencyExponent?: number;
+			exchangeRate: string;
 			categoryId: string;
 			amountTotal: number;
 			amountTotalSettlement: number;
@@ -80,6 +99,8 @@ beforeEach(() => {
 		SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false }))
 	);
 	listMembers.mockReset();
+	findOpenCapture.mockReset();
+	findOpenCapture.mockResolvedValue(null);
 	requireGroupAccess.mockReset();
 	requireUser.mockReset();
 
@@ -153,5 +174,151 @@ describe('/groups/[id]/transactions/new load — settle prefill (§8.4)', () => 
 		expect(data.type).toBe('spending');
 		expect(data.amountTotal).toBe(0);
 		expect(data.beneficiaries.map((b) => b.memberId)).toEqual(['m1', 'm2']);
+	});
+});
+
+// ── The "Record it" prefill (issue #51; PLAN §7.7 "Resolving") ────────────────
+// `?capture=<id>` seeds the form from the note: `note` → title, `amount_minor` +
+// `currency` → the amount, `captured_for` → the editable real-world `created_at`
+// day (§7.1 — the reversal that makes `created_at` the date and `occurred_at` the
+// insert time). Nothing else: a note carries no payers, beneficiaries, split mode
+// or rate (ADR-0012), so the rest is entered normally.
+
+/** One open note, as the service returns it. */
+function openNote(overrides: Record<string, unknown> = {}) {
+	return {
+		id: 'cap-1',
+		groupId: 'g1',
+		createdBy: 'u1',
+		note: 'dinner at the night market',
+		amountMinor: 120000,
+		currency: 'THB',
+		capturedFor: '2026-08-01',
+		resolvedTransactionId: null,
+		resolvedAt: null,
+		discardedAt: null,
+		createdAt: new Date('2026-08-01T12:00:00Z'),
+		...overrides
+	};
+}
+
+describe('/groups/[id]/transactions/new load — the "Record it" prefill (§7.7)', () => {
+	it("seeds the note, the amount and the note's own day", async () => {
+		findOpenCapture.mockResolvedValue(openNote());
+
+		const result = (await load(makeLoadEvent('?capture=cap-1'))) as SeededForm;
+		const data = result.form.data;
+
+		expect(findOpenCapture).toHaveBeenCalledWith({
+			userId: 'u1',
+			groupId: 'g1',
+			captureId: 'cap-1'
+		});
+		expect(data.title).toBe('dinner at the night market');
+		expect(data.amountTotal).toBe(120000);
+		expect(data.currency).toBe('THB');
+		// `captured_for` → the transaction's EDITABLE real-world date (§7.1).
+		expect(data.date).toBe('2026-08-01');
+		// Same currency as the group settles in → the rate seam stays a no-op.
+		expect(data.exchangeRate).toBe('1');
+		expect(data.amountTotalSettlement).toBe(120000);
+		// The single default payer mirrors the total, so the form is savable as seeded
+		// (this is what the no-JS POST submits).
+		expect(data.payers).toEqual([{ memberId: 'm1', amountPaid: 120000 }]);
+		// A note carries NO split information — the ordinary equal-split default stands.
+		expect(data.splitMode).toBe('equal');
+		expect(data.beneficiaries.map((b) => b.memberId)).toEqual(['m1', 'm2']);
+		expect(data.type).toBe('spending');
+		// The id travels to the page so the save can stamp the note (§12.1).
+		expect(result.captureId).toBe('cap-1');
+	});
+
+	it('seeds a note-only reminder with the title and date, and no amount', async () => {
+		findOpenCapture.mockResolvedValue(openNote({ amountMinor: null, currency: null }));
+
+		const result = (await load(makeLoadEvent('?capture=cap-1'))) as SeededForm;
+		const data = result.form.data;
+
+		expect(data.title).toBe('dinner at the night market');
+		expect(data.date).toBe('2026-08-01');
+		expect(data.amountTotal).toBe(0);
+		expect(data.currency).toBe('THB');
+		expect(data.exchangeRate).toBe('1');
+	});
+
+	it('seeds a FOREIGN amount with an empty rate for the user to enter (§7.6)', async () => {
+		findOpenCapture.mockResolvedValue(openNote({ amountMinor: 9000, currency: 'JPY' }));
+
+		const result = (await load(makeLoadEvent('?capture=cap-1'))) as SeededForm;
+		const data = result.form.data;
+
+		expect(data.currency).toBe('JPY');
+		// The scale the seeded minor units mean (§7.5.2) — JPY has no minor unit.
+		expect(data.currencyExponent).toBe(0);
+		expect(data.amountTotal).toBe(9000);
+		// A note stores no rate and no conversion (§7.7), so none is invented: a
+		// plausible "1" would quietly record a wrong ledger figure.
+		expect(data.exchangeRate).toBe('');
+		expect(data.amountTotalSettlement).toBe(0);
+	});
+
+	it('drops an amount whose currency the group no longer has', async () => {
+		// `captures.currency` is deliberately not a foreign key, so a custom currency
+		// deleted since leaves the code dangling — and then the amount has no scale to
+		// be read at. Re-entered by the user rather than guessed.
+		findOpenCapture.mockResolvedValue(openNote({ amountMinor: 4, currency: 'cur_gone' }));
+
+		const result = (await load(makeLoadEvent('?capture=cap-1'))) as SeededForm;
+		const data = result.form.data;
+
+		expect(data.title).toBe('dinner at the night market');
+		expect(data.amountTotal).toBe(0);
+		expect(data.currency).toBe('THB');
+		expect(data.exchangeRate).toBe('1');
+	});
+
+	it.each([
+		['a stale or already-closed note', null],
+		['a note this group cannot see', null]
+	])('falls back to the blank form for %s', async (_label, row) => {
+		findOpenCapture.mockResolvedValue(row);
+
+		const result = (await load(makeLoadEvent('?capture=whatever'))) as SeededForm;
+
+		expect(result.form.data.title).toBe('');
+		expect(result.form.data.amountTotal).toBe(0);
+		// Nothing to stamp → the save records an ordinary transaction.
+		expect(result.captureId).toBeNull();
+	});
+
+	it('falls back to the blank form (no error page) when the read fails', async () => {
+		findOpenCapture.mockRejectedValue(new Error('db down'));
+
+		const result = (await load(makeLoadEvent('?capture=cap-1'))) as SeededForm;
+
+		expect(result.form.data.title).toBe('');
+		expect(result.captureId).toBeNull();
+	});
+
+	it('reads no note at all on a plain visit', async () => {
+		const result = (await load(makeLoadEvent())) as SeededForm;
+
+		expect(findOpenCapture).not.toHaveBeenCalled();
+		expect(result.captureId).toBeNull();
+	});
+
+	it('leaves a settle-up prefill alone (one seeded form, one source)', async () => {
+		findOpenCapture.mockResolvedValue(openNote());
+
+		const result = (await load(
+			makeLoadEvent(
+				'?type=transfer&from=m2&to=m1&amount=12000&category=transfer-debt-settlement&capture=cap-1'
+			)
+		)) as SeededForm;
+
+		expect(result.form.data.type).toBe('transfer');
+		expect(result.form.data.title).toBe('Debt settlement');
+		expect(findOpenCapture).not.toHaveBeenCalled();
+		expect(result.captureId).toBeNull();
 	});
 });

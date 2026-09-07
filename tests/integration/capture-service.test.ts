@@ -14,7 +14,12 @@
 //      a discarded row doesn't linger is to discard one and look.
 //   3. MEMBERSHIP (§12) against real member rows, and GROUP VISIBILITY — a second
 //      member sees the first member's open Captures.
-//   4. THE AMOUNT STAYS UNINTERPRETED. Stored in a currency that is NOT the
+//   4. RECORDING A CAPTURE IS ONE TRANSACTION (issue #51; §7.7 "Resolving"). The
+//      ledger insert and the `resolved_transaction_id` stamp either both commit or
+//      neither does, and the ONLY way to show that is to make the stamp fail against
+//      a real database and then look for the transaction it should have taken with
+//      it. A stub cannot fail that way.
+//   5. THE AMOUNT STAYS UNINTERPRETED. Stored in a currency that is NOT the
 //      group's settlement currency, with no rate anywhere, and read back
 //      byte-identical.
 //
@@ -29,13 +34,20 @@ import {
 	createCapture,
 	listOpenCaptures,
 	countOpenCapturesByGroup,
+	findOpenCapture,
+	recordCaptureAsTransaction,
 	resolveCapture,
 	discardCapture,
 	CaptureNotFoundError,
 	CaptureNotOpenError,
 	CaptureValidationError
 } from '$lib/server/captures';
-import { TransactionNotFoundError } from '$lib/server/transactions';
+import {
+	createTransaction,
+	TransactionNotFoundError,
+	TransactionValidationError
+} from '$lib/server/transactions';
+import { getGroupBalances } from '$lib/server/balances';
 import { captures } from '$lib/server/db/captures-schema';
 import { transactions } from '$lib/server/db/transactions-schema';
 import { auditLog } from '$lib/server/db/audit-schema';
@@ -510,5 +522,330 @@ describeIntegration('integration: capture service (issue #49; PLAN §7.7)', () =
 		const [stored] = await captureRows(group.id);
 		expect(stored.discardedAt).toBeNull();
 		expect(await captureAuditRows(group.id)).toHaveLength(1); // the create only
+	});
+
+	// ── 6. Recording a Capture (issue #51; PLAN §7.7 "Resolving", §7.4, §12.1) ──
+
+	/** The creator's own member id — the payer/beneficiary the prefilled form uses. */
+	async function creatorMemberId(groupId: string): Promise<string> {
+		const [row] = await db
+			.select({ id: members.id })
+			.from(members)
+			.where(and(eq(members.groupId, groupId), eq(members.userId, userA.id)));
+		return row.id;
+	}
+
+	/** A minimal VALID equal-split spending payload, as the prefilled form submits it. */
+	function equalSpendingInput(memberIds: string[], payerId: string, amount = 9000) {
+		return {
+			type: 'spending' as const,
+			title: 'dinner at the night market',
+			categoryId: SPENDING_CATEGORY,
+			amountTotal: amount,
+			currency: 'THB',
+			exchangeRate: '1',
+			amountTotalSettlement: amount,
+			splitMode: 'equal' as const,
+			payers: [{ memberId: payerId, amountPaid: amount }],
+			beneficiaries: memberIds.map((memberId) => ({ memberId })),
+			items: [],
+			charges: []
+		};
+	}
+
+	/** This group's live transactions. */
+	async function transactionRows(groupId: string) {
+		return db.select().from(transactions).where(eq(transactions.groupId, groupId));
+	}
+
+	it('writes the transaction, the stamp and BOTH audit rows as one unit', async () => {
+		const group = await freshGroup();
+		const aliceId = await creatorMemberId(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner at the night market', amountMinor: 9000, currency: 'THB' }
+		});
+
+		const transactionId = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		});
+
+		// The transaction is REAL and ordinary — nothing marks it as having come from
+		// a note.
+		const [txn] = await transactionRows(group.id);
+		expect(txn.id).toBe(transactionId);
+		expect(txn.amountTotalSettlement).toBe(9000);
+
+		// The Capture is STAMPED, not deleted: the trail from remembering to recording
+		// survives, note and all (§7.7).
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedTransactionId).toBe(transactionId);
+		expect(stored.resolvedAt).toBeInstanceOf(Date);
+		expect(stored.discardedAt).toBeNull();
+		expect(stored.note).toBe('dinner at the night market');
+
+		// One audit row for each half, both from this one write (§12.1).
+		expect((await captureAuditRows(group.id)).map((e) => e.action).sort()).toEqual([
+			'create',
+			'resolve'
+		]);
+		const txnAudit = await db
+			.select()
+			.from(auditLog)
+			.where(and(eq(auditLog.groupId, group.id), eq(auditLog.entityType, 'transaction')));
+		expect(txnAudit.map((e) => e.action)).toEqual(['create']);
+
+		// And it has left the tray and the count.
+		expect(await listOpenCaptures(userA.id, group.id)).toHaveLength(0);
+		const counts = await countOpenCapturesByGroup({ userId: userA.id, groupIds: [group.id] });
+		expect(counts.get(group.id) ?? 0).toBe(0);
+	});
+
+	it('hits balances exactly as a directly-entered transaction does (§8)', async () => {
+		// The point of ADR-0012: what a resolve produces is not a special kind of row.
+		// Two identical payloads, one recorded from a note and one entered directly,
+		// must move the ledger identically.
+		const viaNote = await freshGroup('via-note');
+		await addSecondMember(viaNote.id);
+		const noteAlice = await creatorMemberId(viaNote.id);
+		const [noteBob] = await db
+			.select({ id: members.id })
+			.from(members)
+			.where(and(eq(members.groupId, viaNote.id), eq(members.userId, userB.id)));
+
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: viaNote.id,
+			input: { note: 'dinner at the night market', amountMinor: 9000, currency: 'THB' }
+		});
+		await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: viaNote.id,
+			captureId: capture.id,
+			input: equalSpendingInput([noteAlice, noteBob.id], noteAlice),
+			settlementCurrency: 'THB'
+		});
+
+		const direct = await freshGroup('direct');
+		await addSecondMember(direct.id);
+		const directAlice = await creatorMemberId(direct.id);
+		const [directBob] = await db
+			.select({ id: members.id })
+			.from(members)
+			.where(and(eq(members.groupId, direct.id), eq(members.userId, userB.id)));
+		await createTransaction({
+			userId: userA.id,
+			groupId: direct.id,
+			input: equalSpendingInput([directAlice, directBob.id], directAlice),
+			settlementCurrency: 'THB'
+		});
+
+		const noteBalances = await getGroupBalances({ userId: userA.id, groupId: viaNote.id });
+		const directBalances = await getGroupBalances({ userId: userA.id, groupId: direct.id });
+
+		expect(noteBalances.map((b) => b.balance).sort((a, b) => a - b)).toEqual([-4500, 4500]);
+		expect(noteBalances.map((b) => b.balance).sort((a, b) => a - b)).toEqual(
+			directBalances.map((b) => b.balance).sort((a, b) => a - b)
+		);
+	});
+
+	it('records NOTHING when the payload fails §7.4 — the note stays open', async () => {
+		const group = await freshGroup();
+		const aliceId = await creatorMemberId(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner', amountMinor: 9000, currency: 'THB' }
+		});
+
+		// The prefill is a starting point, not a trusted payload: the payer no longer
+		// sums to the total, so the ordinary create refuses it.
+		const broken = equalSpendingInput([aliceId], aliceId);
+		broken.payers = [{ memberId: aliceId, amountPaid: 1 }];
+
+		await expect(
+			recordCaptureAsTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				captureId: capture.id,
+				input: broken,
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(TransactionValidationError);
+
+		expect(await transactionRows(group.id)).toHaveLength(0);
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedTransactionId).toBeNull();
+		expect(stored.resolvedAt).toBeNull();
+		// Still in everyone's tray, which is exactly right: nothing was recorded.
+		expect(await listOpenCaptures(userA.id, group.id)).toHaveLength(1);
+	});
+
+	it('rolls the transaction back when someone else recorded the note first', async () => {
+		// The double-submit race, end to end. The stamp fails INSIDE the create's
+		// transaction, so the loser must be left with no transaction at all — a
+		// duplicate is precisely what the group-visible tray exists to prevent.
+		const group = await freshGroup();
+		const aliceId = await creatorMemberId(group.id);
+		const first = await recordTransaction(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner' }
+		});
+		await resolveCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			transactionId: first.id
+		});
+
+		const error = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		}).catch((e) => e);
+
+		expect(error).toBeInstanceOf(CaptureNotOpenError);
+		expect((error as CaptureNotOpenError).reason).toBe('resolved');
+		// ONLY the pre-existing row: the second write left nothing behind.
+		const rows = await transactionRows(group.id);
+		expect(rows.map((r) => r.id)).toEqual([first.id]);
+		// And the stamp still names the FIRST transaction.
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedTransactionId).toBe(first.id);
+	});
+
+	it('rolls the transaction back when the note was discarded first', async () => {
+		const group = await freshGroup();
+		const aliceId = await creatorMemberId(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner' }
+		});
+		await discardCapture({ userId: userA.id, groupId: group.id, captureId: capture.id });
+
+		const error = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		}).catch((e) => e);
+
+		expect(error).toBeInstanceOf(CaptureNotOpenError);
+		expect((error as CaptureNotOpenError).reason).toBe('discarded');
+		expect(await transactionRows(group.id)).toHaveLength(0);
+	});
+
+	it('refuses a non-member, recording nothing (§12)', async () => {
+		const group = await freshGroup();
+		const aliceId = await creatorMemberId(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner' }
+		});
+
+		await expect(
+			recordCaptureAsTransaction({
+				userId: userB.id,
+				groupId: group.id,
+				captureId: capture.id,
+				input: equalSpendingInput([aliceId], aliceId),
+				settlementCurrency: 'THB'
+			})
+		).rejects.toBeInstanceOf(GroupAccessError);
+
+		expect(await transactionRows(group.id)).toHaveLength(0);
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedAt).toBeNull();
+	});
+
+	// ── 7. The prefill read (`findOpenCapture`) ────────────────────────────────
+
+	it('reads one open note for the prefill and leaves it untouched', async () => {
+		// Abandoning the prefilled form must leave the note OPEN — opening the form is
+		// a READ. There is no partial resolve to abandon.
+		const group = await freshGroup();
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner', amountMinor: 120000, currency: 'JPY', capturedFor: '2026-08-01' }
+		});
+
+		const found = await findOpenCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id
+		});
+
+		expect(found?.note).toBe('dinner');
+		// The three fields the form seeds from, byte-identical (§7.7, §7.1).
+		expect(found?.amountMinor).toBe(120000);
+		expect(found?.currency).toBe('JPY');
+		expect(found?.capturedFor).toBe('2026-08-01');
+
+		// Still open, still in the tray, still audited only once.
+		expect(await listOpenCaptures(userA.id, group.id)).toHaveLength(1);
+		expect(await captureAuditRows(group.id)).toHaveLength(1);
+	});
+
+	it("reads NULL for a note that is resolved, discarded, gone, or another group's", async () => {
+		const group = await freshGroup();
+		const other = await freshGroup('other');
+		const txn = await recordTransaction(group.id);
+
+		const resolved = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'already recorded' }
+		});
+		await resolveCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: resolved.id,
+			transactionId: txn.id
+		});
+
+		const discarded = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'given up on' }
+		});
+		await discardCapture({ userId: userA.id, groupId: group.id, captureId: discarded.id });
+
+		const elsewhere = await createCapture({
+			userId: userA.id,
+			groupId: other.id,
+			input: { note: 'other group' }
+		});
+
+		for (const captureId of [resolved.id, discarded.id, elsewhere.id, 'no-such-id']) {
+			await expect(
+				findOpenCapture({ userId: userA.id, groupId: group.id, captureId })
+			).resolves.toBeNull();
+		}
+	});
+
+	it('refuses the prefill read for a non-member (§12)', async () => {
+		const group = await freshGroup();
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'dinner' }
+		});
+
+		await expect(
+			findOpenCapture({ userId: userB.id, groupId: group.id, captureId: capture.id })
+		).rejects.toBeInstanceOf(GroupAccessError);
 	});
 });

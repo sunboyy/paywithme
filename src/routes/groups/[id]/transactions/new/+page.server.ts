@@ -14,6 +14,15 @@
 // never disagree about what may be recorded. The group's SETTLEMENT currency stays
 // seeded-only (ADR-0014 decision 1).
 //
+// RECORDING A CAPTURE (issue #51; PLAN §7.7 "Resolving"): "Record it" on the "Not
+// recorded yet" tray opens this page with `?capture=<id>`. `load` re-reads that row
+// and PREFILLS the note as the title, the amount + currency, and `captured_for` as
+// the editable `created_at` day (§7.1) — everything else is entered normally,
+// because a Capture carries nothing else (ADR-0012). The save then goes through
+// `recordCaptureAsTransaction`, which stamps the Capture inside the SAME DB
+// transaction as the insert (§12.1). The prefill is a starting point, not a trusted
+// payload: the §7.4 validation below runs in full either way.
+//
 // SCOPE (4.7 + 4.8): spending & transfer with split_mode ∈ {equal, amount, share,
 // itemized} in the group settlement currency. Itemized (4.8) submits non-empty
 // `items` (Spending only); the route just re-validates + delegates — the service
@@ -22,7 +31,7 @@
 // `amountTotalSettlement == amountTotal`.
 
 import { error, fail, redirect } from '@sveltejs/kit';
-import { setError, superValidate } from 'sveltekit-superforms';
+import { message, setError, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { buildTransactionSchema } from '$lib/schemas/transaction';
 import { defaultCategoryFor, getCategory } from '$lib/categories';
@@ -39,7 +48,108 @@ import {
 	toSettlementCurrencyView
 } from '$lib/server/transaction-page';
 import { createTransaction, TransactionValidationError } from '$lib/server/transactions';
+import {
+	CaptureNotFoundError,
+	CaptureNotOpenError,
+	findOpenCapture,
+	recordCaptureAsTransaction
+} from '$lib/server/captures';
+import type { GroupCurrency } from '$lib/server/currencies';
 import type { Actions, PageServerLoad } from './$types';
+
+/**
+ * The `?capture=<id>` prefill — "Record it" on the "Not recorded yet" tray (issue
+ * #51; PLAN §7.7 "Resolving"), which opens this page seeded from a Capture:
+ * `note` → title, `amount_minor` + `currency` → the amount, `captured_for` → the
+ * editable real-world date (§7.1 — the Capture's own column keeps that name, the
+ * transaction's is `created_at`).
+ *
+ * EVERYTHING ELSE IS ENTERED NORMALLY. A Capture holds no payers, beneficiaries,
+ * split mode or rate (ADR-0012), so there is nothing else to seed — and the seeded
+ * fields are all still editable. Nothing here is trusted: the row is re-read from
+ * the DB by id (the URL carries only the pointer), and the save re-validates the
+ * whole payload through §7.4 like any other.
+ */
+type CapturePrefill = {
+	id: string;
+	/** The note, as the transaction TITLE (both fields cap at 200 chars). */
+	title: string;
+	/** `captured_for` → the transaction's editable `created_at` day (§7.1). */
+	date: string;
+	/** The entry currency to seed the picker with — the group's own when the Capture names none. */
+	currency: string;
+	currencyExponent: number;
+	/** Minor units of `currency`, or 0 for a note-only Capture. */
+	amountTotal: number;
+	/**
+	 * The Capture's currency is not the group's settlement currency, so the rate is
+	 * left EMPTY for the user to enter: a Capture stores no rate and no conversion
+	 * (§7.7), and seeding a plausible "1" would quietly record a wrong ledger figure.
+	 */
+	needsRate: boolean;
+};
+
+/**
+ * Read the Capture named by `?capture=`, if it names an open one in this group.
+ *
+ * Falls back to `null` — never throws — on anything unusable, exactly like
+ * {@link resolveTransferPrefill}: an absent param, a stale id, another group's row,
+ * or one somebody already recorded or discarded. A dead link then renders the
+ * ordinary blank add-transaction form (and saves an ordinary transaction, stamping
+ * nothing), rather than an error page.
+ */
+async function resolveCapturePrefill({
+	url,
+	userId,
+	groupId,
+	entryCurrencies,
+	settlementCurrency
+}: {
+	url: URL;
+	userId: string;
+	groupId: string;
+	entryCurrencies: readonly GroupCurrency[];
+	settlementCurrency: SeededCurrencyCode;
+}): Promise<CapturePrefill | null> {
+	const captureId = url.searchParams.get('capture');
+	if (!captureId) {
+		return null;
+	}
+
+	let capture;
+	try {
+		capture = await findOpenCapture({ userId, groupId, captureId });
+	} catch {
+		// A prefill is a convenience; a read failure must not cost the user the form.
+		return null;
+	}
+	if (!capture) {
+		return null;
+	}
+
+	// The stored code may no longer resolve — `captures.currency` is deliberately NOT
+	// a foreign key (a custom currency deleted since leaves it dangling). Then the
+	// amount has no scale to be read at, so it is dropped rather than guessed, and the
+	// user re-enters it against the group's own currency.
+	const descriptor =
+		capture.currency === null
+			? undefined
+			: entryCurrencies.find((c) => c.code === capture.currency);
+	const money =
+		capture.amountMinor !== null && descriptor
+			? { currency: descriptor.code, exponent: descriptor.exponent, amount: capture.amountMinor }
+			: null;
+
+	return {
+		id: capture.id,
+		title: capture.note,
+		date: capture.capturedFor,
+		currency: money?.currency ?? settlementCurrency,
+		currencyExponent: money?.exponent ?? getCurrency(settlementCurrency)?.exponent ?? 2,
+		amountTotal: money?.amount ?? 0,
+		needsRate: money !== null && money.currency !== settlementCurrency
+	};
+}
 
 /**
  * A resolved §8.4 settle-via-transfer PREFILL (task 5.4). The settle page links
@@ -157,12 +267,25 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// below is used unchanged (task 4.7's behavior is preserved).
 	const prefill = resolveTransferPrefill(url, new Set(activeMembers.map((m) => m.id)));
 
+	// "Record it" on the tray (issue #51; PLAN §7.7). Read only when the settle
+	// prefill above didn't claim the form — the two links never carry each other's
+	// params, and one seeded form can only come from one place.
+	const capturePrefill = prefill
+		? null
+		: await resolveCapturePrefill({
+				url,
+				userId: user.id,
+				groupId: params.id,
+				entryCurrencies,
+				settlementCurrency
+			});
+
 	// Seed a default form: spending / equal split, payer = the viewer's member,
 	// beneficiaries = all active members. amountTotal 0 (the user fills it in).
 	// When a valid Transfer prefill is present, seed THAT instead (the settlement
 	// amount is already in minor units — no float parsing — and equals the
 	// settlement total since the entry currency is the settlement currency).
-	const defaults = prefill
+	const baseDefaults = prefill
 		? {
 				type: 'transfer' as const,
 				// Settle-up prefill (§8.4): seed the title so the required field is filled
@@ -210,6 +333,34 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 				charges: []
 			};
 
+	// The Capture prefill (§7.7) OVERRIDES only what a Capture actually carries —
+	// the note as the title, the day, and the amount + its currency. Payers,
+	// beneficiaries and the split mode keep the blank default because a Capture holds
+	// none of them (ADR-0012), so they are entered normally, and every field here
+	// stays editable. `capturePrefill` is null whenever the settle prefill claimed the
+	// form, so these two never overlap.
+	const defaults = capturePrefill
+		? {
+				...baseDefaults,
+				title: capturePrefill.title,
+				// `captured_for` → the transaction's editable real-world `created_at` (§7.1).
+				date: capturePrefill.date,
+				currency: capturePrefill.currency,
+				currencyExponent: capturePrefill.currencyExponent,
+				amountTotal: capturePrefill.amountTotal,
+				// A foreign amount arrives with NO rate — a Capture stores none (§7.7) — so
+				// the rate is left blank for the user rather than guessed at 1, and the
+				// settlement total follows once they enter it (the form recomputes it; the
+				// schema refuses the save until then).
+				exchangeRate: capturePrefill.needsRate ? '' : '1',
+				amountTotalSettlement: capturePrefill.needsRate ? 0 : capturePrefill.amountTotal,
+				// A single payer mirrors the total, exactly as the form itself keeps it.
+				payers: viewerMember
+					? [{ memberId: viewerMember.id, amountPaid: capturePrefill.amountTotal }]
+					: []
+			}
+		: baseDefaults;
+
 	const form = await superValidate(zod4(schema), { defaults });
 
 	return {
@@ -222,7 +373,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 		currencies: toCurrencyOptions(entryCurrencies),
 		members: activeMembers,
 		viewerMemberId: viewerMember?.id ?? null,
-		categories: toCategoryOptions()
+		categories: toCategoryOptions(),
+		// The Capture this form is recording, if any (issue #51). The page posts it
+		// back in the action's query string, so the save can stamp it in the same DB
+		// transaction; `null` (a plain visit, or a stale/closed link) saves an ordinary
+		// transaction and stamps nothing.
+		captureId: capturePrefill?.id ?? null
 	};
 };
 
@@ -247,16 +403,66 @@ export const actions: Actions = {
 			return fail(400, { form });
 		}
 
+		// Recording a Capture (issue #51; PLAN §7.7 "Resolving")? The id rides in the
+		// action's own query string — the same `?capture=` the prefill came from, which
+		// the form posts back to and which survives a failed save (`load` re-runs at the
+		// same URL). It is UNTRUSTED, exactly like the prefill: the service re-checks
+		// membership, the group, and that the row is still open, inside the write.
+		const captureId = url.searchParams.get('capture');
+
 		try {
-			await createTransaction({
-				userId: user.id,
-				groupId: params.id,
-				input: form.data,
-				settlementCurrency
-			});
+			if (captureId) {
+				// ONE DB transaction: the transaction, its audit row, and the Capture's
+				// `resolved_transaction_id` + `resolved_at` stamp (§12.1). The payload took
+				// the SAME §7.4 validation above and inside the service — a prefill buys no
+				// shortcut.
+				await recordCaptureAsTransaction({
+					userId: user.id,
+					groupId: params.id,
+					captureId,
+					input: form.data,
+					settlementCurrency
+				});
+			} else {
+				await createTransaction({
+					userId: user.id,
+					groupId: params.id,
+					input: form.data,
+					settlementCurrency
+				});
+			}
 		} catch (e) {
 			if (e instanceof GroupAccessError) {
 				error(404, 'Group not found');
+			}
+			if (e instanceof CaptureNotOpenError) {
+				// The tray is GROUP-VISIBLE (§7.7), so this is a real race: someone else
+				// recorded or discarded that note between opening this form and saving it.
+				// NOTHING was written — the stamp failed inside the transaction, so the
+				// transaction rolled back with it — and saying so is the point: this is the
+				// double entry the tray exists to prevent, and the filled-in form is kept so
+				// the user can check the list first and decide.
+				return message(
+					form,
+					{
+						type: 'error',
+						text:
+							e.reason === 'resolved'
+								? 'Someone already recorded that one, so nothing was saved. Check the transaction list before adding it again.'
+								: 'Someone already discarded that one, so nothing was saved. Check the transaction list before adding it again.'
+					},
+					{ status: 409 }
+				);
+			}
+			if (e instanceof CaptureNotFoundError) {
+				// A stale link (the note is not this group's, or never existed). Nothing was
+				// written; the form itself is still valid, so it is kept rather than replaced
+				// by a 404 page.
+				return message(
+					form,
+					{ type: 'error', text: 'That note is no longer here, so nothing was saved.' },
+					{ status: 404 }
+				);
 			}
 			if (e instanceof TransactionValidationError) {
 				// The service re-validated and rejected something the client schema let

@@ -102,6 +102,19 @@
 		`?/discard${filterUrl({}).slice(listPath.length).replace(/^\?/, '&')}`
 	);
 
+	/**
+	 * The tray's rows plus where "Record it" goes (issue #51; PLAN §7.7): the
+	 * add-transaction form, which prefills itself from the note server-side. Only the
+	 * note's ID travels — the form re-reads the row, so a link can't dictate what gets
+	 * recorded.
+	 */
+	const trayCaptures = $derived(
+		data.captures.map((capture) => ({
+			...capture,
+			recordHref: `${newPath}?capture=${encodeURIComponent(capture.id)}`
+		}))
+	);
+
 	/** Clear every filter at once (the empty-state / "clear filter" target). */
 	const unfilteredUrl = $derived(
 		filterUrl({ type: null, category: null, member: null, role: null })
@@ -147,7 +160,7 @@
 	<FormStatus message={form?.message} />
 
 	<!-- The "Not recorded yet" tray (PLAN §7.7) — renders nothing when empty. -->
-	<NotRecordedYetTray captures={data.captures} {discardAction} {enhance} />
+	<NotRecordedYetTray captures={trayCaptures} {discardAction} {enhance} />
 
 	<!-- Filters: type (links, no-JS friendly) + category (Select → navigate). -->
 	<div class="flex flex-wrap items-center gap-2">

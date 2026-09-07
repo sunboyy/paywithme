@@ -28,7 +28,7 @@ const schema = buildTransactionSchema({
 });
 
 /** Page data mirroring what `new/+page.server.ts` (+ the root layout) provides. */
-function pageData(): PageData {
+function pageData(overrides: Partial<PageData> = {}): PageData {
 	return {
 		user: { name: 'Alex', email: 'alex@example.com' },
 		viewerMemberId: 'm1',
@@ -46,7 +46,10 @@ function pageData(): PageData {
 			{ code: 'THB', displayCode: 'THB', symbol: '฿', exponent: 2, name: 'Thai Baht' },
 			{ code: 'JPY', displayCode: 'JPY', symbol: '¥', exponent: 0, name: 'Japanese Yen' }
 		],
-		form: defaults(zod4(schema))
+		form: defaults(zod4(schema)),
+		// No note being recorded (issue #51) — a plain "Add transaction" visit.
+		captureId: null,
+		...overrides
 	};
 }
 
@@ -68,5 +71,25 @@ describe('add-transaction page mounts without an effect loop', () => {
 		// Unique form-section legends render, confirming the form body mounted.
 		expect(container.textContent).toContain('Paid by');
 		expect(container.textContent).toContain('Split between');
+	});
+
+	// ── Recording a note from the tray (issue #51; PLAN §7.7 "Resolving") ────────
+	// The note's id must ride on the POST, because the action reads it from its OWN
+	// query string to stamp the note in the same DB transaction as the insert. A
+	// form's `action` replaces the whole query string, so an omitted one silently
+	// records an ordinary transaction and leaves the note in everyone's tray.
+	it('posts back to the ?capture= it was opened with', () => {
+		const { container } = render(Page, { props: { data: pageData({ captureId: 'cap-1' }) } });
+		expect(container.querySelector('form')?.getAttribute('action')).toBe('?capture=cap-1');
+	});
+
+	it('posts to the plain route when no note is being recorded', () => {
+		const { container } = render(Page, { props: { data: pageData() } });
+		expect(container.querySelector('form')?.getAttribute('action')).toBeNull();
+	});
+
+	it('never says "capture" to the user (§7.7 naming)', () => {
+		const { container } = render(Page, { props: { data: pageData({ captureId: 'cap-1' }) } });
+		expect(container.textContent?.toLowerCase()).not.toContain('capture');
 	});
 });

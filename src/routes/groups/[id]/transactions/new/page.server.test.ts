@@ -15,11 +15,14 @@ import { isRedirect, isHttpError } from '@sveltejs/kit';
 //   - invalid → a 400 form failure (NOT a 500);
 //   - service GroupAccessError / no group at action time → 404.
 
-const { superValidate, setError } = vi.hoisted(() => ({
+const { superValidate, setError, message } = vi.hoisted(() => ({
 	superValidate: vi.fn(),
-	setError: vi.fn()
+	setError: vi.fn(),
+	// The whole-form banner the §7.7 resolve race comes back as. Returns what the
+	// real one returns for a status: an ActionFailure-shaped object.
+	message: vi.fn((form, msg, opts) => ({ status: opts?.status ?? 200, data: { form, msg } }))
 }));
-vi.mock('sveltekit-superforms', () => ({ superValidate, setError }));
+vi.mock('sveltekit-superforms', () => ({ superValidate, setError, message }));
 vi.mock('sveltekit-superforms/adapters', () => ({ zod4: vi.fn(() => ({})) }));
 
 const { createTransaction, getGroupForUser, listMembers, requireGroupAccess, requireUser } =
@@ -42,6 +45,19 @@ vi.mock('$lib/server/groups', async () => {
 	return { ...actual, getGroupForUser };
 });
 vi.mock('$lib/server/members', () => ({ listMembers }));
+
+// The Capture service (issue #51). The route reads ONE open row for the prefill and
+// resolves through `recordCaptureAsTransaction`; the error CLASSES it branches on
+// stay real, so `instanceof` means what it means in production.
+const { findOpenCapture, recordCaptureAsTransaction } = vi.hoisted(() => ({
+	findOpenCapture: vi.fn(),
+	recordCaptureAsTransaction: vi.fn()
+}));
+vi.mock('$lib/server/captures', async () => {
+	const actual =
+		await vi.importActual<typeof import('$lib/server/captures')>('$lib/server/captures');
+	return { ...actual, findOpenCapture, recordCaptureAsTransaction };
+});
 vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
 
 // The group-scoped ENTRY-CURRENCY set (#63; PLAN §7.5.2). The route reads it for
@@ -53,6 +69,7 @@ vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 import { load, actions } from './+page.server';
 import { GroupAccessError } from '$lib/server/groups';
 import { TransactionValidationError } from '$lib/server/transactions';
+import { CaptureNotFoundError, CaptureNotOpenError } from '$lib/server/captures';
 
 type User = { id: string; name: string };
 
@@ -155,6 +172,11 @@ beforeEach(() => {
 		SEEDED_CURRENCY_DESCRIPTORS.map((c) => ({ ...c, name: c.displayCode, isCustom: false }))
 	);
 	setError.mockReset();
+	message.mockClear();
+	findOpenCapture.mockReset();
+	findOpenCapture.mockResolvedValue(null);
+	recordCaptureAsTransaction.mockReset();
+	recordCaptureAsTransaction.mockResolvedValue('t1');
 	createTransaction.mockReset();
 	getGroupForUser.mockReset();
 	listMembers.mockReset();
@@ -320,5 +342,103 @@ describe('/groups/[id]/transactions/new default action', () => {
 			status: number;
 		};
 		expect(result.status).toBe(500);
+	});
+});
+
+// ── Recording a note from the tray (issue #51; PLAN §7.7 "Resolving") ──────────
+// The `?capture=` id is what turns an ordinary save into a RESOLVE: the service
+// stamps the note in the same DB transaction as the insert (§12.1). These tests pin
+// the action's branching — which service is called, and what each of the two "you
+// can't resolve that" endings comes back as.
+describe('/groups/[id]/transactions/new default action — recording a note (§7.7)', () => {
+	it('resolves through the Capture service when ?capture= is present', async () => {
+		try {
+			await actions.default(makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=cap-1'));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
+
+		// ONE write path, not two: the plain create must NOT also run, or the note's
+		// stamp would land outside the transaction it names (or not at all).
+		expect(createTransaction).not.toHaveBeenCalled();
+		expect(recordCaptureAsTransaction).toHaveBeenCalledTimes(1);
+		const arg = recordCaptureAsTransaction.mock.calls[0][0];
+		expect(arg.captureId).toBe('cap-1');
+		expect(arg.userId).toBe('u1');
+		expect(arg.groupId).toBe('g1');
+		// Trusted group context, exactly as the plain create gets it.
+		expect(arg.settlementCurrency).toBe('THB');
+		expect(arg.input.title).toBe('Dinner');
+	});
+
+	it('saves an ORDINARY transaction when no note is being recorded', async () => {
+		try {
+			await actions.default(makeActionEvent({ id: 'u1', name: 'Alice' }));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
+		expect(recordCaptureAsTransaction).not.toHaveBeenCalled();
+		expect(createTransaction).toHaveBeenCalledTimes(1);
+	});
+
+	it('validates the prefilled payload like any other — an invalid one never reaches the service', async () => {
+		programForm({ valid: false });
+
+		const result = (await actions.default(
+			makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=cap-1')
+		)) as { status: number };
+
+		// The prefill is a starting point, not a trusted payload (§7.4).
+		expect(result.status).toBe(400);
+		expect(recordCaptureAsTransaction).not.toHaveBeenCalled();
+		expect(createTransaction).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['resolved' as const, 'Someone already recorded that one'],
+		['discarded' as const, 'Someone already discarded that one']
+	])('reports the %s race as a 409, with nothing saved', async (reason, expected) => {
+		recordCaptureAsTransaction.mockRejectedValueOnce(new CaptureNotOpenError(reason));
+
+		const result = (await actions.default(
+			makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=cap-1')
+		)) as { status: number };
+
+		// A conflict, not a redirect: the service rolled the whole write back, so
+		// claiming success would be a lie — and the filled-in form is kept.
+		expect(result.status).toBe(409);
+		const [, msg] = message.mock.calls[0];
+		expect(msg.type).toBe('error');
+		expect(msg.text).toContain(expected);
+		// §7.7 naming: the internal word never reaches a user.
+		expect(msg.text.toLowerCase()).not.toContain('capture');
+	});
+
+	it('reports a stale note id as a form failure, not a 404 page', async () => {
+		recordCaptureAsTransaction.mockRejectedValueOnce(new CaptureNotFoundError());
+
+		const result = (await actions.default(
+			makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=gone')
+		)) as { status: number };
+
+		expect(result.status).toBe(404);
+		const [, msg] = message.mock.calls[0];
+		expect(msg.text).toContain('no longer here');
+		expect(msg.text.toLowerCase()).not.toContain('capture');
+	});
+
+	it('preserves the ?capture= link when authentication must resume', async () => {
+		requireUser.mockImplementationOnce(() => {
+			throw new Error('redirect');
+		});
+		await expect(actions.default(makeActionEvent(null, '?capture=cap-1'))).rejects.toBeDefined();
+
+		// Coming back from sign-in must land on the PREFILLED form again, or the note
+		// silently stops being resolved by this save.
+		expect(requireUser).toHaveBeenCalledWith(expect.objectContaining({ user: null }), {
+			redirectTo: '/groups/g1/transactions/new?capture=cap-1'
+		});
 	});
 });

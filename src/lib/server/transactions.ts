@@ -224,6 +224,7 @@ export async function createTransaction({
 	expectedDisplayCode,
 	expectedMemberNames,
 	via,
+	alsoWrite,
 	now = () => new Date()
 }: {
 	userId: string;
@@ -255,6 +256,24 @@ export async function createTransaction({
 	 * web `actions`, whose rows carry no provenance.
 	 */
 	via?: AuditVia;
+	/**
+	 * A follow-up write to run INSIDE this create's `db.transaction`, given the same
+	 * `tx` handle and the new transaction's id, after the row and its audit row are
+	 * written. It commits or rolls back WITH the transaction: throwing from it undoes
+	 * the create entirely.
+	 *
+	 * Passed only by the Capture resolve path (issue #51; PLAN §7.7 "Resolving"),
+	 * which must stamp `resolved_transaction_id` + `resolved_at` in the SAME DB
+	 * transaction as the insert — a Capture stamped against a transaction that was
+	 * rolled back, or a transaction whose Capture stayed open, are both trails that
+	 * lie.
+	 *
+	 * A HOOK rather than a `captureId` parameter on purpose: the ledger must not
+	 * import the Capture service. §7.7 says nothing that computes a balance may see a
+	 * `captures` row, and the one-way dependency (`captures.ts` → `transactions.ts`,
+	 * never back) is what keeps that true by construction rather than by review.
+	 */
+	alsoWrite?: (tx: DbExecutor, transactionId: string) => Promise<void>;
 	/** Injectable clock (tests). Defaults to the real `now`. */
 	now?: () => Date;
 }): Promise<string> {
@@ -312,6 +331,11 @@ export async function createTransaction({
 				splitMode: data.splitMode
 			}
 		});
+
+		// The caller's own same-transaction write (a Capture resolve, §7.7). Last, so
+		// it sees a fully written transaction — and still inside `tx`, so a throw here
+		// takes the transaction, its child rows and its audit row down with it.
+		await alsoWrite?.(tx, transactionId);
 
 		return transactionId;
 	});

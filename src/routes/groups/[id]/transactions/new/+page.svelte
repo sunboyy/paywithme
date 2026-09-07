@@ -12,6 +12,7 @@
 	import type { SeededCurrencyCode } from '$lib/money';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
+	import FormStatus from '$lib/components/FormStatus.svelte';
 	import TransactionForm from '$lib/components/TransactionForm.svelte';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 	import type { PageData } from './$types';
@@ -37,6 +38,19 @@
 		dataType: 'json',
 		validators: zod4Client(schema)
 	});
+
+	const { message } = form;
+
+	/**
+	 * Where the form posts. When this page is recording a note from the "Not recorded
+	 * yet" tray (issue #51; PLAN §7.7), the `?capture=` id must ride along: the action
+	 * reads it from its own query string to stamp the note in the same DB transaction
+	 * as the insert. A form's `action` replaces the WHOLE query string, so it is
+	 * spelled out here rather than left to the browser's default.
+	 */
+	const action = $derived(
+		data.captureId ? `?capture=${encodeURIComponent(data.captureId)}` : undefined
+	);
 </script>
 
 <svelte:head>
@@ -60,6 +74,13 @@
 			<Card.Description>{data.group.name}</Card.Description>
 		</Card.Header>
 		<Card.Content>
+			<!-- Whole-form feedback: the §7.7 race where someone else already recorded or
+			     discarded the note this form was opened from (nothing was saved). -->
+			{#if $message}
+				<div class="mb-4">
+					<FormStatus message={$message} />
+				</div>
+			{/if}
 			{#if data.members.length === 0}
 				<p class="text-sm text-muted-foreground">
 					Add members to this group before recording a transaction.
@@ -72,6 +93,7 @@
 					currency={data.currency}
 					currencies={data.currencies}
 					submitLabel="Add transaction"
+					{action}
 				/>
 			{/if}
 		</Card.Content>
