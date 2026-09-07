@@ -51,6 +51,35 @@ export async function loadMemberViews(
 }
 
 /**
+ * USER id → the display name of that user's member row in this group — what the
+ * record-later tools (#52) need and `MemberView` cannot give them.
+ *
+ * A `captures` row is attributed by `created_by`, a USER id (§7.7 "Group-visible"),
+ * and attribution is the whole of what makes the list deduplicate. But `MemberView`
+ * deliberately exposes no `userId` — the agent's handle on a member is the member id
+ * and the display name — so an author id cannot be joined to a person on the client
+ * side at all. This resolves it server-side instead.
+ *
+ * ACTIVE ROWS WIN: `listMembers` returns active members first, and the map keeps the
+ * FIRST name it sees per user, so a member who was deactivated and re-added is named
+ * by the row they hold now. Access-checked through `listMembers` (→ the conflated
+ * `not_found`), like every other loader here.
+ */
+export async function loadAuthorNames(
+	principal: ApiKeyPrincipal,
+	groupId: string
+): Promise<ReadonlyMap<string, string>> {
+	const members = await listMembers({ userId: principal.userId, groupId });
+	const names = new Map<string, string>();
+	for (const member of members) {
+		if (member.userId !== null && !names.has(member.userId)) {
+			names.set(member.userId, member.displayName);
+		}
+	}
+	return names;
+}
+
+/**
  * The resolved `currencies` row a transaction was ENTERED in (PLAN §7.5.2) — what
  * the view needs to emit `display_code` instead of the opaque row key, and to wrap
  * the member-authored name / symbol (ADR-0014 decision 7, ADR-0003).

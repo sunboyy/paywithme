@@ -28,6 +28,7 @@ import { z } from 'zod';
 import { apiErrorEnvelope, type ApiErrorCode } from '$lib/server/api/errors';
 import { IdempotencyConflictError } from '$lib/server/api/idempotency';
 import { GroupAccessError } from '$lib/server/groups';
+import { CaptureValidationError } from '$lib/server/captures';
 import {
 	TransactionCursorError,
 	TransactionDeletedError,
@@ -43,6 +44,19 @@ import type { McpToolResult } from './types';
  * that way.
  */
 export const RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource';
+
+/**
+ * Which READ tool confirms what a given WRITE tool wrote — the pointer an idempotency
+ * conflict hands the agent (ADR-0009).
+ *
+ * Only the exceptions are listed; everything else writes to the LEDGER and is
+ * confirmed with `list_transactions`. A record-later note is the one write that never
+ * reaches the ledger (§7.7), so `list_transactions` would truthfully show nothing and
+ * the agent would report a failure that did not happen.
+ */
+const CONFIRM_TOOL: Record<string, string> = {
+	create_capture: 'list_captures'
+};
 
 /** Retry guidance appended to specific codes (ADR-0009's table). */
 const RETRY_GUIDANCE: Partial<Record<ApiErrorCode, string>> = {
@@ -158,13 +172,18 @@ export function mcpRateLimitedResult(
 /**
  * Translate a value THROWN by a `lib/server` service into an `isError` tool result.
  *
+ * `toolName` is the tool that threw, and is used ONLY to name the read tool an agent
+ * should confirm an in-flight write against ({@link CONFIRM_TOOL}) — every code and
+ * every other message is identical without it, so a caller that has no tool in hand
+ * may omit it.
+ *
  * The mirror of `$lib/server/api/read.ts#mapReadError` — same domain classes, same
  * codes, different channel. Anything unrecognized is logged server-side and
  * collapsed to an opaque `internal_error`: it must not escape as a JSON-RPC
  * protocol error (ADR-0009's "the default of throw-and-let-it-become-a-protocol-error
  * is wrong"), and it must not leak internals.
  */
-export function mapToolError(err: unknown): McpToolResult {
+export function mapToolError(err: unknown, toolName?: string): McpToolResult {
 	// No access / absent — CONFLATED into one body so existence never leaks.
 	if (err instanceof GroupAccessError || err instanceof TransactionNotFoundError) {
 		return toolError('not_found');
@@ -197,14 +216,20 @@ export function mapToolError(err: unknown): McpToolResult {
 	// caller that derives keys differently — surface to an agent as an opaque
 	// `internal_error`, the one thing ADR-0009 forbids.
 	if (err instanceof IdempotencyConflictError) {
+		// The tool that will SHOW the write, once it lands. Naming the wrong one is not a
+		// cosmetic slip: an agent told to confirm a record-later note with
+		// `list_transactions` looks at the ledger, never finds it, and concludes the write
+		// failed — which is exactly the belief this message exists to prevent (ADR-0009:
+		// the guidance has to be precise enough to act on).
+		const confirmWith = CONFIRM_TOOL[toolName ?? ''] ?? 'list_transactions';
 		const message =
 			err.reason === 'in_progress'
 				? 'An identical create for this group is already in progress — most likely your own ' +
 					'immediately preceding call, which has NOT failed. Nothing was lost and nothing was ' +
-					'duplicated. Do NOT retry: wait a moment, then call `list_transactions` to confirm ' +
+					`duplicated. Do NOT retry: wait a moment, then call \`${confirmWith}\` to confirm ` +
 					'it landed before deciding to act.'
 				: 'This write conflicts with one already recorded under the same idempotency key. Do ' +
-					'not retry it unchanged; call `list_transactions` to see what is actually on the ledger.';
+					`not retry it unchanged; call \`${confirmWith}\` to see what was actually written.`;
 		return toolError('conflict', message, { reason: err.reason });
 	}
 	// The SHARED transaction schema rejecting server-side (a write tool re-validating an
@@ -215,6 +240,17 @@ export function mapToolError(err: unknown): McpToolResult {
 	// `ZodError` and reuse that field-level shaping — mirroring REST's `mapWriteError`
 	// (`api/write.ts`), so the two channels name the bad field identically.
 	if (err instanceof TransactionValidationError) {
+		return toolError('validation_error', undefined, z.flattenError(new z.ZodError(err.issues)));
+	}
+	// The SHARED record-later schema rejecting server-side (#52) — a future-dated day, a
+	// note that is only whitespace, an amount without its currency. Self-correctable, and
+	// mapped for the SAME reason `TransactionValidationError` is: without this branch a
+	// rejection the agent could simply fix would fall through to the opaque
+	// `internal_error` below, which is the one outcome ADR-0009 forbids for a fixable
+	// failure. `create_capture` re-labels the issue paths into its own argument names
+	// BEFORE the error reaches here, so the field named is one the model can find in the
+	// schema it was given.
+	if (err instanceof CaptureValidationError) {
 		return toolError('validation_error', undefined, z.flattenError(new z.ZodError(err.issues)));
 	}
 	// A tool's own Zod rules failing — self-correctable: `details` names the field.

@@ -152,6 +152,26 @@ describe('mapToolError', () => {
 		expect(envelope.message).toMatch(/list_transactions/);
 	});
 
+	it('names the tool that will SHOW the write — `list_captures` for a note (#52)', () => {
+		// A record-later note never reaches the ledger (§7.7), so an agent told to confirm
+		// it with `list_transactions` would look at the ledger, find nothing, and report a
+		// failure that did not happen. ADR-0009 asks for guidance precise enough to act on.
+		const envelope = envelopeOf(
+			mapToolError(new IdempotencyConflictError('in_progress'), 'create_capture')
+		);
+
+		expect(envelope.message).toMatch(/`list_captures`/);
+		expect(envelope.message).not.toMatch(/list_transactions/);
+	});
+
+	it('still points a LEDGER write at `list_transactions` (#52)', () => {
+		const envelope = envelopeOf(
+			mapToolError(new IdempotencyConflictError('in_progress'), 'create_transaction')
+		);
+
+		expect(envelope.message).toMatch(/`list_transactions`/);
+	});
+
 	it('maps a key_reused conflict too — unreachable on the MCP path, but never opaque (#33)', () => {
 		// The derived key encodes the arguments (ADR-0005), so "same key, different body"
 		// cannot occur here. It is mapped anyway: a SHA-256 collision, or a future caller

@@ -53,6 +53,7 @@
 import type { TransactionView, PayerView, ShareView, EditableBeneficiaryView } from './transaction';
 import type { McpMoney } from './money';
 import type { SimilarMemberView } from './similar-names';
+import type { CaptureView } from './capture';
 
 /** A line in the transaction that names a member — the shape both payers and shares share. */
 type NamedLine = Pick<PayerView | ShareView, 'isYou' | 'displayName'>;
@@ -518,5 +519,85 @@ export function buildReplayEchoBack({
 		`did not duplicate it, and nothing new was written. It is on the ledger exactly once. ` +
 		`${recordedEcho} If the user genuinely means to record a SECOND, separate transaction ` +
 		`with these same details, wait a minute or give it a distinguishing title.`
+	);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The RECORD-LATER echoes — `create_capture` (issue #52; PLAN §7.7, ADR-0012).
+//
+// A note is the one write on this surface that records NOTHING: no transaction, no
+// balance movement, nothing on the ledger. So its echo has a second job the ledger
+// echoes never had — it must say, in plain language, that the expense is STILL NOT
+// RECORDED. A model that reads "Noted: dinner, THB 1,200.00" and reports "recorded
+// your dinner" has told the user the opposite of the truth, and the user will find
+// out weeks later when the balance is wrong.
+//
+// Hence the wording rule this module enforces: every sentence below ends in "not
+// recorded yet" and states that no balance moved. And nothing here says "capture" —
+// that noun is internal (§7.7 / CONTEXT.md), the language is the UI's.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The plain-language ECHO-BACK for a just-written record-later note (§7.7). PURE.
+ *
+ * *"Noted in Japan trip: "dinner", THB 1200.00 (120000 minor units), dated
+ * 2026-09-05 — not recorded yet. …"*
+ *
+ * It NAMES THE GROUP and RESTATES THE AMOUNT as the server interpreted it, which is
+ * the whole of what this echo can get wrong and the whole reason it exists
+ * (ADR-0004 for the money, ADR-0006 for legibility): "1,200 baht" landing as ฿12.00
+ * is visible in the sentence, and a note filed in the wrong group is visible in it
+ * too — a note nobody in the right group can see has no deduplication value at all
+ * (§7.7), and the group is the one argument the user cannot check any other way.
+ *
+ * The DATE is always stated. It defaults to today, but backdating is a first-class
+ * case here ("I paid for Saturday's dinner"), and a silently-defaulted date is
+ * exactly the misinterpretation this sentence is supposed to surface.
+ *
+ * `groupName` and the note are MEMBER-AUTHORED TEXT inlined as bare substrings
+ * (ADR-0003) — legal by the same bargain the transaction echoes strike: both ride
+ * WRAPPED in the result (`group.name`, `noted.note`), and the result carries
+ * `UNTRUSTED_NOTE`.
+ */
+export function buildCaptureEchoBack({
+	groupName,
+	view,
+	minorUnits
+}: {
+	/** The group's name, for the "noted in WHICH group" half of the restatement. */
+	groupName: string;
+	view: CaptureView;
+	/** The stored minor units, when an amount was given — `null` for a note-only row. */
+	minorUnits: number | null;
+}): string {
+	const money =
+		view.amount !== null && minorUnits !== null ? `, ${proseMoney(view.amount, minorUnits)}` : '';
+	return (
+		`Noted in ${groupName}: "${view.note.value}"${money}, dated ${view.date} — ` +
+		`not recorded yet. It is a note only: no transaction exists and nothing has been ` +
+		`added to anyone's balance.`
+	);
+}
+
+/**
+ * The echo-back for a REPLAYED note (ADR-0005 / §16.6). PURE.
+ *
+ * The mirror of {@link buildReplayEchoBack}, and it cannot reuse it: that sentence
+ * says the transaction "is on the ledger exactly once", and a note is on no ledger
+ * at all. Saying so would undo the one thing every sentence in this section exists
+ * to say.
+ */
+export function buildCaptureReplayEchoBack({
+	notedEcho,
+	replayedAfterMs
+}: {
+	/** The prose {@link buildCaptureEchoBack} produced when the note was actually written. */
+	notedEcho: string;
+	replayedAfterMs: number;
+}): string {
+	return (
+		`That note was already added ${humanizeAge(replayedAfterMs)} ago — this call did not ` +
+		`duplicate it, and nothing new was written. ${notedEcho} If the user means a SECOND, ` +
+		`separate note, wait a minute or word it differently.`
 	);
 }

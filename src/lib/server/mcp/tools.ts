@@ -37,6 +37,8 @@ import { settleUpTool } from './tools/settle-up';
 import { updateTransactionTool } from './tools/update-transaction';
 import { deleteTransactionTool } from './tools/delete-transaction';
 import { restoreTransactionTool } from './tools/restore-transaction';
+import { listCapturesTool } from './tools/list-captures';
+import { createCaptureTool } from './tools/create-capture';
 
 /**
  * Erase a tool's `Args` generic so heterogeneous tools share one registry list.
@@ -79,6 +81,13 @@ export function registerTool<Args>(tool: McpTool<Args>): RegisteredTool {
  * to the `delete_transaction` it undoes — a model reading the list meets the undo in
  * the same glance as the delete, which is the whole of ADR-0003's bet that a bogus
  * write is recoverable.
+ *
+ * #52's RECORD-LATER pair (§7.7) sits LAST on each side of the list, and that placement
+ * is itself the steering. A note records NOTHING — no transaction, no balance — so a
+ * model that meets `create_capture` before `create_transaction` and reaches for it by
+ * proximity has turned a recordable expense into a reminder, which is the one failure
+ * this feature can cause. Both tools are therefore the last thing read: the ledger is
+ * met first, every time, and the fallback is found only by looking for it.
  */
 export const MCP_TOOLS: readonly RegisteredTool[] = [
 	// ── Read surface (#28–#30) ──
@@ -89,13 +98,16 @@ export const MCP_TOOLS: readonly RegisteredTool[] = [
 	registerTool(listTransactionsTool),
 	registerTool(getTransactionTool),
 	registerTool(listCurrenciesTool),
+	// ── The record-later surface (#52) — LAST on each side, deliberately ──
+	registerTool(listCapturesTool),
 	// ── Write surface (#31+) — hidden from read keys by `filterToolsByScope` ──
 	registerTool(createTransactionTool),
 	registerTool(settleUpTool),
 	// ── Reversibility (#35) — the mechanism ADR-0003's risk appetite rests on ──
 	registerTool(updateTransactionTool),
 	registerTool(deleteTransactionTool),
-	registerTool(restoreTransactionTool)
+	registerTool(restoreTransactionTool),
+	registerTool(createCaptureTool)
 ];
 
 /**
@@ -183,6 +195,8 @@ export async function dispatchToolCall(
 		const result = await tool.invoke({ principal }, params.arguments ?? {});
 		return { kind: 'result', result };
 	} catch (err) {
-		return { kind: 'result', result: mapToolError(err) };
+		// The tool's own name goes with the error: an idempotency conflict must point the
+		// agent at the read tool that will actually SHOW this write (ADR-0009).
+		return { kind: 'result', result: mapToolError(err, tool.definition.name) };
 	}
 }

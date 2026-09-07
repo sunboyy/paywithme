@@ -21,12 +21,14 @@ const {
 	consumeRateLimit,
 	loadGroupView,
 	loadMemberViews,
+	loadAuthorNames,
 	peekIdempotentReplay
 } = vi.hoisted(() => ({
 	listGroupsForUser: vi.fn(),
 	consumeRateLimit: vi.fn(),
 	loadGroupView: vi.fn(),
 	loadMemberViews: vi.fn(),
+	loadAuthorNames: vi.fn(),
 	peekIdempotentReplay: vi.fn()
 }));
 
@@ -38,7 +40,7 @@ vi.mock('$lib/server/api/rate-limit', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/api/rate-limit')>()),
 	consumeRateLimit
 }));
-vi.mock('./tools/load', () => ({ loadGroupView, loadMemberViews }));
+vi.mock('./tools/load', () => ({ loadGroupView, loadMemberViews, loadAuthorNames }));
 // `create_transaction` / `settle_up` PEEK the idempotency store on RAW arguments before
 // any name/roster validation (ADR-0015, PR #80 review) — real tools run through
 // `dispatchToolCall` here, so without this mock that peek would hit a real DB
@@ -118,10 +120,11 @@ beforeEach(() => {
 	consumeRateLimit.mockResolvedValue(allowed);
 	probeSpy.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
 	peekIdempotentReplay.mockResolvedValue(null);
+	loadAuthorNames.mockResolvedValue(new Map());
 });
 
 describe('the shipped registry (#28 + #29)', () => {
-	/** The whole READ surface of the Connector, after #30. */
+	/** The whole READ surface of the Connector, after #30 — plus #52's record-later list. */
 	const READ_TOOLS = [
 		'list_groups',
 		'get_group',
@@ -129,7 +132,8 @@ describe('the shipped registry (#28 + #29)', () => {
 		'get_balances',
 		'list_transactions',
 		'get_transaction',
-		'list_currencies'
+		'list_currencies',
+		'list_captures'
 	];
 
 	it.each(READ_TOOLS)(
@@ -165,10 +169,12 @@ describe('the shipped registry (#28 + #29)', () => {
 		'settle_up',
 		'update_transaction',
 		'delete_transaction',
-		'restore_transaction'
+		'restore_transaction',
+		// #52's record-later note — a write, and deliberately the LAST tool in the list.
+		'create_capture'
 	];
 
-	it.each(WRITE_TOOLS)('ships `%s` as a WRITE tool (#31, #34, #35)', (name) => {
+	it.each(WRITE_TOOLS)('ships `%s` as a WRITE tool (#31, #34, #35, #52)', (name) => {
 		const tool = findTool(name);
 		expect(tool).toBeDefined();
 		// `scope: 'write'` is what hides it from a read key (`filterToolsByScope`) and what
@@ -523,14 +529,16 @@ describe('filterToolsByScope (ADR-0002)', () => {
 			'get_balances',
 			'list_transactions',
 			'get_transaction',
-			'list_currencies'
+			'list_currencies',
+			'list_captures'
 		]);
 		for (const write of [
 			'create_transaction',
 			'settle_up',
 			'update_transaction',
 			'delete_transaction',
-			'restore_transaction'
+			'restore_transaction',
+			'create_capture'
 		]) {
 			expect(names, write).not.toContain(write);
 		}

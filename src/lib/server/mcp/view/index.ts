@@ -61,16 +61,20 @@ export {
 	type EditableItemView,
 	type EditableChargeView,
 	type EditableTransactionView,
-	type CustomCurrencyView,
 	type TransactionView,
 	type TransactionListItemView,
 	TRANSACTION_NOTE,
 	LIST_TRANSACTIONS_NOTE,
-	CUSTOM_CURRENCY_NOTE,
 	toTransactionView,
 	toTransactionListItemView
 } from './transaction';
 export { type CurrencyView, CURRENCIES_NOTE, toCurrencyViews } from './currency';
+export {
+	type CustomCurrencyView,
+	CUSTOM_CURRENCY_NOTE,
+	toCustomCurrencyView
+} from './custom-currency';
+export { type CaptureView, CAPTURES_NOTE, toCaptureView } from './capture';
 export { type SimilarMemberView, similarlyNamedMembers } from './similar-names';
 export {
 	type ChangedField,
@@ -80,5 +84,7 @@ export {
 	buildUpdateEchoBack,
 	buildDeleteEchoBack,
 	buildRestoreEchoBack,
+	buildCaptureEchoBack,
+	buildCaptureReplayEchoBack,
 	changedFields
 } from './echo';

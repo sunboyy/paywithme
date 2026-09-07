@@ -9,11 +9,8 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import { asEntryCurrencyCode } from '$lib/money';
 import type { EntryCurrency } from '$lib/server/entry-currency';
 import type { TransactionListItem } from '$lib/server/transactions';
-import {
-	toTransactionListItemView,
-	CUSTOM_CURRENCY_NOTE,
-	LIST_TRANSACTIONS_NOTE
-} from './transaction';
+import { toTransactionListItemView, LIST_TRANSACTIONS_NOTE } from './transaction';
+import { CUSTOM_CURRENCY_NOTE } from './custom-currency';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',

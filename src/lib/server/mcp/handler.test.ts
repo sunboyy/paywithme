@@ -292,7 +292,7 @@ describe('initialize', () => {
 	});
 });
 
-/** The whole READ surface, in the order `tools/list` advertises it (#29). */
+/** The whole READ surface, in the order `tools/list` advertises it (#29, #52). */
 const READ_TOOLS = [
 	'list_groups',
 	'get_group',
@@ -300,7 +300,9 @@ const READ_TOOLS = [
 	'get_balances',
 	'list_transactions',
 	'get_transaction',
-	'list_currencies'
+	'list_currencies',
+	// #52's record-later list — last, so the LEDGER tools are met first (§7.7).
+	'list_captures'
 ];
 
 describe('tools/list (ADR-0002: scope-filtered)', () => {
@@ -332,7 +334,10 @@ describe('tools/list (ADR-0002: scope-filtered)', () => {
 			// of them may appear in the read-key expectation above.
 			'update_transaction',
 			'delete_transaction',
-			'restore_transaction'
+			'restore_transaction',
+			// #52's record-later note. It records NOTHING, but it still WRITES a row every
+			// member sees, so it is write-scoped and sits last of all.
+			'create_capture'
 		]);
 	});
 

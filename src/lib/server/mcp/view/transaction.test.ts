@@ -11,7 +11,8 @@ import type { TransactionDetail } from '$lib/server/transactions';
 import type { EntryCurrency } from '$lib/server/entry-currency';
 import { toTransactionInput } from '../tools/transaction-input';
 import { toMemberView } from './member';
-import { toTransactionView, CUSTOM_CURRENCY_NOTE, TRANSACTION_NOTE } from './transaction';
+import { toTransactionView, TRANSACTION_NOTE } from './transaction';
+import { CUSTOM_CURRENCY_NOTE } from './custom-currency';
 
 const principal: ApiKeyPrincipal = {
 	keyId: 'key_1',

@@ -441,7 +441,9 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			'get_balances',
 			'list_transactions',
 			'get_transaction',
-			'list_currencies'
+			'list_currencies',
+			// #52's record-later list — a READ tool, last of them (§7.7).
+			'list_captures'
 		];
 		/** Read ∪ write, in registry order — the write tools join LAST (ORDER IS A PROMPT). */
 		const WRITE_KEY_TOOLS = [
@@ -453,7 +455,10 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// so all three are write-scoped and none may appear in `READ_KEY_TOOLS`.
 			'update_transaction',
 			'delete_transaction',
-			'restore_transaction'
+			'restore_transaction',
+			// #52's record-later note. It writes a group-visible row (and no ledger row), so
+			// it is write-scoped and sits last of all.
+			'create_capture'
 		];
 
 		/** Every tool `tools/list` shows this key, in the order it was advertised. */
