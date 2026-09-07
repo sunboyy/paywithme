@@ -53,6 +53,21 @@ test('/docs/api renders the quickstart and links to the raw spec', async ({ page
 	);
 });
 
+test('/docs/api documents the record-later Connector tools as MCP, not REST', async ({ page }) => {
+	// Issue #53 / PLAN §7.7. The failure this guards against is a reader going to
+	// look for `POST /api/v1/…/captures`: the two tools are on the MCP endpoint, the
+	// page must say so, and it must state the rule that makes them safe to hand an
+	// agent — nothing noted this way is in a balance.
+	await page.goto('/docs/api');
+
+	await expect(page.getByText('Noting a spending for later')).toBeVisible();
+	await expect(page.getByText('create_capture', { exact: false })).toBeVisible();
+	await expect(page.getByText('list_captures', { exact: false })).toBeVisible();
+	await expect(page.getByText('A note is not a transaction.')).toBeVisible();
+	// The tools are MCP; no REST path is invented for them anywhere on the page.
+	await expect(page.locator('body')).not.toContainText('/api/v1/groups/{gid}/captures');
+});
+
 test('the quickstart curls address the host the docs are served from, not an example domain', async ({
 	page,
 	baseURL

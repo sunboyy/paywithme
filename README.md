@@ -32,6 +32,7 @@ A versioned REST/JSON API under **`/api/v1`**, authenticated with an API key you
 
 - [`/docs/api`](./src/routes/docs/api/+page.svelte) — quickstart + conventions (served at `/docs/api`).
 - The OpenAPI 3.1 spec is served verbatim at [`/api/v1/openapi.yaml`](./static/api/v1/openapi.yaml) and [`/api/v1/openapi.json`](./static/api/v1/openapi.json). The YAML is the source of truth; regenerate the JSON with `pnpm openapi:json`.
+- The same keys also drive the **MCP connector** at `/mcp`, whose tools are described on `/docs/api` (including `create_capture` / `list_captures`, the record-later notes — which are never on the ledger).
 
 ## Common scripts
 

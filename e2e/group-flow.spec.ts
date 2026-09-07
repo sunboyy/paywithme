@@ -8,6 +8,20 @@ import { deleteGroupsCreatedBy, deleteUserByEmail, getLatestMagicLinkUrlFor } fr
  *   balances zero out; the activity feed shows actions newest-first with the
  *   right actor.
  *
+ * ── The "Not recorded yet" leg (issue #53, PLAN §7.7) ────────────────────────
+ * A second act runs on the SAME settled group: note a spending for later → the
+ * unrecorded count appears on `/groups` and the group overview → the balances do
+ * NOT move → record it → the count clears, the transaction joins the list, and the
+ * balances move for the first time.
+ *
+ * It lives in THIS file rather than its own spec for a hard reason: the magic-link
+ * SEND cap is 5/60s per IP, every e2e request shares one IP, and the four existing
+ * specs already spend exactly five (auth ×2, the other three ×1). A sixth send
+ * would push the suite over the cap and make an unrelated spec fail. Appending the
+ * leg here reuses this test's session and its group and costs nothing — and a group
+ * that has just settled to zero is the clearest possible backdrop for "a Capture
+ * moved no balance": the screen still says "All settled up" until it is recorded.
+ *
  * One ordered scenario in a single page/context so the authenticated session and
  * all created state (group, members, transactions) persist across steps — mirrors
  * `e2e/auth.spec.ts`.
@@ -33,6 +47,9 @@ const OTHER_MEMBER = 'Bob';
 // The group and the spending transaction we create + assert on.
 const GROUP_NAME = `Trip ${Date.now()}`;
 const TX_TITLE = 'Dinner';
+// The record-later note (PLAN §7.7). Distinctive so it can be found in the tray,
+// in the prefilled title, and later as the recorded transaction's own title.
+const CAPTURE_NOTE = 'Night market snacks';
 
 test.describe('group flow e2e — create → split → settle → activity', () => {
 	test.skip(
@@ -222,5 +239,80 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 		const feed = page.getByText(TX_TITLE);
 		await expect(feed.first()).toBeVisible();
 		await expect(page.getByText(GROUP_NAME).first()).toBeVisible();
+
+		// ══ "Not recorded yet" (issue #53; PLAN §7.7) ═══════════════════════════════
+		// The group is settled to zero, which makes the next assertion unambiguous: a
+		// Capture must leave it that way.
+
+		// ── Note it for later: one screen, one required field ────────────────────────
+		await page.goto(`/groups/${groupId}`);
+		// Nothing waiting yet — the overview says so rather than showing a count.
+		await expect(page.getByText('Nothing waiting.')).toBeVisible();
+		await page.getByRole('link', { name: 'Note for later' }).click();
+		await page.waitForURL(`**/groups/${groupId}/captures/new`);
+
+		// The word "Capture" is INTERNAL vocabulary (PLAN §7.7): no user-facing string
+		// says it, here or anywhere else this leg visits.
+		await expect(page.getByRole('heading', { name: 'Note it for later' })).toBeVisible();
+		await expect(page.locator('body')).not.toContainText('Capture');
+
+		await page.getByLabel('What was it?').fill(CAPTURE_NOTE);
+		// Optional money, in the group's own currency — the amount a Capture carries
+		// is exactly the thing that must never reach a balance.
+		await page.getByLabel(/Roughly how much/).fill('20.00');
+		await page.getByRole('button', { name: 'Save' }).click();
+
+		// ── The tray: above the transaction list, attributed to its author ──────────
+		await page.waitForURL(`**/groups/${groupId}/transactions`);
+		const tray = page.getByTestId('not-recorded-yet-tray');
+		await expect(tray).toBeVisible();
+		await expect(tray.getByText(CAPTURE_NOTE)).toBeVisible();
+		// Attribution is what makes the tray deduplicate (§7.7 "Group-visible").
+		await expect(tray.getByText(TEST_NAME)).toBeVisible();
+
+		// ── The unrecorded count, on both recall surfaces (§7.7 "Recall (no push)") ──
+		await page.goto('/groups');
+		await expect(page.getByText('1 not recorded yet')).toBeVisible();
+		await page.goto(`/groups/${groupId}`);
+		await expect(page.getByText('1 note is waiting to be recorded.')).toBeVisible();
+
+		// ── AND THE BALANCES HAVE NOT MOVED (the whole point) ───────────────────────
+		// An open Capture carrying $20 is on screen in this group, and the settle page
+		// is still cleared. Nothing that computes a balance can see it (§7.7).
+		await page.goto(`/groups/${groupId}/settle`);
+		await expect(page.getByText('All settled up')).toBeVisible();
+		await expect(page.getByRole('list', { name: 'Suggested settlements' })).toHaveCount(0);
+
+		// ── "Record it": the note becomes an ordinary transaction ───────────────────
+		await page.goto(`/groups/${groupId}/transactions`);
+		await tray.getByRole('link', { name: 'Record it' }).click();
+		await page.waitForURL(/\/transactions\/new\?capture=/);
+		// Prefilled from the note: the title and the amount. The split, the payers and
+		// the category are NOT prefilled — a Capture holds none of them (ADR-0012).
+		await expect(page.getByLabel('Title')).toHaveValue(CAPTURE_NOTE);
+		await expect(page.getByLabel('Amount')).toHaveValue(/20/);
+		await page.getByRole('button', { name: 'Add transaction' }).click();
+		await page.waitForURL(`**/groups/${groupId}/transactions`);
+
+		// ── The count clears and the transaction joins the list ─────────────────────
+		await expect(page.getByTestId('not-recorded-yet-tray')).toHaveCount(0);
+		await expect(page.getByRole('link', { name: CAPTURE_NOTE })).toBeVisible();
+		await page.goto('/groups');
+		await expect(page.getByText('not recorded yet')).toHaveCount(0);
+
+		// ── … and the balances move, for the first time ─────────────────────────────
+		await page.goto(`/groups/${groupId}/settle`);
+		await expect(page.getByText('All settled up')).toHaveCount(0);
+		const settledBalances = page.getByRole('list', { name: 'Member balances' });
+		await expect(settledBalances.getByText('owes')).toBeVisible();
+		await expect(settledBalances.getByText('is owed')).toBeVisible();
+
+		// ── The audit trail reads correctly in the activity feed (§12.1) ────────────
+		await page.goto(`/groups/${groupId}/activity`);
+		// Both endings of the note are in the trail, under the label users read — the
+		// stored `capture` entity type must never surface as the internal word.
+		await expect(page.getByText('Not recorded yet').first()).toBeVisible();
+		await expect(page.getByText(CAPTURE_NOTE).first()).toBeVisible();
+		await expect(page.locator('body')).not.toContainText('Capture');
 	});
 });

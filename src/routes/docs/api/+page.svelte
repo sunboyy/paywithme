@@ -391,6 +391,61 @@
 		</Card.Content>
 	</Card.Root>
 
+	<!-- ── The Connector's record-later tools (issue #53; PLAN §7.7; ADR-0012) ──
+	     NOT `/api/v1` endpoints, and said so in the first sentence: they are MCP
+	     tools on `POST /mcp`, and a reader who skims could otherwise go looking for
+	     a REST path that does not exist. Kept to WHAT THEY ARE FOR and the one rule
+	     that is easy to get wrong; the argument shapes are delivered to the agent by
+	     `tools/list` and are deliberately not restated here, for the same
+	     no-prose-drift reason the REST shapes live only in the OpenAPI spec. -->
+	<Card.Root>
+		<Card.Header>
+			<Card.Title>Noting a spending for later</Card.Title>
+			<Card.Description>
+				Two Connector tools, for the moment when there is no time to record a transaction properly.
+			</Card.Description>
+		</Card.Header>
+
+		<Card.Content class="space-y-4">
+			<p class="max-w-prose text-sm text-pretty text-muted-foreground">
+				These are <strong class="font-medium text-foreground">MCP tools</strong>, not REST
+				endpoints: an assistant connected to
+				<code class="font-mono text-xs">/mcp</code> discovers them with the same key and the same
+				scopes as above, and there is no
+				<code class="font-mono text-xs">{data.basePath}</code> path for them. They exist because the worst
+				moment to fill in a category, a split and a list of payers is the moment you are walking out of
+				the restaurant.
+			</p>
+
+			<ul class="max-w-prose list-disc space-y-2 pl-5 text-sm text-pretty text-muted-foreground">
+				<li>
+					<code class="font-mono text-xs">create_capture</code>
+					<em>(write)</em> — note that a spending happened, in one sentence: a free-text note, plus an
+					optional rough amount and the day it happened. That is the whole shape. Nobody is named, nothing
+					is split, and no exchange rate is applied.
+				</li>
+				<li>
+					<code class="font-mono text-xs">list_captures</code>
+					<em>(read)</em> — the group's open notes, each attributed to whoever wrote it. This is
+					<em>"what haven't I recorded yet?"</em>, and it is also the check that stops a second
+					person recording the same dinner twice.
+				</li>
+			</ul>
+
+			<p class="max-w-prose text-sm text-pretty text-muted-foreground">
+				<strong class="font-medium text-foreground">A note is not a transaction.</strong> Nothing
+				noted this way is on the ledger: it is in no balance, in no settlement suggestion, and in no
+				response from
+				<code class="font-mono text-xs">{data.basePath}</code>
+				or from the transaction tools — not even as a "pending" annotation. An amount on a note is approximate,
+				was never converted, and may well describe a spending that is
+				<em>already</em> recorded, so adding these figures to anything produces a number that means nothing.
+				A note becomes real money only when someone records it as a transaction in the app, which is a
+				deliberate, human-reviewed step.
+			</p>
+		</Card.Content>
+	</Card.Root>
+
 	<!-- ── The raw spec (the single source of truth) ──────────────────────────── -->
 	<Card.Root>
 		<Card.Header>
