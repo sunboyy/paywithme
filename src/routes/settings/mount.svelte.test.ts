@@ -3,17 +3,12 @@ import { render, cleanup } from '@testing-library/svelte';
 import { defaults } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { deletePasskeySchema } from '$lib/schemas/auth';
-import { revokeApiKeySchema } from '$lib/schemas/api-key';
-import type { ApiKeyListItem } from '$lib/server/api-keys';
+import type { PasskeyListItem } from './+page.server';
 import Page from './+page.svelte';
 import type { PageData } from './$types';
 
-// Rendered-markup tests for the API-keys section of `/settings` (PLAN §16.8).
-//
-// Covers the two acceptance criteria that are only visible in the DOM: the
-// first-run empty state offering BOTH a create CTA and the API docs, and a key row
-// showing every field (name, scope badge, `start` prefix, created, last-used,
-// expiry) with a REAL revoke form — no collapsing on mobile, no JS-only controls.
+// Rendered-markup tests for the ACCOUNT screen: the passkey list, its empty
+// state, and the settings tabs that carry the user to the sibling screens.
 
 vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
 // PARTIAL mock: superForm itself calls `beforeNavigate`/`afterNavigate`, so the
@@ -24,72 +19,57 @@ vi.mock('$app/navigation', async (importOriginal) => ({
 }));
 vi.mock('$lib/auth-client', () => ({ authClient: { passkey: { addPasskey: vi.fn() } } }));
 
-const key: ApiKeyListItem = {
-	id: 'key_1',
-	name: 'My agent',
-	scope: 'read',
-	start: 'pwm_test_ab',
-	createdAt: '2026-01-02T03:04:05.000Z',
-	lastRequest: null,
-	expiresAt: null,
-	expired: false
+const passkey: PasskeyListItem = {
+	id: 'pk_1',
+	name: 'My iPhone',
+	deviceHint: 'iCloud Keychain',
+	createdAt: '2026-01-02T03:04:05.000Z'
 };
 
-function pageData(apiKeys: ApiKeyListItem[]): PageData {
+function pageData(passkeys: PasskeyListItem[]): PageData {
 	return {
 		user: { name: 'Alex', email: 'alex@example.com' },
-		passkeys: [],
-		apiKeys,
-		deleteForm: defaults(zod4(deletePasskeySchema)),
-		revokeApiKeyForm: defaults(zod4(revokeApiKeySchema))
+		passkeys,
+		deleteForm: defaults(zod4(deletePasskeySchema))
 	} as unknown as PageData;
 }
 
 afterEach(cleanup);
 
-describe('/settings — API keys section', () => {
-	it('offers BOTH Create key and View API docs when there are no keys', () => {
+describe('/settings — the account screen', () => {
+	it('names the account the screen is about', () => {
 		const { getByText } = render(Page, { props: { data: pageData([]) } });
 
-		// Two equal-weight buttons, both real links (PLAN §16.8 empty/first-run).
-		const create = getByText('Create key').closest('a');
-		expect(create?.getAttribute('href')).toBe('/settings/api-keys/new');
-		const docs = getByText('View API docs').closest('a');
-		expect(docs?.getAttribute('href')).toBe('/docs/api');
+		expect(getByText('Alex')).toBeTruthy();
+		expect(getByText('alex@example.com')).toBeTruthy();
 	});
 
-	it('shows every field for a key, and a REAL revoke form (works without JS)', () => {
-		const { getByTestId, getByText } = render(Page, {
-			props: {
-				data: pageData([{ ...key, lastRequest: '2026-03-04T00:00:00.000Z' }])
-			}
-		});
+	it('reaches the sibling settings screens through the shared tabs', () => {
+		const { getByRole } = render(Page, { props: { data: pageData([]) } });
 
-		const row = getByTestId('api-key-row');
-		expect(row.textContent).toContain('My agent');
-		// The `start` prefix is safe to show and is how two keys are told apart.
-		expect(row.textContent).toContain('pwm_test_ab');
-		expect(row.textContent).toContain('Created');
-		expect(row.textContent).toContain('Last used');
-		expect(row.textContent).toContain('Never expires');
-		// Scope badge.
-		expect(getByText('Read only')).toBeTruthy();
+		const nav = getByRole('navigation', { name: 'Settings sections' });
+		const hrefs = [...nav.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+		expect(hrefs).toEqual(['/settings', '/settings/receiving', '/settings/api-keys']);
+		expect(nav.querySelector('[aria-current="page"]')?.textContent?.trim()).toBe('Account');
+	});
 
-		// Revoke posts a real form action with the key id — no JS required.
-		const form = row.querySelector('form');
-		expect(form?.getAttribute('action')).toBe('?/revokeApiKey');
+	it('nudges a user with no passkeys, without hiding the add CTA', () => {
+		const { getByTestId, getByText } = render(Page, { props: { data: pageData([]) } });
+
+		expect(getByTestId('passkeys-empty').textContent).toContain('No passkeys yet');
+		expect(getByText('Add a passkey')).toBeTruthy();
+	});
+
+	it('lists a passkey with a REAL delete form (works without JS)', () => {
+		const { getByRole } = render(Page, { props: { data: pageData([passkey]) } });
+
+		const list = getByRole('list', { name: 'Your passkeys' });
+		expect(list.textContent).toContain('My iPhone');
+		expect(list.textContent).toContain('iCloud Keychain');
+
+		const form = list.querySelector('form');
+		expect(form?.getAttribute('action')).toBe('?/delete');
 		expect(form?.getAttribute('method')?.toLowerCase()).toBe('post');
-		const hidden = form?.querySelector<HTMLInputElement>('input[name="id"]');
-		expect(hidden?.value).toBe('key_1');
-	});
-
-	it('marks an expired key distinctly', () => {
-		const { getByText } = render(Page, {
-			props: {
-				data: pageData([{ ...key, expiresAt: '2026-01-09T00:00:00.000Z', expired: true }])
-			}
-		});
-
-		expect(getByText('Expired')).toBeTruthy();
+		expect(form?.querySelector<HTMLInputElement>('input[name="id"]')?.value).toBe('pk_1');
 	});
 });

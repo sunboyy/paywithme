@@ -25,12 +25,14 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import FormStatus from '$lib/components/FormStatus.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
+	import PageHeader from '$lib/components/PageHeader.svelte';
 	import CustomCurrencyFields from '$lib/components/CustomCurrencyFields.svelte';
 	import CustomCurrencyRow from '$lib/components/CustomCurrencyRow.svelte';
 	import CoinsIcon from '@lucide/svelte/icons/coins';
 	import InfoIcon from '@lucide/svelte/icons/info';
-	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -90,22 +92,16 @@
 		<GroupNav groupId={data.group.id} current="settings" />
 	</header>
 
-	<a
-		href={settingsHref}
-		class="inline-flex min-h-11 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-	>
-		<ChevronLeftIcon class="size-4" aria-hidden="true" />
-		Back to settings
-	</a>
+	<!-- The same header shape as every other sub-screen: the way back first, then
+	     what this screen is. -->
+	<PageHeader
+		title="Custom currencies"
+		description="Units this group defined itself — an unlisted national currency, or something that was never money. They can be used when recording a transaction, alongside the built-in currencies."
+		backHref={settingsHref}
+		backLabel="Settings"
+	/>
 
-	{#if statusMessage}
-		<p
-			class={statusMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-			role={statusMessage.type === 'error' ? 'alert' : 'status'}
-		>
-			{statusMessage.text}
-		</p>
-	{/if}
+	<FormStatus message={statusMessage} />
 
 	<!-- THE LIMIT, said out loud (ADR-0014 "Consequences"). Above the list and the
 	     add form, so it is read before a currency is defined, not after. -->
@@ -124,10 +120,9 @@
 
 	<Card.Root>
 		<Card.Header>
-			<Card.Title>Custom currencies</Card.Title>
+			<Card.Title>This group's currencies</Card.Title>
 			<Card.Description>
-				Units this group defined itself — an unlisted national currency, or something that was never
-				money. They can be used when recording a transaction, alongside the built-in currencies.
+				Each one becomes a choice when recording a transaction, alongside the built-in currencies.
 			</Card.Description>
 		</Card.Header>
 
@@ -135,24 +130,13 @@
 			{#if data.currencies.length === 0}
 				<!-- Nothing-yet nudge (the add form below is the CTA, so this stays
 				     inline rather than becoming a nested card). -->
-				<div
-					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
-					data-testid="currencies-empty"
-				>
-					<span
-						class="flex size-12 items-center justify-center rounded-full bg-muted"
-						aria-hidden="true"
-					>
-						<CoinsIcon class="size-6" />
-					</span>
-					<div class="space-y-1">
-						<p class="text-base font-medium text-foreground">No custom currencies yet</p>
-						<p class="mx-auto max-w-prose text-sm text-pretty">
-							This group uses the built-in currencies. Add your own below if you need one they don't
-							cover.
-						</p>
-					</div>
-				</div>
+				<EmptyState
+					inline
+					testId="currencies-empty"
+					title="No custom currencies yet"
+					description="This group uses the built-in currencies. Add your own below if you need one they don't cover."
+					icon={CoinsIcon}
+				/>
 			{:else}
 				<ul class="divide-y divide-border" aria-label="Custom currencies">
 					{#each data.currencies as currency (currency.code)}

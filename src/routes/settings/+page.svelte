@@ -1,23 +1,26 @@
 <script lang="ts">
-	// `/settings` — manage passkeys across devices (PLAN §5.4–§5.6).
+	// `/settings` — the ACCOUNT screen: who you are signed in as, and how you sign
+	// in (PLAN §5.4–§5.6). Getting paid and API keys are their own screens, reached
+	// from the shared settings tabs.
 	//
 	// Add: client-side WebAuthn (`authClient.passkey.addPasskey()`), same pattern
 	// as task 2.8's onboarding nudge — JS-only by nature, with friendly cancel /
 	// error handling and `invalidateAll()` to surface the new passkey.
 	// Delete: a real server-action `<form>` per row (works without JS); the action
-	// status surfaces via `role="status"` / `role="alert"`.
+	// status surfaces through the shared `FormStatus` banner.
 	import { invalidateAll } from '$app/navigation';
-	import { resolve } from '$app/paths';
 	import { superForm } from 'sveltekit-superforms';
 	import * as Card from '$lib/components/ui/card';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
 	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
-	import TerminalIcon from '@lucide/svelte/icons/terminal';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 	import { authClient } from '$lib/auth-client';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import FormStatus from '$lib/components/FormStatus.svelte';
+	import PageHeader from '$lib/components/PageHeader.svelte';
+	import SettingsNav from '$lib/components/SettingsNav.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -59,28 +62,10 @@
 		}
 	}
 
-	// API-key revoke (PLAN §16.8) — the same one-superForm-for-all-rows shape as
-	// the passkey delete above: each row posts a real `<form>` to `?/revokeApiKey`
-	// (works with JS disabled), confirmed through `ConfirmSubmit`.
-	// svelte-ignore state_referenced_locally
-	const revokeForm = superForm(data.revokeApiKeyForm);
-	const { message: revokeMessage, enhance: revokeEnhance, submitting: revoking } = revokeForm;
-
 	const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
 	function formatCreated(iso: string): string {
 		const d = new Date(iso);
 		return Number.isNaN(d.getTime()) ? '' : dateFormatter.format(d);
-	}
-
-	/** "Never used" until the plugin's `lastRequest` is stamped by a real call. */
-	function formatLastUsed(iso: string | null): string {
-		return iso ? `Last used ${formatCreated(iso)}` : 'Never used';
-	}
-
-	/** Expiry line — expired keys are called out, not silently listed as normal. */
-	function formatExpiry(iso: string | null, expired: boolean): string {
-		if (!iso) return 'Never expires';
-		return `${expired ? 'Expired' : 'Expires'} ${formatCreated(iso)}`;
 	}
 </script>
 
@@ -88,11 +73,28 @@
 	<title>Settings · Pay with me</title>
 </svelte:head>
 
-<div class="space-y-6">
-	<div class="space-y-1">
-		<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
-		<p class="text-sm text-muted-foreground">Manage how you sign in to Pay with me.</p>
-	</div>
+<div class="mx-auto w-full max-w-2xl space-y-6">
+	<PageHeader title="Settings" description="Your account, how you get paid, and API access." />
+
+	<SettingsNav current="account" />
+
+	<!-- Who you are. The header only ever showed a truncated name; this says which
+	     account the rest of the screen is about. -->
+	{#if data.user}
+		<Card.Root>
+			<Card.Header>
+				<Card.Title>Signed in as</Card.Title>
+			</Card.Header>
+			<Card.Content>
+				<div class="min-w-0 space-y-0.5">
+					{#if data.user.name}
+						<p class="truncate font-medium">{data.user.name}</p>
+					{/if}
+					<p class="truncate text-sm text-muted-foreground">{data.user.email}</p>
+				</div>
+			</Card.Content>
+		</Card.Root>
+	{/if}
 
 	<Card.Root>
 		<Card.Header>
@@ -105,43 +107,20 @@
 
 		<Card.Content class="space-y-4">
 			<!-- Action status (delete success/error), shared across the row forms. -->
-			{#if $deleteMessage}
-				<p
-					class={$deleteMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-					role={$deleteMessage.type === 'error' ? 'alert' : 'status'}
-				>
-					{$deleteMessage.text}
-				</p>
-			{/if}
-
+			<FormStatus message={$deleteMessage} />
 			<!-- Client enrolment error. -->
-			{#if enrolError}
-				<p class="text-sm text-destructive" role="alert">{enrolError}</p>
-			{/if}
+			<FormStatus message={enrolError ? { type: 'error', text: enrolError } : null} />
 
 			{#if data.passkeys.length === 0}
-				<!-- Nothing-yet empty state (task 8.1). This block lives INSIDE the
-				     Passkeys card (the "Add a passkey" button is the primary CTA just
-				     below the Separator), so it's an inline centred nudge rather than a
-				     nested EmptyState card — same look, real text, decorative icon. -->
-				<div
-					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
-					data-testid="passkeys-empty"
-				>
-					<span
-						class="flex size-12 items-center justify-center rounded-full bg-muted"
-						aria-hidden="true"
-					>
-						<KeyRoundIcon class="size-6" />
-					</span>
-					<div class="space-y-1">
-						<p class="text-base font-medium text-foreground">No passkeys yet</p>
-						<p class="mx-auto max-w-prose text-sm text-pretty">
-							Add a passkey to sign in faster next time — with Face ID, a fingerprint, or your
-							screen lock instead of an email link.
-						</p>
-					</div>
-				</div>
+				<!-- Nothing-yet nudge. Inline (no nested card) because the "Add a
+				     passkey" button just below the Separator is this section's CTA. -->
+				<EmptyState
+					inline
+					testId="passkeys-empty"
+					title="No passkeys yet"
+					description="Add a passkey to sign in faster next time — with Face ID, a fingerprint, or your screen lock instead of an email link."
+					icon={KeyRoundIcon}
+				/>
 			{:else}
 				<ul class="divide-y divide-border" aria-label="Your passkeys">
 					{#each data.passkeys as passkey (passkey.id)}
@@ -175,122 +154,9 @@
 			<Separator />
 
 			<Button type="button" class="w-full" disabled={enrolling} onclick={addPasskey}>
+				<PlusIcon class="size-4" aria-hidden="true" />
 				{enrolling ? 'Adding passkey…' : 'Add a passkey'}
 			</Button>
-		</Card.Content>
-	</Card.Root>
-
-	<!-- Receiving methods (PLAN §17.4) — the editor lives on its own route because
-	     it is a list with its own add/edit/reorder steps, not a single form. -->
-	<Card.Root>
-		<Card.Header>
-			<Card.Title>How you get paid</Card.Title>
-			<Card.Description>
-				Record where people should send money when they settle up with you. Only people you share a
-				group with can see it.
-			</Card.Description>
-		</Card.Header>
-		<Card.Content>
-			<Button variant="outline" class="w-full" href={resolve('/settings/receiving')}>
-				Manage receiving methods
-			</Button>
-		</Card.Content>
-	</Card.Root>
-
-	<!-- API keys (PLAN §16.8) — the sibling section to passkeys. -->
-	<Card.Root>
-		<Card.Header>
-			<Card.Title>API keys</Card.Title>
-			<Card.Description>
-				API keys let a script or an AI agent act on your behalf through the Pay with me API. A key
-				sees exactly the groups you see.
-			</Card.Description>
-			<Card.Action>
-				<!-- Discoverability (PLAN §16.9): the prose docs + raw spec are one tap away
-				     from where you mint the key they describe. -->
-				<Button variant="ghost" size="sm" href={resolve('/docs/api')}>API docs</Button>
-			</Card.Action>
-		</Card.Header>
-
-		<Card.Content class="space-y-4">
-			<!-- Revoke success/error, shared across the per-row forms. -->
-			{#if $revokeMessage}
-				<p
-					class={$revokeMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-					role={$revokeMessage.type === 'error' ? 'alert' : 'status'}
-				>
-					{$revokeMessage.text}
-				</p>
-			{/if}
-
-			{#if data.apiKeys.length === 0}
-				<!-- First-run: two EQUAL-WEIGHT buttons — Create key + View API docs
-				     (PLAN §16.8), both real links (no client-only fetches). -->
-				<EmptyState
-					title="No API keys yet"
-					description="Create a key to let an agent or script read your groups — or, if you trust it, record and settle transactions for you."
-					icon={TerminalIcon}
-				>
-					{#snippet action()}
-						<div class="flex flex-col gap-2 sm:flex-row">
-							<Button href={resolve('/settings/api-keys/new')}>Create key</Button>
-							<Button variant="outline" href={resolve('/docs/api')}>View API docs</Button>
-						</div>
-					{/snippet}
-				</EmptyState>
-			{:else}
-				<!-- Mobile: every field stays visible (PLAN §16.8 "no collapsing") — the
-				     row simply stacks instead of hiding anything. -->
-				<ul class="divide-y divide-border" aria-label="Your API keys">
-					{#each data.apiKeys as apiKey (apiKey.id)}
-						<li
-							class="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
-							data-testid="api-key-row"
-						>
-							<div class="min-w-0 space-y-1">
-								<div class="flex flex-wrap items-center gap-2">
-									<p class="truncate font-medium">{apiKey.name ?? 'API key'}</p>
-									<Badge variant={apiKey.scope === 'write' ? 'default' : 'secondary'}>
-										{apiKey.scope === 'write' ? 'Read & write' : 'Read only'}
-									</Badge>
-									{#if apiKey.expired}
-										<Badge variant="destructive">Expired</Badge>
-									{/if}
-								</div>
-								{#if apiKey.start}
-									<!-- The `start` prefix is safe to show (PLAN §16.1) — it's how you
-									     tell two keys apart without ever revealing a secret. -->
-									<p class="font-mono text-xs break-all text-muted-foreground">
-										{apiKey.start}…
-									</p>
-								{/if}
-								<p class="text-xs text-muted-foreground">
-									Created {formatCreated(apiKey.createdAt)} · {formatLastUsed(apiKey.lastRequest)} ·
-									{formatExpiry(apiKey.expiresAt, apiKey.expired)}
-								</p>
-							</div>
-
-							<ConfirmSubmit
-								action="?/revokeApiKey"
-								enhance={revokeEnhance}
-								hiddenName="id"
-								hiddenValue={apiKey.id}
-								triggerLabel="Revoke"
-								title="Revoke this API key?"
-								description="Anything using this key stops working immediately. This can't be undone — you'd need to create a new key."
-								confirmLabel="Revoke key"
-								disabled={$revoking}
-							/>
-						</li>
-					{/each}
-				</ul>
-
-				<Separator />
-
-				<Button variant="outline" class="w-full" href={resolve('/settings/api-keys/new')}>
-					Create another key
-				</Button>
-			{/if}
 		</Card.Content>
 	</Card.Root>
 </div>

@@ -8,12 +8,17 @@
 	// what the caller renders into the `action` snippet; the component itself is
 	// presentation only.
 	//
-	// Mobile-first & accessible: it's a centred Card with REAL text content (the
-	// title + description are always rendered as text, never an icon alone), an
-	// optional decorative icon (`aria-hidden`), and an optional `action` snippet
-	// the caller fills with a real focusable link/form (progressive enhancement is
-	// preserved — the empty-vs-nonempty decision is made in the route `load`, and
-	// CTAs are real links/forms, never client-only fetches).
+	// Two shapes, same content: a standalone Card, or — with `inline` — the same
+	// block WITHOUT card chrome, for use inside a card that already has its own
+	// header and CTA (settings sections, the members roster). Four screens used to
+	// hand-copy that inline markup; this is it.
+	//
+	// Mobile-first & accessible: REAL text content (the title + description are
+	// always rendered as text, never an icon alone), an optional decorative icon
+	// (`aria-hidden`), and an optional `action` snippet the caller fills with a
+	// real focusable link/form (progressive enhancement is preserved — the
+	// empty-vs-nonempty decision is made in the route `load`, and CTAs are real
+	// links/forms, never client-only fetches).
 	//
 	// Uses shadcn-svelte primitives from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored). Lives in `$lib/components/` — NOT `ui/**`.
@@ -27,7 +32,9 @@
 		title,
 		description,
 		icon,
-		action
+		action,
+		inline = false,
+		testId = inline ? undefined : 'empty-state'
 	}: {
 		/** Short headline, e.g. "No groups yet". Always rendered as text. */
 		title: string;
@@ -37,29 +44,43 @@
 		icon?: IconComponent;
 		/** Optional CTA region — a real link or form (create / clear-filter). */
 		action?: Snippet;
+		/** Drop the Card chrome — for nesting inside a card that has its own. */
+		inline?: boolean;
+		/** Overrides the `data-testid` (each inline host keeps its own hook). */
+		testId?: string;
 	} = $props();
 
 	const Icon = $derived(icon);
 </script>
 
-<Card.Root data-testid="empty-state">
-	<Card.Content class="flex flex-col items-center gap-3 px-6 py-10 text-center">
-		{#if Icon}
-			<span
-				class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground"
-				aria-hidden="true"
-			>
-				<Icon class="size-6" />
-			</span>
-		{/if}
-		<div class="space-y-1">
-			<p class="text-base font-medium">{title}</p>
-			<p class="mx-auto max-w-prose text-sm text-pretty text-muted-foreground">{description}</p>
+{#snippet body()}
+	{#if Icon}
+		<span
+			class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground"
+			aria-hidden="true"
+		>
+			<Icon class="size-6" />
+		</span>
+	{/if}
+	<div class="space-y-1">
+		<p class="text-base font-medium">{title}</p>
+		<p class="mx-auto max-w-prose text-sm text-pretty text-muted-foreground">{description}</p>
+	</div>
+	{#if action}
+		<div class="pt-1">
+			{@render action()}
 		</div>
-		{#if action}
-			<div class="pt-1">
-				{@render action()}
-			</div>
-		{/if}
-	</Card.Content>
-</Card.Root>
+	{/if}
+{/snippet}
+
+{#if inline}
+	<div class="flex flex-col items-center gap-3 py-6 text-center" data-testid={testId}>
+		{@render body()}
+	</div>
+{:else}
+	<Card.Root data-testid={testId}>
+		<Card.Content class="flex flex-col items-center gap-3 px-6 py-10 text-center">
+			{@render body()}
+		</Card.Content>
+	</Card.Root>
+{/if}

@@ -24,8 +24,9 @@ export const load: PageServerLoad = async ({ locals, cookies, setHeaders, url })
 	const reveal = takeApiKeyReveal(cookies, user.id);
 	if (!reveal) {
 		// No key in flight: a refresh, a bookmark, or an expired flash. Nothing to
-		// show — and by design nothing CAN be shown again.
-		redirect(303, '/settings');
+		// show — and by design nothing CAN be shown again. Land on the key list,
+		// the screen this flow started from.
+		redirect(303, '/settings/api-keys');
 	}
 
 	// The response contains a plaintext credential. Do not let browsers, shared

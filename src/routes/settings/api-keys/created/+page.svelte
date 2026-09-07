@@ -15,6 +15,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import PageHeader from '$lib/components/PageHeader.svelte';
 	import CopyIcon from '@lucide/svelte/icons/copy';
 	import CheckIcon from '@lucide/svelte/icons/check';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
@@ -55,12 +56,9 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-6">
-	<div class="space-y-1">
-		<h1 class="text-2xl font-semibold tracking-tight">Your new API key</h1>
-		<p class="text-sm text-muted-foreground">
-			{data.name ?? 'API key'} was created.
-		</p>
-	</div>
+	<!-- No back link here on purpose: the key is shown exactly once, so the only
+	     way off this screen is "Done" — after you have copied it. -->
+	<PageHeader title="Your new API key" description="{data.name ?? 'API key'} was created." />
 
 	<Card.Root data-testid="api-key-reveal">
 		<Card.Header>
@@ -134,7 +132,7 @@
 		</Card.Content>
 
 		<Card.Footer class="flex flex-col gap-3 sm:flex-row">
-			<Button href={resolve('/settings')} class="w-full sm:w-auto">Done</Button>
+			<Button href={resolve('/settings/api-keys')} class="w-full sm:w-auto">Done</Button>
 			<!-- `/docs/api` arrives with PLAN §16.9 (separate ticket) — not yet a known
 			     route id, so `resolve()` can't type it. -->
 			<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->

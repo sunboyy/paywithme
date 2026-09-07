@@ -153,7 +153,7 @@ describe('the empty state', () => {
 	it('explains in one line what the screen is for', () => {
 		const { getByTestId } = renderPage(pageData({ methods: [] }));
 
-		const text = getByTestId('empty-state').textContent ?? '';
+		const text = getByTestId('receiving-empty').textContent ?? '';
 		expect(text).toContain('No receiving methods yet');
 		expect(text.replace(/\s+/g, ' ')).toContain('settling up with you');
 	});

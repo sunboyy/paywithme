@@ -33,6 +33,8 @@
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
+	import FormStatus from '$lib/components/FormStatus.svelte';
+	import PageHeader from '$lib/components/PageHeader.svelte';
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import EyeIcon from '@lucide/svelte/icons/eye';
 	import PencilIcon from '@lucide/svelte/icons/pencil';
@@ -82,17 +84,14 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-6">
-	<div class="space-y-1">
-		<h1 class="text-2xl font-semibold tracking-tight">Create an API key</h1>
-		<p class="text-sm text-muted-foreground">
-			An API key lets a script or an AI agent act on your behalf — it sees exactly the groups you
-			see. You'll see the key once, right after you create it.
-		</p>
-	</div>
+	<PageHeader
+		title="Create an API key"
+		description="An API key lets a script or an AI agent act on your behalf — it sees exactly the groups you see. You'll see the key once, right after you create it."
+		backHref={resolve('/settings/api-keys')}
+		backLabel="API keys"
+	/>
 
-	{#if $message?.type === 'error'}
-		<p class="text-sm text-destructive" role="alert">{$message.text}</p>
-	{/if}
+	<FormStatus message={$message?.type === 'error' ? $message : null} />
 
 	<form method="POST" use:enhance class="space-y-6">
 		<Card.Root>
@@ -240,7 +239,9 @@
 			<Form.Button class="w-full sm:w-auto" disabled={$submitting}>
 				{$submitting ? 'Creating key…' : 'Create key'}
 			</Form.Button>
-			<Button variant="outline" href={resolve('/settings')} class="w-full sm:w-auto">Cancel</Button>
+			<Button variant="outline" href={resolve('/settings/api-keys')} class="w-full sm:w-auto">
+				Cancel
+			</Button>
 			<!-- `/docs/api` is delivered by PLAN §16.9 (a separate ticket), so it is not
 			     yet a known route id and `resolve()` cannot type it. A plain href is
 			     correct and forward-compatible — it will resolve the moment that route

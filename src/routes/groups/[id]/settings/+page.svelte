@@ -13,8 +13,10 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Form from '$lib/components/ui/form';
 	import { Input } from '$lib/components/ui/input';
+	import FormStatus from '$lib/components/FormStatus.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
-	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+	import NavRow from '$lib/components/NavRow.svelte';
+	import CoinsIcon from '@lucide/svelte/icons/coins';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -42,20 +44,17 @@
 	<header class="space-y-3">
 		<h1 class="truncate text-2xl font-semibold tracking-tight">{data.group.name}</h1>
 		<GroupNav groupId={data.group.id} current="settings" />
+		<p class="text-sm text-muted-foreground">
+			Settings for this group. Anyone in the group can change them.
+		</p>
 	</header>
 
-	{#if $message}
-		<p
-			class={$message.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-			role={$message.type === 'error' ? 'alert' : 'status'}
-		>
-			{$message.text}
-		</p>
-	{/if}
+	<FormStatus message={$message} />
 
 	<Card.Root>
 		<Card.Header>
 			<Card.Title>Group name</Card.Title>
+			<Card.Description>What this group is called everywhere in the app.</Card.Description>
 		</Card.Header>
 		<Card.Content>
 			<form method="POST" action="?/rename" use:enhance class="space-y-4">
@@ -100,13 +99,12 @@
 			</Card.Description>
 		</Card.Header>
 		<Card.Content>
-			<a
+			<NavRow
 				href={currenciesHref}
-				class="flex min-h-11 items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent/50"
-			>
-				Manage custom currencies
-				<ChevronRightIcon class="size-4 text-muted-foreground" aria-hidden="true" />
-			</a>
+				icon={CoinsIcon}
+				title="Custom currencies"
+				description="Define and edit the units this group can record transactions in."
+			/>
 		</Card.Content>
 	</Card.Root>
 </div>

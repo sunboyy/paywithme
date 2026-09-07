@@ -31,6 +31,8 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import FormStatus from '$lib/components/FormStatus.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
 	import ReceivingMethodsPanel from '$lib/components/ReceivingMethodsPanel.svelte';
 	import UsersIcon from '@lucide/svelte/icons/users';
@@ -163,14 +165,7 @@
 		<GroupNav groupId={data.group.id} current="members" />
 	</header>
 
-	{#if statusMessage}
-		<p
-			class={statusMessage.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-			role={statusMessage.type === 'error' ? 'alert' : 'status'}
-		>
-			{statusMessage.text}
-		</p>
-	{/if}
+	<FormStatus message={statusMessage} />
 
 	<Card.Root>
 		<Card.Header>
@@ -185,24 +180,13 @@
 			{#if data.members.length === 0}
 				<!-- Nothing-yet nudge (task 8.1): inline centred (the add-member form is
 				     the CTA just below the Separator), so it's not a nested card. -->
-				<div
-					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
-					data-testid="members-empty"
-				>
-					<span
-						class="flex size-12 items-center justify-center rounded-full bg-muted"
-						aria-hidden="true"
-					>
-						<UsersIcon class="size-6" />
-					</span>
-					<div class="space-y-1">
-						<p class="text-base font-medium text-foreground">No members yet</p>
-						<p class="mx-auto max-w-prose text-sm text-pretty">
-							Add a participant for anyone splitting costs — they don't need an account. Start with
-							the form below.
-						</p>
-					</div>
-				</div>
+				<EmptyState
+					inline
+					testId="members-empty"
+					title="No members yet"
+					description="Add a participant for anyone splitting costs — they don't need an account. Start with the form below."
+					icon={UsersIcon}
+				/>
 			{:else}
 				<!-- The roster is READ-ONLY by default: one line per member.
 
@@ -387,24 +371,13 @@
 			{#if data.invites.length === 0}
 				<!-- Nothing-yet nudge (task 8.1): inline centred (the create-invite form
 				     is the CTA just below the Separator), so it's not a nested card. -->
-				<div
-					class="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground"
-					data-testid="invites-empty"
-				>
-					<span
-						class="flex size-12 items-center justify-center rounded-full bg-muted"
-						aria-hidden="true"
-					>
-						<LinkIcon class="size-6" />
-					</span>
-					<div class="space-y-1">
-						<p class="text-base font-medium text-foreground">No active invite links</p>
-						<p class="mx-auto max-w-prose text-sm text-pretty">
-							Create a link to share so people can join this group. Links are reusable and expire
-							after 7 days.
-						</p>
-					</div>
-				</div>
+				<EmptyState
+					inline
+					testId="invites-empty"
+					title="No active invite links"
+					description="Create a link to share so people can join this group. Links are reusable and expire after 7 days."
+					icon={LinkIcon}
+				/>
 			{:else}
 				<ul class="divide-y divide-border" aria-label="Active invite links">
 					{#each data.invites as invite (invite.id)}

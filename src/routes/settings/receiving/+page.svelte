@@ -25,9 +25,13 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import ConfirmSubmit from '$lib/components/ConfirmSubmit.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import FormStatus from '$lib/components/FormStatus.svelte';
+	import PageHeader from '$lib/components/PageHeader.svelte';
+	import SettingsNav from '$lib/components/SettingsNav.svelte';
 	import ReceivingMethodFields from '$lib/components/ReceivingMethodFields.svelte';
 	import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
 	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 	import WalletIcon from '@lucide/svelte/icons/wallet';
 	import type { PageData, ActionData } from './$types';
 
@@ -56,39 +60,41 @@
 </script>
 
 <svelte:head>
-	<title>How you get paid · Pay with me</title>
+	<title>Getting paid · Pay with me</title>
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-6">
-	<div class="space-y-1">
-		<h1 class="text-2xl font-semibold tracking-tight">How you get paid</h1>
-		<p class="text-sm text-muted-foreground">
-			Where people should send money when they settle up with you. Only people you share a group
-			with can see these.
-		</p>
-	</div>
+	<!-- The header states WHERE you are and, on the editor step, the way back —
+	     always in the same place (the "Back to settings" ghost button that used to
+	     sit at the very bottom of the list was below the fold on a phone). -->
+	{#if editing}
+		<PageHeader
+			title="{editing.methodId ? 'Edit' : 'Add'} {editing.rail.label}"
+			description="{editing.methodId
+				? 'Change the details people use to pay you.'
+				: 'Fill in the details people will use to pay you.'} Only people you share a group with can see them."
+			backHref={listHref}
+			backLabel="Getting paid"
+		/>
+	{:else}
+		<!-- No back link on this step: the tabs below ARE the way to the sibling
+		     screens, and two navigations stacked on each other is noise. -->
+		<PageHeader
+			title="Getting paid"
+			description="Where people should send money when they settle up with you. Only people you share a group with can see these."
+		/>
 
-	{#if form?.message}
-		<p
-			class={form.message.type === 'error' ? 'text-sm text-destructive' : 'text-sm'}
-			role={form.message.type === 'error' ? 'alert' : 'status'}
-		>
-			{form.message.text}
-		</p>
+		<SettingsNav current="receiving" />
 	{/if}
+
+	<FormStatus message={form?.message} />
 
 	{#if editing}
 		<!-- Step two: the chosen rail's own fields. One rail at a time, so two rails
 		     that share a field name can never collide in the submission. -->
+		<!-- No card header: the page header above already names the rail and says
+		     what this step is. -->
 		<Card.Root>
-			<Card.Header>
-				<Card.Title>{editing.methodId ? 'Edit' : 'Add'} — {editing.rail.label}</Card.Title>
-				<Card.Description>
-					{editing.methodId
-						? 'Change the details people use to pay you.'
-						: 'Fill in the details people will use to pay you.'}
-				</Card.Description>
-			</Card.Header>
 			<Card.Content>
 				<form method="POST" action={editorAction} use:enhance class="space-y-5">
 					{#if editing.methodId}
@@ -124,8 +130,11 @@
 			<Card.Content class="space-y-4">
 				{#if data.methods.length === 0}
 					<!-- The one-line explanation a user who has never settled up needs
-					     (PLAN §17.4): this screen has no context on its own. -->
+					     (PLAN §17.4): this screen has no context on its own. Inline,
+					     because the rail picker below the Separator is the CTA. -->
 					<EmptyState
+						inline
+						testId="receiving-empty"
 						title="No receiving methods yet"
 						description="Add how you want to be paid, and anyone settling up with you in a group will see it — instead of asking you in the chat."
 						icon={WalletIcon}
@@ -226,15 +235,14 @@
 					</p>
 					<div class="grid gap-2 sm:grid-cols-3">
 						{#each data.rails as rail (rail.id)}
-							<Button variant="outline" class="w-full" href={addHref(rail.id)}>{rail.label}</Button>
+							<Button variant="outline" class="w-full" href={addHref(rail.id)}>
+								<PlusIcon class="size-4" aria-hidden="true" />
+								{rail.label}
+							</Button>
 						{/each}
 					</div>
 				</div>
 			</Card.Content>
 		</Card.Root>
-
-		<Button variant="ghost" href={resolve('/settings')} class="w-full sm:w-auto">
-			Back to settings
-		</Button>
 	{/if}
 </div>

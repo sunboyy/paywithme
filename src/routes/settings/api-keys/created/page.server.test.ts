@@ -77,7 +77,7 @@ describe('/settings/api-keys/created load', () => {
 			expect(isRedirect(e)).toBe(true);
 			if (isRedirect(e)) {
 				expect(e.status).toBe(303);
-				expect(e.location).toBe('/settings');
+				expect(e.location).toBe('/settings/api-keys');
 			}
 		}
 	});
@@ -90,7 +90,7 @@ describe('/settings/api-keys/created load', () => {
 			expect.unreachable('expected a redirect');
 		} catch (e) {
 			expect(isRedirect(e)).toBe(true);
-			if (isRedirect(e)) expect(e.location).toBe('/settings');
+			if (isRedirect(e)) expect(e.location).toBe('/settings/api-keys');
 		}
 	});
 
