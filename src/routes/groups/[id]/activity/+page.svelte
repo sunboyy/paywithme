@@ -21,6 +21,7 @@
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
 	import ActivityEntryRow from '$lib/components/ActivityEntryRow.svelte';
+	import { entityTypeLabel } from '$lib/activity-labels';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -72,8 +73,7 @@
 				<Button
 					variant={data.filters.entity === entityType ? 'default' : 'outline'}
 					size="sm"
-					href={filterUrl({ entity: entityType })}
-					class="capitalize">{entityType}</Button
+					href={filterUrl({ entity: entityType })}>{entityTypeLabel(entityType)}</Button
 				>
 			{/each}
 		</div>

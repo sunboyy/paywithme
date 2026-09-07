@@ -79,6 +79,14 @@
 //     to §12.1 (ADR-0016), because audit rows are group-scoped and this is
 //     user-scoped.
 
+//   - captures (issue #49) → re-exported from `captures-schema.ts`, hand-authored
+//     (PLAN §7.7, §9; ADR-0012): record-later placeholders. Deliberately SHALLOW —
+//     `note` plus an OPTIONAL `amount_minor` + `currency` (stored uninterpreted: no
+//     rate, no conversion, no settlement equivalent) and `captured_for`. NO payer,
+//     beneficiary, split-mode, item or exchange-rate column, ever. NOTE the
+//     timestamp naming does NOT follow §7.1's reversal: `captured_for` is the
+//     real-world date and `created_at` is the plain server insert time.
+
 export * from './auth-schema';
 export * from './api-key-schema';
 export * from './rate-limit-schema';
@@ -90,3 +98,4 @@ export * from './idempotency-schema';
 export * from './api-key-class-rate-limit-schema';
 export * from './oauth-schema';
 export * from './receiving-schema';
+export * from './captures-schema';

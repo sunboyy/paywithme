@@ -167,6 +167,11 @@ describe('constrained value sets (PLAN §12.1)', () => {
 			'revoke',
 			'rename',
 			'currency_set',
+			// The two ways a Capture leaves the open queue (PLAN §7.7; ADR-0012):
+			// `resolve` = it became a real transaction, `discard` = it was given up on.
+			// Neither is `delete` — a Capture is never hard-deleted.
+			'resolve',
+			'discard',
 			// Maintenance re-resolve (ADR-0013 rounding backfill) — distinct from `edit`
 			// because nobody edited anything, but still a mutation §12.1 must record.
 			'recalculate'
@@ -178,12 +183,15 @@ describe('constrained value sets (PLAN §12.1)', () => {
 		// `groupId` is nullable on an entry.
 		// `currency` is a GROUP-DEFINED custom currency (PLAN §7.5.2; ADR-0014) — the
 		// seeded 29 are immutable and can never produce an entry.
+		// `capture` is a record-later placeholder (PLAN §7.7; ADR-0012) — group-scoped,
+		// and rendered as "Not recorded yet" because the word is internal vocabulary.
 		expect(AUDIT_ENTITY_TYPES).toEqual([
 			'transaction',
 			'member',
 			'invite',
 			'group',
 			'currency',
+			'capture',
 			'api_key'
 		]);
 	});
@@ -197,7 +205,8 @@ describe('constrained value sets (PLAN §12.1)', () => {
 			'member',
 			'invite',
 			'group',
-			'currency'
+			'currency',
+			'capture'
 		]);
 	});
 

@@ -90,7 +90,14 @@ describe('/groups/[id]/activity load', () => {
 		]);
 		// GROUP-scoped kinds only — the account-level `api_key` kind (PLAN §16.8) has
 		// no group, so it is never offered as a group-feed filter.
-		expect(result.entityTypes).toEqual(['transaction', 'member', 'invite', 'group', 'currency']);
+		expect(result.entityTypes).toEqual([
+			'transaction',
+			'member',
+			'invite',
+			'group',
+			'currency',
+			'capture'
+		]);
 		expect(result.entityTypes).not.toContain('api_key');
 		expect(result.filters).toEqual({ entity: null, actor: null });
 

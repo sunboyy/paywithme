@@ -58,6 +58,13 @@ export const AUDIT_ACTIONS = [
 	'revoke',
 	'rename',
 	'currency_set',
+	// A Capture (PLAN §7.7) leaving the open queue. Two DISTINCT endings, because
+	// the trail must say which one happened: `resolve` = it became a real
+	// transaction (the row is stamped, never deleted); `discard` = it was given up
+	// on without ever reaching the ledger. Neither is `delete` — a Capture is never
+	// hard-deleted — and neither is `edit`.
+	'resolve',
+	'discard',
 	// A maintenance re-resolve of an ALREADY-RECORDED transaction (ADR-0013's
 	// rounding backfill). Deliberately NOT `edit`: nobody changed the transaction,
 	// and the feed should not claim they did — but a member's owed amount can move
@@ -87,6 +94,13 @@ export const AUDIT_ENTITY_TYPES = [
 	'invite',
 	'group',
 	'currency',
+	// A record-later placeholder (PLAN §7.7; ADR-0012). Group-scoped and
+	// group-visible, so creating / resolving / discarding one is a mutation §12.1
+	// requires a row for. It is NOT a `transaction`: nothing in the ledger changed.
+	// The word "Capture" is INTERNAL vocabulary (CONTEXT.md) — the feed renders this
+	// value through `entityTypeLabel` in `$lib/activity-labels`, which says "Not
+	// recorded yet", and every `summary` written below is phrased the same way.
+	'capture',
 	'api_key'
 ] as const;
 

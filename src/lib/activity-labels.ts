@@ -21,12 +21,43 @@ const ACTION_LABELS: Record<string, string> = {
 	reactivate: 'reactivated',
 	revoke: 'revoked',
 	rename: 'renamed',
-	currency_set: 'set currency'
+	currency_set: 'set currency',
+	// The two ways a Capture leaves the open queue (PLAN §7.7). Neither verb says
+	// "capture" — that word is internal vocabulary (CONTEXT.md).
+	resolve: 'recorded',
+	discard: 'discarded'
 };
 
 /** Map an audit action verb to its human label (raw verb fallback). */
 export function actionLabel(action: string): string {
 	return ACTION_LABELS[action] ?? action;
+}
+
+/**
+ * Human-readable label per audit ENTITY TYPE (PLAN §12.1 "entity_type") — the
+ * feed's filter chips and each row's badge.
+ *
+ * This map exists because of ONE entry: `capture` must never render as "Capture".
+ * "Capture" is INTERNAL vocabulary (CONTEXT.md / PLAN §7.7) — no user-facing
+ * string says it, the UI says **"Not recorded yet"** — and the entity type is a
+ * stored column value, so it cannot itself be renamed to the display phrase.
+ * Every other kind maps to its own capitalized name, which is what the raw value
+ * already looked like; going through one map means a future kind can't
+ * accidentally leak an internal word the way this one would have.
+ */
+const ENTITY_TYPE_LABELS: Record<string, string> = {
+	transaction: 'Transaction',
+	member: 'Member',
+	invite: 'Invite',
+	group: 'Group',
+	currency: 'Currency',
+	capture: 'Not recorded yet',
+	api_key: 'API key'
+};
+
+/** Map an audit entity type to its human label (raw value fallback). */
+export function entityTypeLabel(entityType: string): string {
+	return ENTITY_TYPE_LABELS[entityType] ?? entityType;
 }
 
 /** Absolute time in the viewer's locale/timezone (§12.1). */

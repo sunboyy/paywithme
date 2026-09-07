@@ -10,7 +10,7 @@
 	// renderings of the same audit row that disagree about how a time or a summary
 	// reads is exactly the drift the audit trail exists to rule out.
 	import { Badge } from '$lib/components/ui/badge';
-	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
+	import { actionLabel, entityTypeLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import type { ActivityEntry } from '$lib/server/activity';
 
 	let {
@@ -32,8 +32,9 @@
 			<span class="font-medium">{entry.actorName}</span>
 			<span class="text-muted-foreground"> {actionLabel(entry.action)} </span>
 			{#if showEntityType}
-				<Badge variant="outline" class="ml-1 align-middle capitalize">
-					{entry.entityType}
+				<!-- Labelled, never raw: `capture` must read "Not recorded yet" (CONTEXT.md). -->
+				<Badge variant="outline" class="ml-1 align-middle">
+					{entityTypeLabel(entry.entityType)}
 				</Badge>
 			{/if}
 		</p>

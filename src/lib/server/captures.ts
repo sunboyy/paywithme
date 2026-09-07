@@ -1,0 +1,425 @@
+// Capture service — the whole business logic for record-later placeholders
+// (issue #49; PLAN §7.7, §9, §12, §12.1; ADR-0012). CLAUDE.md: "Business logic in
+// lib/server/".
+//
+// Four operations, and deliberately only four: `createCapture`,
+// `listOpenCaptures`, `resolveCapture`, `discardCapture`. A Capture has no edit
+// path and no delete path — it is a note you either record or give up on, and
+// both endings are STAMPS on the row, never a row delete, so the trail from
+// "I remembered this on Saturday" to "I recorded it on Tuesday" survives (§7.7).
+//
+// ── THE SHALLOWNESS IS THE SPEC (ADR-0012) ───────────────────────────────────
+// Nothing here resolves a payer, a beneficiary, a split or a rate, because there
+// is nothing of the sort to resolve. `amount_minor` + `currency` are written and
+// read back UNCHANGED: no conversion, no settlement equivalent, no exponent
+// arithmetic. If a future change makes this module import `lib/money`'s
+// conversion helpers or `resolveShares`, that change is building a second
+// transaction form and is what ADR-0012 rejects.
+//
+// ── NEVER IN THE LEDGER (PLAN §7.7) ──────────────────────────────────────────
+// §8 balance math, `/settle`, `/api/v1` and the MCP transaction tools do not read
+// `captures` — not even as a provisional "±฿1,200 pending" note on a balance. The
+// dependency direction proves it: this module imports from `transactions.ts`
+// (to verify the transaction a resolve points at), and nothing in the ledger
+// imports from here.
+//
+// ── AUTHORIZATION (PLAN §12) ─────────────────────────────────────────────────
+// Group-membership only, no per-action roles. Every operation takes the acting
+// `userId` and gates on `userHasGroupAccess` FIRST — before it validates input, so
+// a non-member learns nothing about a group from the shape of the errors it
+// returns. Captures are GROUP-VISIBLE (§7.7): any member may resolve or discard
+// any member's Capture, because the point is deduplication — if someone else
+// already recorded that dinner, they are the one holding the tray open.
+//
+// ── AUDIT LOG (PLAN §12.1) ───────────────────────────────────────────────────
+// Each of the three mutations runs inside `db.transaction(...)` and calls
+// `writeAuditLog(tx, …)` through that SAME `tx` handle (never the global `db`), so
+// the audit row commits or rolls back atomically with the mutation. Every
+// `summary` denormalizes the note, so the line stays readable after the row
+// changes — and none of them contains the word "Capture", which is internal
+// vocabulary (CONTEXT.md): they say "not recorded yet".
+
+import { and, desc, eq, isNull } from 'drizzle-orm';
+import { z } from 'zod';
+import { db } from './db';
+import { captures } from './db/captures-schema';
+import { currencies } from './db/currencies-schema';
+import { transactions } from './db/transactions-schema';
+import { GroupAccessError, userHasGroupAccess } from './groups';
+import { TransactionNotFoundError } from './transactions';
+import { writeAuditLog, type AuditVia } from './audit';
+import { buildCreateCaptureSchema } from '$lib/schemas/capture';
+import type { EntryCurrencyOption } from '$lib/schemas/currency';
+import { CURRENCY_CODES, getCurrency } from '$lib/money';
+
+/** A query runner: either the lazy `db` proxy or an open transaction handle. */
+type DbExecutor = Pick<typeof db, 'select' | 'insert' | 'update'>;
+
+/** A stored Capture, exactly as the table holds it. */
+export type Capture = typeof captures.$inferSelect;
+
+/**
+ * The submitted Capture failed server-side validation (the SAME shared
+ * `buildCreateCaptureSchema` the form uses). Carries the Zod issues so the route
+ * can surface them on the fields rather than 500-ing. Mirrors
+ * `TransactionValidationError`; the route maps `code === 'capture_invalid'` to a
+ * form failure, distinct from the 404 an access error produces.
+ */
+export class CaptureValidationError extends Error {
+	readonly code = 'capture_invalid' as const;
+	readonly issues: z.core.$ZodIssue[];
+	constructor(issues: z.core.$ZodIssue[], message = 'Capture is invalid') {
+		super(message);
+		this.name = 'CaptureValidationError';
+		this.issues = issues;
+	}
+}
+
+/**
+ * No such Capture IN THIS GROUP. A Capture belonging to another group is
+ * indistinguishable from one that never existed — the same don't-leak rule §12
+ * applies to group existence. The route maps `code === 'capture_not_found'` to
+ * **404**.
+ */
+export class CaptureNotFoundError extends Error {
+	readonly code = 'capture_not_found' as const;
+	constructor(message = 'Not found') {
+		super(message);
+		this.name = 'CaptureNotFoundError';
+	}
+}
+
+/**
+ * The Capture exists in this group but has ALREADY been resolved or discarded, so
+ * there is nothing left to resolve or discard.
+ *
+ * This is a real race, not a defensive nicety: the tray is GROUP-VISIBLE (§7.7),
+ * so two members can act on the same row at the same time, and the whole point of
+ * showing it to everyone is that the second person stops. Reporting it as
+ * not-found would tell them their tap worked. `reason` says which ending already
+ * happened so the route can word it ("Someone already recorded this"). Mapped to
+ * **409 Conflict**.
+ */
+export class CaptureNotOpenError extends Error {
+	readonly code = 'capture_not_open' as const;
+	constructor(
+		readonly reason: 'resolved' | 'discarded',
+		message = reason === 'resolved'
+			? 'This has already been recorded'
+			: 'This has already been discarded'
+	) {
+		super(message);
+		this.name = 'CaptureNotOpenError';
+	}
+}
+
+/** Assert access or throw `GroupAccessError` (→ 404). */
+async function assertGroupAccess(
+	userId: string,
+	groupId: string,
+	executor: DbExecutor = db
+): Promise<void> {
+	if (!(await userHasGroupAccess(userId, groupId, executor))) {
+		throw new GroupAccessError();
+	}
+}
+
+/** The 29 seeded codes as the schema factory wants them — built once. */
+const SEEDED_CURRENCY_OPTIONS: readonly EntryCurrencyOption[] = CURRENCY_CODES.map((code) => ({
+	code
+}));
+
+/**
+ * The currency codes this group may denominate a Capture in: the 29 seeded codes
+ * plus the group's own custom rows (PLAN §7.5.2; ADR-0014).
+ *
+ * SEEDED FAST PATH — no submitted currency, or a seeded one, issues NO query at
+ * all, which is every Capture in every group that never opened the custom-currency
+ * UI.
+ *
+ * NO `FOR SHARE` LOCK, deliberately, and this is the interesting difference from
+ * `transactions.ts#resolveEntryCurrencies`. That one locks the custom rows because
+ * it reads their EXPONENT and computes stored amounts with it, so an edit landing
+ * mid-write would record amounts at the wrong precision. A Capture computes
+ * nothing: the amount is stored uninterpreted (§7.7) and the exponent is only ever
+ * read later, at render time, from whatever the row says then. There is nothing to
+ * freeze, so nothing is locked — and a Capture never makes a currency edit wait.
+ */
+async function allowedCurrencies(
+	groupId: string,
+	submitted: unknown,
+	executor: DbExecutor
+): Promise<readonly EntryCurrencyOption[]> {
+	if (typeof submitted !== 'string' || getCurrency(submitted) !== undefined) {
+		// Absent, unusable (the schema rejects it against the seeded set with the same
+		// message), or seeded — no custom row can be relevant.
+		return SEEDED_CURRENCY_OPTIONS;
+	}
+
+	const rows = await executor
+		.select({ code: currencies.code })
+		.from(currencies)
+		.where(eq(currencies.groupId, groupId));
+
+	return [...SEEDED_CURRENCY_OPTIONS, ...rows];
+}
+
+/** The `currency` value a raw input object carries, if it carries one at all. */
+function submittedCurrency(input: unknown): unknown {
+	return typeof input === 'object' && input !== null
+		? (input as { currency?: unknown }).currency
+		: undefined;
+}
+
+/**
+ * Record a Capture (PLAN §7.7).
+ *
+ * ONE transaction: membership (§12), then validation against the group's currency
+ * set, then the insert, then the `audit_log` row — all four or none of them.
+ *
+ * `createdBy` and `groupId` are SERVER-DERIVED: the author is the authenticated
+ * caller, never a field in `input`, so a Capture can't be attributed to somebody
+ * else (attribution is the whole of §7.7's deduplication value).
+ */
+export async function createCapture({
+	userId,
+	groupId,
+	input,
+	via
+}: {
+	userId: string;
+	groupId: string;
+	input: unknown;
+	/**
+	 * Credential provenance (PLAN §16.2) — set when the Capture came in through an
+	 * API key or an OAuth connection rather than a web session. ADR-0012 expects the
+	 * Connector to be the FASTEST capture path, so this is not a hypothetical.
+	 */
+	via?: AuditVia;
+}): Promise<Capture> {
+	return db.transaction(async (tx) => {
+		await assertGroupAccess(userId, groupId, tx);
+
+		const allowed = await allowedCurrencies(groupId, submittedCurrency(input), tx);
+		const parsed = buildCreateCaptureSchema(allowed).safeParse(input);
+		if (!parsed.success) {
+			throw new CaptureValidationError(parsed.error.issues);
+		}
+		const data = parsed.data;
+
+		const [row] = await tx
+			.insert(captures)
+			.values({
+				groupId,
+				createdBy: userId,
+				note: data.note,
+				// Both or neither — the schema's pairing rule already guaranteed it.
+				amountMinor: data.amountMinor ?? null,
+				currency: data.currency ?? null,
+				capturedFor: data.capturedFor
+			})
+			.returning();
+
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'create',
+			entityType: 'capture',
+			entityId: row.id,
+			summary: `Noted '${row.note}' as not recorded yet`,
+			// Denormalized so the entry stays complete even after the row is resolved
+			// (which is when the note stops being visible in the tray).
+			metadata: {
+				note: row.note,
+				amountMinor: row.amountMinor,
+				currency: row.currency,
+				capturedFor: row.capturedFor
+			},
+			via
+		});
+
+		return row;
+	});
+}
+
+/**
+ * The group's OPEN Captures — the "Not recorded yet" tray (PLAN §7.7 "Recall").
+ *
+ * "Open" is `resolved_at IS NULL AND discarded_at IS NULL`. Both nulls matter: a
+ * discarded Capture was never resolved, so testing `resolved_at` alone would keep
+ * showing it forever. This predicate is exactly the partial index's (see
+ * `captures-schema.ts`).
+ *
+ * EVERY member sees EVERY member's open Captures (§7.7 "Group-visible") — there is
+ * no author filter and there must not be one. The point is deduplication: seeing
+ * "Sur — dinner, ~฿1,200, not recorded yet" is what stops the second person who
+ * paid part of that dinner entering it twice.
+ *
+ * Newest real-world day first, then newest entry, with the `id` tie-break that
+ * keeps the order stable across reads rather than leaving it to the planner.
+ */
+export async function listOpenCaptures(userId: string, groupId: string): Promise<Capture[]> {
+	await assertGroupAccess(userId, groupId);
+
+	return db
+		.select()
+		.from(captures)
+		.where(
+			and(eq(captures.groupId, groupId), isNull(captures.resolvedAt), isNull(captures.discardedAt))
+		)
+		.orderBy(desc(captures.capturedFor), desc(captures.createdAt), desc(captures.id));
+}
+
+/**
+ * Stamp a Capture as RECORDED, pointing at the transaction it became (§7.7
+ * "Resolving").
+ *
+ * The row is never deleted — `resolved_transaction_id` + `resolved_at` are the
+ * whole operation, which is what preserves the trail from remembering to
+ * recording.
+ *
+ * `transactionId` is VERIFIED to name a live transaction IN THE SAME GROUP before
+ * anything is stamped. Without that check the only link a Capture has into the
+ * ledger could be pointed at another group's row by id, turning the trail into a
+ * cross-group reference nobody can follow.
+ *
+ * The UPDATE carries the open predicate itself (rather than trusting a preceding
+ * read), so two members resolving the same Capture at the same moment cannot both
+ * succeed: the loser affects zero rows and gets {@link CaptureNotOpenError}.
+ */
+export async function resolveCapture({
+	userId,
+	groupId,
+	captureId,
+	transactionId,
+	via
+}: {
+	userId: string;
+	groupId: string;
+	captureId: string;
+	transactionId: string;
+	via?: AuditVia;
+}): Promise<Capture> {
+	return db.transaction(async (tx) => {
+		await assertGroupAccess(userId, groupId, tx);
+
+		const [transaction] = await tx
+			.select({ id: transactions.id })
+			.from(transactions)
+			.where(
+				and(
+					eq(transactions.id, transactionId),
+					eq(transactions.groupId, groupId),
+					isNull(transactions.deletedAt)
+				)
+			)
+			.limit(1);
+		if (!transaction) throw new TransactionNotFoundError();
+
+		const [row] = await tx
+			.update(captures)
+			.set({ resolvedTransactionId: transactionId, resolvedAt: new Date() })
+			.where(
+				and(
+					eq(captures.id, captureId),
+					eq(captures.groupId, groupId),
+					isNull(captures.resolvedAt),
+					isNull(captures.discardedAt)
+				)
+			)
+			.returning();
+
+		if (!row) throw await closedCaptureError(captureId, groupId, tx);
+
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'resolve',
+			entityType: 'capture',
+			entityId: row.id,
+			summary: `Recorded '${row.note}' from not recorded yet`,
+			metadata: { note: row.note, transactionId },
+			via
+		});
+
+		return row;
+	});
+}
+
+/**
+ * Give up on a Capture without recording it (PLAN §7.7 "Edge cases") — a SOFT
+ * discard with an audit row.
+ *
+ * Soft because a Capture is never hard-deleted: "we decided this wasn't worth
+ * recording" is itself part of the trail, and a group-visible row vanishing with
+ * no explanation is exactly what the audit log exists to prevent.
+ *
+ * Same conditional UPDATE as {@link resolveCapture}, for the same race.
+ */
+export async function discardCapture({
+	userId,
+	groupId,
+	captureId,
+	via
+}: {
+	userId: string;
+	groupId: string;
+	captureId: string;
+	via?: AuditVia;
+}): Promise<Capture> {
+	return db.transaction(async (tx) => {
+		await assertGroupAccess(userId, groupId, tx);
+
+		const [row] = await tx
+			.update(captures)
+			.set({ discardedAt: new Date() })
+			.where(
+				and(
+					eq(captures.id, captureId),
+					eq(captures.groupId, groupId),
+					isNull(captures.resolvedAt),
+					isNull(captures.discardedAt)
+				)
+			)
+			.returning();
+
+		if (!row) throw await closedCaptureError(captureId, groupId, tx);
+
+		await writeAuditLog(tx, {
+			groupId,
+			actorUserId: userId,
+			action: 'discard',
+			entityType: 'capture',
+			entityId: row.id,
+			summary: `Discarded '${row.note}' from not recorded yet`,
+			metadata: { note: row.note },
+			via
+		});
+
+		return row;
+	});
+}
+
+/**
+ * A conditional UPDATE affected no row: work out WHY and hand back the error to
+ * throw (returned rather than thrown so the call site's `throw` narrows the row).
+ *
+ * The distinction is drawn only AFTER the group has been established, so it can't
+ * leak anything: a missing id and another group's id are one `CaptureNotFoundError`
+ * (404), while a Capture this member can genuinely see, already closed by someone
+ * else, is a `CaptureNotOpenError` (409) that says which ending it got.
+ */
+async function closedCaptureError(
+	captureId: string,
+	groupId: string,
+	executor: DbExecutor
+): Promise<CaptureNotFoundError | CaptureNotOpenError> {
+	const [existing] = await executor
+		.select({ resolvedAt: captures.resolvedAt, discardedAt: captures.discardedAt })
+		.from(captures)
+		.where(and(eq(captures.id, captureId), eq(captures.groupId, groupId)))
+		.limit(1);
+
+	if (!existing) return new CaptureNotFoundError();
+	return new CaptureNotOpenError(existing.resolvedAt !== null ? 'resolved' : 'discarded');
+}

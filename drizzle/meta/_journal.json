@@ -141,6 +141,13 @@
       "when": 1788705046669,
       "tag": "0019_receiving_methods",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788796728245,
+      "tag": "0020_captures",
+      "breakpoints": true
     }
   ]
 }

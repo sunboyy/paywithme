@@ -73,7 +73,13 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 					-- index against the real database, so the table must be migrated;
 					-- checking it here keeps the run SAFE on an older DB (the suite skips
 					-- cleanly instead of erroring with a missing-relation).
-					to_regclass('public.receiving_method')         as receiving_method
+					to_regclass('public.receiving_method')         as receiving_method,
+					-- Record-later placeholders (issue #49; PLAN §7.7). The capture-service
+					-- suite proves the real rollback, the open/resolved/discarded listing and
+					-- the group cascade against Postgres, so the table must be migrated;
+					-- checking it here keeps the run SAFE on an older DB (the suite skips
+					-- cleanly instead of erroring with a missing-relation).
+					to_regclass('public.captures')                 as captures
 		`);
 		const row = (res.rows?.[0] ?? {}) as Record<string, unknown>;
 		const missing = Object.entries(row)

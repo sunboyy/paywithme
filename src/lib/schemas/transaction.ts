@@ -86,6 +86,7 @@ import {
 } from '$lib/money';
 import { getCategory } from '$lib/categories';
 import { buildEntryCurrencySchema } from './currency';
+import { pastDayField, todayUtc } from './day';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared field rules (factored out so messages never drift — mirrors group.ts).
@@ -127,49 +128,17 @@ const titleField = z
 	.max(200, { message: 'Title must be 200 characters or fewer' });
 
 /**
- * Today's calendar day as a `YYYY-MM-DD` string in UTC — the default for the
- * editable real-world date (§7.1) and the reference point for the future-date
- * guard below. UTC keeps it deterministic server-side (Vercel runs UTC); the
- * 1-day slack in the guard absorbs viewers whose local day is ahead of UTC.
- */
-function todayUtc(): string {
-	return new Date().toISOString().slice(0, 10);
-}
-
-/** `YYYY-MM-DD` one day after the given UTC day-string — the future-date slack bound. */
-function nextDayUtc(day: string): string {
-	const d = new Date(`${day}T00:00:00.000Z`);
-	d.setUTCDate(d.getUTCDate() + 1);
-	return d.toISOString().slice(0, 10);
-}
-
-/**
  * `created_at` field (PLAN §7.1): the **editable / backdatable real-world date** a
  * transaction took place — a `YYYY-MM-DD` calendar day (what an `<input type="date">`
  * submits). Optional: when omitted (no-JS form, older client) it DEFAULTS to today
  * (UTC). It is a calendar day, not an instant — the immutable `occurred_at` carries
  * the precise insert time and is the same-day sort tie-break (§7.1 / §9).
  *
- * Validates the SHAPE (a real `YYYY-MM-DD`) and rejects FUTURE days — you can't have
- * spent money tomorrow. The bound is `today + 1 day` (UTC) so a viewer whose local
- * day is already ahead of UTC is never wrongly rejected; gross typos (e.g. 2050) are.
+ * The SHAPE + no-future rule live in `schemas/day.ts`, shared with a Capture's
+ * `captured_for` (§7.7): resolving a Capture prefills its date into THIS field, so
+ * the two gates must not drift.
  */
-const dateField = z
-	.string()
-	.trim()
-	.regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'Enter a valid date' })
-	// A real calendar day (rejects 2026-02-31, 2026-13-01, …). Parsing an ISO day is
-	// lenient about overflow, so round-trip and compare the rendered day. Guard the
-	// NaN case first — `.toISOString()` THROWS on an invalid Date.
-	.refine(
-		(s) => {
-			const d = new Date(`${s}T00:00:00.000Z`);
-			return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
-		},
-		{ message: 'Enter a valid date' }
-	)
-	.refine((s) => s <= nextDayUtc(todayUtc()), { message: 'The date cannot be in the future' })
-	.default(todayUtc);
+const dateField = pastDayField.default(todayUtc);
 
 /**
  * `exchange_rate` field (§7.6): settlement-currency units per 1 transaction-currency
