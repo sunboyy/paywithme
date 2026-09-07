@@ -13,6 +13,7 @@
 import { listGroupsForUser } from '$lib/server/groups';
 import type { Group } from '$lib/server/groups';
 import { getUserNetBalanceByGroup } from '$lib/server/balances';
+import { countOpenCapturesByGroup } from '$lib/server/captures';
 import { requireUser } from '$lib/server/access';
 import { pathAndQuery } from '$lib/redirect';
 import { formatAmount, type SeededCurrencyCode } from '$lib/money';
@@ -48,12 +49,30 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		netByGroup = new Map();
 	}
 
+	// The per-group UNRECORDED COUNT (PLAN §7.7 "Recall (no push)"). ONE batched
+	// query for every card, exactly like the balances above — a count per card would
+	// be a query per card, and this is recomputed on every dashboard load because it
+	// is (with the group overview's) the whole recall mechanism: push is out of scope
+	// (§1). Degrades to no counts rather than to zeros: "0 not recorded yet" on a
+	// group with three waiting is worse than saying nothing.
+	let unrecordedByGroup = new Map<string, number>();
+	try {
+		unrecordedByGroup = await countOpenCapturesByGroup({
+			userId: user.id,
+			groupIds: groups.map((g) => g.id)
+		});
+	} catch {
+		unrecordedByGroup = new Map();
+	}
+
 	return {
 		groups: groups.map((group) => {
 			const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 			const net = netByGroup.get(group.id);
 			return {
 				...group,
+				// Absent from the map = none open (see `countOpenCapturesByGroup`).
+				unrecordedCount: unrecordedByGroup.get(group.id) ?? 0,
 				// `null` = "we could not determine it" (distinct from 0 = settled up),
 				// so the card can stay silent rather than claim you're square.
 				net: net ?? null,

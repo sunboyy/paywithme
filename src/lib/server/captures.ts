@@ -39,11 +39,12 @@
 // changes — and none of them contains the word "Capture", which is internal
 // vocabulary (CONTEXT.md): they say "not recorded yet".
 
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from './db';
 import { captures } from './db/captures-schema';
 import { currencies } from './db/currencies-schema';
+import { members } from './db/groups-schema';
 import { transactions } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { TransactionNotFoundError } from './transactions';
@@ -243,12 +244,23 @@ export async function createCapture({
 }
 
 /**
- * The group's OPEN Captures — the "Not recorded yet" tray (PLAN §7.7 "Recall").
+ * "Open" — the ONE definition of what the tray shows and what the unrecorded count
+ * counts: `resolved_at IS NULL AND discarded_at IS NULL`.
  *
- * "Open" is `resolved_at IS NULL AND discarded_at IS NULL`. Both nulls matter: a
- * discarded Capture was never resolved, so testing `resolved_at` alone would keep
- * showing it forever. This predicate is exactly the partial index's (see
- * `captures-schema.ts`).
+ * Both nulls matter: a discarded Capture was never resolved, so testing
+ * `resolved_at` alone would keep showing (and counting) it forever. This predicate
+ * is exactly the partial index's — see `captures-schema.ts`.
+ *
+ * Exported so the two recall surfaces (§7.7) can be proved to share it rather than
+ * to agree by inspection: a tray and a count that disagree is a badge saying "3"
+ * over a list of two.
+ */
+export function openCapturePredicate() {
+	return and(isNull(captures.resolvedAt), isNull(captures.discardedAt));
+}
+
+/**
+ * The group's OPEN Captures — the "Not recorded yet" tray (PLAN §7.7 "Recall").
  *
  * EVERY member sees EVERY member's open Captures (§7.7 "Group-visible") — there is
  * no author filter and there must not be one. The point is deduplication: seeing
@@ -264,10 +276,56 @@ export async function listOpenCaptures(userId: string, groupId: string): Promise
 	return db
 		.select()
 		.from(captures)
-		.where(
-			and(eq(captures.groupId, groupId), isNull(captures.resolvedAt), isNull(captures.discardedAt))
-		)
+		.where(and(eq(captures.groupId, groupId), openCapturePredicate()))
 		.orderBy(desc(captures.capturedFor), desc(captures.createdAt), desc(captures.id));
+}
+
+/**
+ * How many open Captures each of `groupIds` has — the persistent UNRECORDED COUNT
+ * (PLAN §7.7 "Recall (no push)"), which sits on `/groups` (per group) and on the
+ * group overview.
+ *
+ * BATCHED because `/groups` renders one card per group: a per-card count would be a
+ * query per card. The group overview asks for a single id through the same function,
+ * so the dashboard and the overview can never count differently.
+ *
+ * Counted in the DATABASE (`count()` + `group by`), not by reading the rows and
+ * taking `.length`: this is recomputed on every page load, and the partial index
+ * `captures_group_id_open_idx` exists precisely so it never scans a group's whole
+ * history of already-recorded rows.
+ *
+ * AUTHORIZATION (§12) is the `members` INNER JOIN, which is the batched form of
+ * `userHasGroupAccess`'s active-member-link check — a group the caller has no live
+ * member row in contributes no row, so it is simply absent from the map rather than
+ * reported as 0. Absent and zero are the same to a caller that reads `?? 0`, and the
+ * distinction never leaks that a group exists.
+ */
+export async function countOpenCapturesByGroup({
+	userId,
+	groupIds
+}: {
+	userId: string;
+	groupIds: readonly string[];
+}): Promise<Map<string, number>> {
+	const counts = new Map<string, number>();
+	if (groupIds.length === 0) return counts;
+
+	const rows = await db
+		.select({ groupId: captures.groupId, open: count() })
+		.from(captures)
+		.innerJoin(
+			members,
+			and(
+				eq(members.groupId, captures.groupId),
+				eq(members.userId, userId),
+				isNull(members.deactivatedAt)
+			)
+		)
+		.where(and(inArray(captures.groupId, [...groupIds]), openCapturePredicate()))
+		.groupBy(captures.groupId);
+
+	for (const row of rows) counts.set(row.groupId, row.open);
+	return counts;
 }
 
 /**

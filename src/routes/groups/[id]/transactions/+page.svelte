@@ -4,6 +4,10 @@
 	// Mobile-first: a stacked card list on small screens with a type/category/member
 	// filter that posts via plain GET links (server-first; works without JS). Each
 	// row links to the per-transaction page (task 4.11). Empty state when none.
+	//
+	// The "Not recorded yet" tray (issue #50; PLAN §7.7) sits ABOVE all of it —
+	// above the filters too, because it is not part of the list they filter.
+	import { enhance } from '$app/forms';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { asEntryCurrencyCode, formatAmount, type SeededCurrencyCode } from '$lib/money';
@@ -12,15 +16,17 @@
 	import { Button } from '$lib/components/ui/button';
 	import CategoryIcon from '$lib/components/CategoryIcon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import FormStatus from '$lib/components/FormStatus.svelte';
 	import GroupNav from '$lib/components/GroupNav.svelte';
+	import NotRecordedYetTray from '$lib/components/NotRecordedYetTray.svelte';
 	import { emptyStateKind, hasActiveFilter } from '$lib/empty-state';
 	import { groupByDay } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import ReceiptIcon from '@lucide/svelte/icons/receipt';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
-	import type { PageData } from './$types';
+	import type { ActionData, PageData } from './$types';
 
-	let { data }: { data: PageData } = $props();
+	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	const settlementCurrency = $derived(data.group.settlementCurrency as SeededCurrencyCode);
 
@@ -86,6 +92,16 @@
 		return parts.length > 0 ? `${listPath}?${parts.join('&')}` : listPath;
 	}
 
+	/**
+	 * Where the tray's discard posts. SvelteKit reads the action from the param whose
+	 * key starts with `/`, so the CURRENT filter rides along beside it — without that,
+	 * a discard with JavaScript off would come back to the unfiltered list, because a
+	 * form's `action` replaces the whole query string.
+	 */
+	const discardAction = $derived(
+		`?/discard${filterUrl({}).slice(listPath.length).replace(/^\?/, '&')}`
+	);
+
 	/** Clear every filter at once (the empty-state / "clear filter" target). */
 	const unfilteredUrl = $derived(
 		filterUrl({ type: null, category: null, member: null, role: null })
@@ -126,6 +142,12 @@
 		</div>
 		<GroupNav groupId={data.group.id} current="transactions" />
 	</header>
+
+	<!-- Discard feedback (including the "someone already closed it" race). -->
+	<FormStatus message={form?.message} />
+
+	<!-- The "Not recorded yet" tray (PLAN §7.7) — renders nothing when empty. -->
+	<NotRecordedYetTray captures={data.captures} {discardAction} {enhance} />
 
 	<!-- Filters: type (links, no-JS friendly) + category (Select → navigate). -->
 	<div class="flex flex-wrap items-center gap-2">

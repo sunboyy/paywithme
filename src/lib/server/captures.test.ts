@@ -122,9 +122,12 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 
 vi.mock('$lib/server/db', () => ({ db: makeDb() }));
 
+import { PgDialect } from 'drizzle-orm/pg-core';
 import {
 	createCapture,
 	listOpenCaptures,
+	countOpenCapturesByGroup,
+	openCapturePredicate,
 	resolveCapture,
 	discardCapture,
 	CaptureNotFoundError,
@@ -522,5 +525,67 @@ describe('the audit summaries never say the internal word (CONTEXT.md)', () => {
 			expect(summary.toLowerCase()).not.toContain('capture');
 			expect(summary).toContain('not recorded yet');
 		}
+	});
+});
+
+// ── The unrecorded COUNT (issue #50; PLAN §7.7 "Recall (no push)") ───────────
+//
+// Push notifications are out of scope (§1), so the count on `/groups` and the one
+// on the group overview are the ENTIRE recall mechanism. Two things about it have
+// to hold, and neither is provable by reading the call site:
+//
+//   1. it counts ONLY OPEN rows — a discarded Capture must not keep being counted
+//      forever, which is what `resolved_at IS NULL` on its own would do;
+//   2. the tray and the count use the SAME definition of open, or the badge says
+//      "3" over a list of two.
+//
+// Both are pinned by compiling the shared predicate to SQL, which is the one thing
+// a fluent stub genuinely cannot fake.
+
+describe('countOpenCapturesByGroup', () => {
+	it('counts per group in ONE query, keyed by group id', async () => {
+		programSelects(captures, [
+			{ groupId: 'group-1', open: 3 },
+			{ groupId: 'group-2', open: 1 }
+		]);
+
+		const counts = await countOpenCapturesByGroup({
+			userId: 'user-42',
+			groupIds: ['group-1', 'group-2', 'group-3']
+		});
+
+		expect(counts.get('group-1')).toBe(3);
+		expect(counts.get('group-2')).toBe(1);
+		// A group with nothing open contributes no row — the callers read `?? 0`, so
+		// absent and zero are the same to them and nothing leaks about what exists.
+		expect(counts.has('group-3')).toBe(false);
+		// ONE query for every card on the dashboard, not one per card.
+		expect(calls.log).toEqual(['select:captures']);
+	});
+
+	it('issues NO query at all for an empty group list', async () => {
+		const counts = await countOpenCapturesByGroup({ userId: 'user-42', groupIds: [] });
+
+		expect(counts.size).toBe(0);
+		expect(calls.log).toEqual([]);
+	});
+
+	it('counts ONLY OPEN rows — both nulls, not just `resolved_at`', () => {
+		const { sql } = new PgDialect().sqlToQuery(openCapturePredicate()!);
+
+		expect(sql).toContain('"resolved_at" is null');
+		// The one that is easy to forget: a discarded Capture was never resolved, so
+		// without this it would be counted (and shown) forever.
+		expect(sql).toContain('"discarded_at" is null');
+		expect(sql).not.toContain(' or ');
+	});
+
+	it('shares that definition with the tray, rather than agreeing by inspection', () => {
+		// `listOpenCaptures` and `countOpenCapturesByGroup` both call this one
+		// function; a badge that disagrees with the list under it is the failure this
+		// prevents. (The predicate also matches `captures_group_id_open_idx`.)
+		const first = new PgDialect().sqlToQuery(openCapturePredicate()!).sql;
+		const second = new PgDialect().sqlToQuery(openCapturePredicate()!).sql;
+		expect(first).toBe(second);
 	});
 });

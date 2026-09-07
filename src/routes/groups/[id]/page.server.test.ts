@@ -8,20 +8,28 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 //   - a GroupAccessError race in any parallel fetch degrades to 404;
 //   - a non-access error in a fetch degrades gracefully to an empty list.
 
-const { requireGroupAccess, getGroupBalances, listMembers, listTransactions, listGroupActivity } =
-	vi.hoisted(() => ({
-		requireGroupAccess: vi.fn(),
-		getGroupBalances: vi.fn(),
-		listMembers: vi.fn(),
-		listTransactions: vi.fn(),
-		listGroupActivity: vi.fn()
-	}));
+const {
+	requireGroupAccess,
+	getGroupBalances,
+	listMembers,
+	listTransactions,
+	listGroupActivity,
+	countOpenCapturesByGroup
+} = vi.hoisted(() => ({
+	requireGroupAccess: vi.fn(),
+	getGroupBalances: vi.fn(),
+	listMembers: vi.fn(),
+	listTransactions: vi.fn(),
+	listGroupActivity: vi.fn(),
+	countOpenCapturesByGroup: vi.fn()
+}));
 
 vi.mock('$lib/server/access', () => ({ requireGroupAccess }));
 vi.mock('$lib/server/balances', () => ({ getGroupBalances }));
 vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/transactions', () => ({ listTransactions }));
 vi.mock('$lib/server/activity', () => ({ listGroupActivity }));
+vi.mock('$lib/server/captures', () => ({ countOpenCapturesByGroup }));
 
 // `$lib/server/entry-currency` is deliberately NOT mocked — its SEEDED FAST PATH is
 // half of what these tests assert (an all-seeded page must issue no query at all),
@@ -126,6 +134,7 @@ beforeEach(() => {
 	listMembers.mockReset();
 	listTransactions.mockReset();
 	listGroupActivity.mockReset();
+	countOpenCapturesByGroup.mockReset();
 
 	requireGroupAccess.mockResolvedValue({ user: { id: 'u1', name: 'Alice' }, group: GROUP });
 	getGroupBalances.mockResolvedValue([
@@ -135,6 +144,7 @@ beforeEach(() => {
 	listMembers.mockResolvedValue(MEMBERS);
 	listTransactions.mockResolvedValue(TRANSACTIONS);
 	listGroupActivity.mockResolvedValue(ACTIVITY);
+	countOpenCapturesByGroup.mockResolvedValue(new Map());
 
 	select.mockClear();
 	state.currencyRows = [];
@@ -354,5 +364,42 @@ describe('/groups/[id] viewer summary', () => {
 
 		expect(result.balances.find((b) => b.memberId === 'm1')!.isYou).toBe(true);
 		expect(result.balances.find((b) => b.memberId === 'm2')!.isYou).toBe(false);
+	});
+});
+
+// ── The unrecorded count on the overview (issue #50; PLAN §7.7 "Recall") ─────
+//
+// Push notifications are out of scope (§1), so this number and the one on
+// `/groups` ARE the recall mechanism. It goes through the same batched service as
+// the dashboard so the two can never count differently.
+describe('/groups/[id] load — the unrecorded count (§7.7)', () => {
+	it('counts this group through the same batched service the dashboard uses', async () => {
+		countOpenCapturesByGroup.mockResolvedValue(new Map([['g1', 2]]));
+
+		const result = (await load(makeLoadEvent())) as { unrecordedCount: number };
+
+		expect(countOpenCapturesByGroup).toHaveBeenCalledWith({ userId: 'u1', groupIds: ['g1'] });
+		expect(result.unrecordedCount).toBe(2);
+	});
+
+	it('reports 0 when this group has nothing open', async () => {
+		// Absent from the map: a group with no open rows contributes no row.
+		countOpenCapturesByGroup.mockResolvedValue(new Map([['other-group', 7]]));
+
+		const result = (await load(makeLoadEvent())) as { unrecordedCount: number };
+		expect(result.unrecordedCount).toBe(0);
+	});
+
+	it('degrades to no count rather than 500-ing the whole overview', async () => {
+		countOpenCapturesByGroup.mockRejectedValue(new Error('db down'));
+
+		const result = (await load(makeLoadEvent())) as { unrecordedCount: number };
+		expect(result.unrecordedCount).toBe(0);
+	});
+
+	it('404s when the count read loses the access race (§12)', async () => {
+		countOpenCapturesByGroup.mockRejectedValue(new GroupAccessError());
+
+		await expect(load(makeLoadEvent())).rejects.toMatchObject({ status: 404 });
 	});
 });

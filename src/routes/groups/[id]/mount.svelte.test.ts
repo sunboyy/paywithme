@@ -56,7 +56,8 @@ function pageData(
 		balances: [],
 		recentTransactions,
 		recentCurrencies,
-		recentActivity: []
+		recentActivity: [],
+		unrecordedCount: 0
 	} as unknown as PageData;
 }
 
@@ -120,5 +121,45 @@ describe('group overview — a recent row recorded in a CUSTOM currency (issue #
 		expect(container.textContent).toContain('฿90.00');
 		// Foreign seeded row: keeps its ISO code so the two are never confusable.
 		expect(container.textContent).toContain('JPY ¥1,000');
+	});
+});
+
+// ── The unrecorded count + the one-tap way in (issue #50; PLAN §7.7, §10) ────
+//
+// Push notifications are out of scope (§1), so the count IS the recall. And the
+// quick-capture screen is only worth having if reaching it costs one tap from
+// here — so the link is present whether or not anything is waiting, while the
+// count line is what changes.
+describe('group overview — "Not recorded yet" (§7.7 Recall)', () => {
+	/** Page data with the count overridden. */
+	function withCount(unrecordedCount: number): PageData {
+		return { ...pageData([], []), unrecordedCount } as PageData;
+	}
+
+	it('offers the quick-capture screen in ONE tap even when nothing is waiting', () => {
+		const { container } = render(Page, { props: { data: withCount(0) } });
+
+		const link = container.querySelector('a[href="/groups/g1/captures/new"]');
+		expect(link).not.toBeNull();
+		// Nothing waiting is stated as such, not as a "0".
+		expect(container.textContent).toContain('Nothing waiting');
+	});
+
+	it('states the count, pluralized, with a way through to the tray', () => {
+		const { container } = render(Page, { props: { data: withCount(3) } });
+
+		expect(container.textContent).toContain('3');
+		expect(container.textContent).toContain('notes are waiting to be recorded');
+		expect(container.querySelector('a[href="/groups/g1/transactions"]')).not.toBeNull();
+	});
+
+	it('says "note is" for exactly one', () => {
+		const { container } = render(Page, { props: { data: withCount(1) } });
+		expect(container.textContent).toContain('note is waiting to be recorded');
+	});
+
+	it('never says the internal word "capture" (§7.7 naming)', () => {
+		const { container } = render(Page, { props: { data: withCount(2) } });
+		expect(container.textContent?.toLowerCase()).not.toContain('capture');
 	});
 });

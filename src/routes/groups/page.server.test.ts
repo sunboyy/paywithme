@@ -11,13 +11,22 @@ vi.mock('$lib/server/groups', () => ({ listGroupsForUser }));
 const { getUserNetBalanceByGroup } = vi.hoisted(() => ({ getUserNetBalanceByGroup: vi.fn() }));
 vi.mock('$lib/server/balances', () => ({ getUserNetBalanceByGroup }));
 
+// …and for the batched per-group UNRECORDED COUNT (PLAN §7.7 "Recall (no push)"),
+// which is one of the two surfaces that whole feature's recall depends on.
+const { countOpenCapturesByGroup } = vi.hoisted(() => ({ countOpenCapturesByGroup: vi.fn() }));
+vi.mock('$lib/server/captures', () => ({ countOpenCapturesByGroup }));
+
 import { load } from './+page.server';
 import type { Group } from '$lib/server/groups';
 
 type User = { id: string; name: string };
 
-/** A group as the dashboard projects it: the service row plus the net-balance fields. */
-type GroupCard = Group & { net: number | null; netFormatted: string | null };
+/** A group as the dashboard projects it: the service row plus the per-card figures. */
+type GroupCard = Group & {
+	net: number | null;
+	netFormatted: string | null;
+	unrecordedCount: number;
+};
 
 /** Minimal `load` event with `locals.user`. */
 function makeLoadEvent(user: User | null) {
@@ -45,6 +54,8 @@ describe('/groups load', () => {
 		listGroupsForUser.mockReset();
 		getUserNetBalanceByGroup.mockReset();
 		getUserNetBalanceByGroup.mockResolvedValue(new Map());
+		countOpenCapturesByGroup.mockReset();
+		countOpenCapturesByGroup.mockResolvedValue(new Map());
 	});
 
 	it('redirects an anonymous user to login with the requested path and query', async () => {
@@ -170,5 +181,63 @@ describe('/groups load', () => {
 
 		expect(result.groups).toEqual([]);
 		expect(listGroupsForUser).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ── The per-group UNRECORDED COUNT (issue #50; PLAN §7.7 "Recall (no push)") ──
+//
+// Push notifications are out of scope (§1), so this count and the one on the group
+// overview are the ENTIRE recall mechanism: if the number is wrong, the feature has
+// no way of bringing anyone back to an unrecorded expense.
+describe('/groups load — the unrecorded count (§7.7)', () => {
+	beforeEach(() => {
+		listGroupsForUser.mockReset();
+		getUserNetBalanceByGroup.mockReset();
+		getUserNetBalanceByGroup.mockResolvedValue(new Map());
+		countOpenCapturesByGroup.mockReset();
+		countOpenCapturesByGroup.mockResolvedValue(new Map());
+	});
+
+	it('asks for EVERY card in ONE batched call, never one query per card', async () => {
+		listGroupsForUser.mockResolvedValue([
+			makeGroup({ id: 'g1' }),
+			makeGroup({ id: 'g2' }),
+			makeGroup({ id: 'g3' })
+		]);
+
+		await load(makeLoadEvent({ id: 'u1', name: 'Alice' }));
+
+		expect(countOpenCapturesByGroup).toHaveBeenCalledTimes(1);
+		expect(countOpenCapturesByGroup).toHaveBeenCalledWith({
+			userId: 'u1',
+			groupIds: ['g1', 'g2', 'g3']
+		});
+	});
+
+	it('gives each group its own count, and 0 where nothing is open', async () => {
+		listGroupsForUser.mockResolvedValue([makeGroup({ id: 'g1' }), makeGroup({ id: 'g2' })]);
+		// `g2` is absent from the map — a group with nothing open contributes no row.
+		countOpenCapturesByGroup.mockResolvedValue(new Map([['g1', 3]]));
+
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			groups: GroupCard[];
+		};
+
+		expect(result.groups.map((g) => [g.id, g.unrecordedCount])).toEqual([
+			['g1', 3],
+			['g2', 0]
+		]);
+	});
+
+	it('renders the cards without counts rather than 500-ing when the count fails', async () => {
+		listGroupsForUser.mockResolvedValue([makeGroup({ id: 'g1' })]);
+		countOpenCapturesByGroup.mockRejectedValue(new Error('db down'));
+
+		const result = (await load(makeLoadEvent({ id: 'u1', name: 'Alice' }))) as {
+			groups: GroupCard[];
+		};
+
+		expect(result.groups).toHaveLength(1);
+		expect(result.groups[0].unrecordedCount).toBe(0);
 	});
 });

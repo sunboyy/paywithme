@@ -11,14 +11,23 @@ import { SEEDED_CURRENCY_DESCRIPTORS } from '$lib/money';
 // (§7.6 Display), so leaving it unmocked would have the real service hit a DB that
 // isn't there.
 
-const { listTransactions, requireGroupAccess, listMembers, listCurrenciesForGroup } = vi.hoisted(
-	() => ({
-		listTransactions: vi.fn(),
-		requireGroupAccess: vi.fn(),
-		listMembers: vi.fn(),
-		listCurrenciesForGroup: vi.fn()
-	})
-);
+const {
+	listTransactions,
+	requireGroupAccess,
+	requireUser,
+	listMembers,
+	listCurrenciesForGroup,
+	listOpenCaptures,
+	discardCapture
+} = vi.hoisted(() => ({
+	listTransactions: vi.fn(),
+	requireGroupAccess: vi.fn(),
+	requireUser: vi.fn(),
+	listMembers: vi.fn(),
+	listCurrenciesForGroup: vi.fn(),
+	listOpenCaptures: vi.fn(),
+	discardCapture: vi.fn()
+}));
 
 vi.mock('$lib/server/transactions', async () => {
 	const actual = await vi.importActual<typeof import('$lib/server/transactions')>(
@@ -26,12 +35,18 @@ vi.mock('$lib/server/transactions', async () => {
 	);
 	return { ...actual, listTransactions };
 });
-vi.mock('$lib/server/access', () => ({ requireGroupAccess }));
+vi.mock('$lib/server/access', () => ({ requireGroupAccess, requireUser }));
+vi.mock('$lib/server/captures', async () => {
+	const actual =
+		await vi.importActual<typeof import('$lib/server/captures')>('$lib/server/captures');
+	return { ...actual, listOpenCaptures, discardCapture };
+});
 vi.mock('$lib/server/members', () => ({ listMembers }));
 vi.mock('$lib/server/currencies', () => ({ listCurrenciesForGroup }));
 
-import { load } from './+page.server';
+import { load, actions } from './+page.server';
 import { GroupAccessError } from '$lib/server/groups';
+import { CaptureNotFoundError, CaptureNotOpenError } from '$lib/server/captures';
 
 const GROUP = { id: 'g1', name: 'Trip', settlementCurrency: 'THB' };
 
@@ -72,6 +87,12 @@ beforeEach(() => {
 	listTransactions.mockResolvedValue([]);
 	listCurrenciesForGroup.mockReset();
 	listCurrenciesForGroup.mockResolvedValue(groupCurrencies());
+	requireUser.mockReset();
+	requireUser.mockReturnValue({ id: 'u1', name: 'Alice' });
+	listOpenCaptures.mockReset();
+	listOpenCaptures.mockResolvedValue([]);
+	discardCapture.mockReset();
+	discardCapture.mockResolvedValue({ id: 'cap-1' });
 	listMembers.mockReset();
 	// Two members: the viewer (linked to u1) and one other participant slot.
 	listMembers.mockResolvedValue([
@@ -327,5 +348,227 @@ describe('/groups/[id]/transactions load — entry-currency descriptors (§7.5.2
 		// tests never mocked the service at all.
 		listCurrenciesForGroup.mockRejectedValue(new Error('connection refused'));
 		await expect(load(makeLoadEvent(''))).rejects.toThrow('connection refused');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The "Not recorded yet" tray + its discard action (issue #50; PLAN §7.7, §10).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A stored Capture row, as `listOpenCaptures` returns it. */
+function captureRow(overrides: Record<string, unknown> = {}) {
+	return {
+		id: 'cap-1',
+		groupId: 'g1',
+		createdBy: 'u1',
+		note: 'dinner at the night market',
+		amountMinor: null,
+		currency: null,
+		capturedFor: '2026-08-01',
+		resolvedTransactionId: null,
+		resolvedAt: null,
+		discardedAt: null,
+		createdAt: new Date('2026-08-01T12:00:00Z'),
+		...overrides
+	};
+}
+
+type TrayResult = {
+	captures: {
+		id: string;
+		note: string;
+		authorName: string;
+		amountFormatted: string | null;
+		capturedFor: string;
+	}[];
+};
+
+describe('/groups/[id]/transactions load — the "Not recorded yet" tray (§7.7)', () => {
+	it('reads the group tray and attributes each note to its AUTHOR', async () => {
+		// Two members' notes, in the order the service returned them.
+		listOpenCaptures.mockResolvedValueOnce([
+			captureRow(),
+			captureRow({ id: 'cap-2', createdBy: 'u2', note: 'that taxi' })
+		]);
+		listMembers.mockResolvedValueOnce([
+			{ id: 'm1', displayName: 'Alice', userId: 'u1', deactivatedAt: null, isLinked: true },
+			{ id: 'm2', displayName: 'Bob', userId: 'u2', deactivatedAt: null, isLinked: true }
+		]);
+
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+
+		expect(listOpenCaptures).toHaveBeenCalledWith('u1', 'g1');
+		// Group-visible: EVERY member's open notes, not just the viewer's — that is
+		// what makes the tray deduplicate (§7.7).
+		expect(result.captures.map((c) => [c.id, c.authorName])).toEqual([
+			['cap-1', 'Alice'],
+			['cap-2', 'Bob']
+		]);
+		// Service order is preserved (newest real-world day first).
+		expect(result.captures[0].note).toBe('dinner at the night market');
+	});
+
+	it('still names a DEACTIVATED author (they keep their history, §6.3)', async () => {
+		listOpenCaptures.mockResolvedValueOnce([captureRow({ createdBy: 'u3' })]);
+		listMembers.mockResolvedValueOnce([
+			{
+				id: 'm3',
+				displayName: 'Carol',
+				userId: 'u3',
+				deactivatedAt: '2026-02-01T00:00:00.000Z',
+				isLinked: true
+			}
+		]);
+
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+		expect(result.captures[0].authorName).toBe('Carol');
+	});
+
+	it('falls back to a generic label rather than printing a raw user id', async () => {
+		listOpenCaptures.mockResolvedValueOnce([captureRow({ createdBy: 'u-ghost' })]);
+
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+		expect(result.captures[0].authorName).toBe('Someone');
+		expect(result.captures[0].authorName).not.toContain('u-ghost');
+	});
+
+	it('formats the amount at its own currency exponent — and converts NOTHING', async () => {
+		listCurrenciesForGroup.mockResolvedValue(groupCurrencies([BEER]));
+		listOpenCaptures.mockResolvedValueOnce([
+			captureRow({ amountMinor: 120_000, currency: 'THB' }),
+			// A 0-dp custom currency: three beers, not "3.00", and no settlement
+			// equivalent anywhere — nothing that computes a balance may see a Capture.
+			captureRow({ id: 'cap-2', amountMinor: 3, currency: 'cur_beer' })
+		]);
+
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+
+		// Settlement currency: bare symbol (the group states its currency once).
+		expect(result.captures[0].amountFormatted).toBe('฿1,200.00');
+		// Foreign: the DISPLAY code rides along, never the opaque key.
+		expect(result.captures[1].amountFormatted).toContain('BEER');
+		expect(result.captures[1].amountFormatted).not.toContain('cur_beer');
+		expect(result.captures[1].amountFormatted).not.toContain('3.00');
+	});
+
+	it('shows no amount for a note-only Capture', async () => {
+		listOpenCaptures.mockResolvedValueOnce([captureRow()]);
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+		expect(result.captures[0].amountFormatted).toBeNull();
+	});
+
+	it('shows no amount when the currency no longer resolves, rather than guessing a scale', async () => {
+		// `captures.currency` is deliberately NOT a foreign key (a group may delete a
+		// custom currency the ledger never referenced), so a code CAN dangle.
+		listOpenCaptures.mockResolvedValueOnce([
+			captureRow({ amountMinor: 1234, currency: 'cur_deleted' })
+		]);
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+		expect(result.captures[0].amountFormatted).toBeNull();
+	});
+
+	it('degrades to an empty tray (not a 500) when the read fails', async () => {
+		listOpenCaptures.mockRejectedValueOnce(new Error('db down'));
+		const result = (await load(makeLoadEvent(''))) as TrayResult;
+		expect(result.captures).toEqual([]);
+	});
+
+	it('404s when the tray read loses the access race', async () => {
+		listOpenCaptures.mockRejectedValueOnce(new GroupAccessError());
+		try {
+			await load(makeLoadEvent(''));
+			expect.unreachable('load should have thrown');
+		} catch (e) {
+			expect(isHttpError(e)).toBe(true);
+			expect((e as { status: number }).status).toBe(404);
+		}
+	});
+});
+
+/** Post the discard action with the given form fields; returns its result or throw. */
+async function discard(fields: Record<string, string>) {
+	const data = new FormData();
+	for (const [k, v] of Object.entries(fields)) data.set(k, v);
+	const event = {
+		params: { id: 'g1' },
+		locals: { user: { id: 'u1', name: 'Alice' }, session: {} },
+		url: new URL('http://localhost/groups/g1/transactions'),
+		request: { formData: async () => data }
+	} as unknown as Parameters<NonNullable<typeof actions.discard>>[0];
+	try {
+		return await actions.discard!(event);
+	} catch (e) {
+		return e;
+	}
+}
+
+describe('/groups/[id]/transactions discard action (§7.7 "Edge cases", §10)', () => {
+	it('soft-discards through the service — the REAL action behind the dialog', async () => {
+		const outcome = (await discard({ captureId: 'cap-1' })) as { message: { type: string } };
+
+		// The dialog is a UX guard; this is the mechanism, and it needs nothing from
+		// the client but the id — so it works with JavaScript off.
+		expect(discardCapture).toHaveBeenCalledWith({
+			userId: 'u1',
+			groupId: 'g1',
+			captureId: 'cap-1'
+		});
+		expect(outcome.message.type).toBe('success');
+	});
+
+	it('rejects a submission with no id without touching the service', async () => {
+		const outcome = (await discard({})) as { status: number };
+		expect(outcome.status).toBe(400);
+		expect(discardCapture).not.toHaveBeenCalled();
+	});
+
+	it('says which ending won the race when someone else already closed it', async () => {
+		discardCapture.mockRejectedValueOnce(new CaptureNotOpenError('resolved'));
+
+		const outcome = (await discard({ captureId: 'cap-1' })) as {
+			status: number;
+			data: { message: { text: string } };
+		};
+
+		// The tray is group-visible, so two people CAN act on one row. Reporting
+		// success would tell the loser their tap did something.
+		expect(outcome.status).toBe(409);
+		expect(outcome.data.message.text).toBe('Someone already recorded that one.');
+	});
+
+	it('distinguishes an already-discarded row from an already-recorded one', async () => {
+		discardCapture.mockRejectedValueOnce(new CaptureNotOpenError('discarded'));
+		const outcome = (await discard({ captureId: 'cap-1' })) as {
+			data: { message: { text: string } };
+		};
+		expect(outcome.data.message.text).toBe('Someone already discarded that one.');
+	});
+
+	it('answers an unknown id with a form failure, not a blown-away page', async () => {
+		discardCapture.mockRejectedValueOnce(new CaptureNotFoundError());
+		const outcome = (await discard({ captureId: 'nope' })) as {
+			status: number;
+			data: { message: { text: string } };
+		};
+		expect(outcome.status).toBe(404);
+		expect(outcome.data.message.text).toBe('That note is no longer here.');
+	});
+
+	it('404s the page when the group itself is gone (§12 — never leak)', async () => {
+		discardCapture.mockRejectedValueOnce(new GroupAccessError());
+		const thrown = await discard({ captureId: 'cap-1' });
+		expect(isHttpError(thrown)).toBe(true);
+		expect((thrown as { status: number }).status).toBe(404);
+	});
+
+	it('never leaks the raw cause of an unexpected failure (§12)', async () => {
+		discardCapture.mockRejectedValueOnce(new Error('connection terminated: secret-host:5432'));
+		const outcome = (await discard({ captureId: 'cap-1' })) as {
+			status: number;
+			data: { message: { text: string } };
+		};
+		expect(outcome.status).toBe(500);
+		expect(outcome.data.message.text).toBe('Could not discard that. Please try again.');
+		expect(JSON.stringify(outcome.data)).not.toContain('secret-host');
 	});
 });

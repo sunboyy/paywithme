@@ -18,6 +18,7 @@
 	import { actionLabel, absoluteTime, relativeTime } from '$lib/activity-labels';
 	import { dayLabel } from '$lib/date-groups';
 	import PlusIcon from '@lucide/svelte/icons/plus';
+	import PencilLineIcon from '@lucide/svelte/icons/pencil-line';
 	import ReceiptIcon from '@lucide/svelte/icons/receipt';
 	import HandshakeIcon from '@lucide/svelte/icons/handshake';
 	import type { PageData } from './$types';
@@ -121,6 +122,50 @@
 					</Card.Content>
 				</Card.Root>
 			{/if}
+
+			<!-- ── "Not recorded yet" (PLAN §7.7 "Recall (no push)") ──────────────────
+			     The persistent unrecorded COUNT plus the ONE-TAP way to add another.
+			     Both halves are the point: push notifications are out of scope (§1), so
+			     this count and the one on `/groups` are the entire recall mechanism, and
+			     the quick-capture screen is only worth having if reaching it is a single
+			     tap from here. The button therefore shows whether or not anything is
+			     waiting; the count line is what changes. -->
+			<Card.Root class="gap-0 py-4">
+				<Card.Header class="px-4 pb-2">
+					<Card.Title class="text-base">Not recorded yet</Card.Title>
+					{#if data.unrecordedCount > 0}
+						<Card.Action>
+							<a
+								href={resolve('/groups/[id]/transactions', { id: data.group.id })}
+								class="text-sm text-muted-foreground hover:text-foreground hover:underline"
+							>
+								See them →
+							</a>
+						</Card.Action>
+					{/if}
+				</Card.Header>
+				<Card.Content class="space-y-3 px-4">
+					<p class="text-sm text-muted-foreground">
+						{#if data.unrecordedCount > 0}
+							<!-- The number is the recall: it is the only thing that comes back
+							     to say "you still owe this group a transaction". -->
+							<span class="font-medium text-foreground">{data.unrecordedCount}</span>
+							{data.unrecordedCount === 1 ? 'note is' : 'notes are'} waiting to be recorded.
+						{:else}
+							Nothing waiting. Note something now and record the details later.
+						{/if}
+					</p>
+					<Button
+						variant="outline"
+						size="sm"
+						class="w-full gap-1"
+						href={resolve('/groups/[id]/captures/new', { id: data.group.id })}
+					>
+						<PencilLineIcon class="size-4" aria-hidden="true" />
+						Note for later
+					</Button>
+				</Card.Content>
+			</Card.Root>
 
 			<!-- Balance summary: who owes / who is owed. Links to the full settle page.
 

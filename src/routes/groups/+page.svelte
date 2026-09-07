@@ -49,6 +49,16 @@
 						<Card.Root class="gap-0 py-4 transition-colors hover:bg-accent/50">
 							<Card.Header class="px-4">
 								<Card.Title class="text-base wrap-break-word">{group.name}</Card.Title>
+								<!-- The per-group unrecorded count (PLAN §7.7 "Recall (no push)").
+								     Shown only when something IS waiting: a "0 not recorded yet" on
+								     every card is noise, and the count exists to interrupt, not to
+								     report. Silent when the count could not be read at all. -->
+								{#if group.unrecordedCount > 0}
+									<Card.Description class="text-xs">
+										{group.unrecordedCount}
+										not recorded yet
+									</Card.Description>
+								{/if}
 								<Card.Action>
 									{#if group.net === null}
 										<Badge variant="secondary">{currencyLabel(group.settlementCurrency)}</Badge>

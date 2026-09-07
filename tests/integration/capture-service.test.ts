@@ -28,6 +28,7 @@ import { createGroup, GroupAccessError } from '$lib/server/groups';
 import {
 	createCapture,
 	listOpenCaptures,
+	countOpenCapturesByGroup,
 	resolveCapture,
 	discardCapture,
 	CaptureNotFoundError,
@@ -308,6 +309,72 @@ describeIntegration('integration: capture service (issue #49; PLAN §7.7)', () =
 		const group = await freshGroup();
 
 		await expect(listOpenCaptures(userB.id, group.id)).rejects.toBeInstanceOf(GroupAccessError);
+	});
+
+	// ── 3b. The unrecorded COUNT (issue #50; PLAN §7.7 "Recall (no push)") ────
+	//
+	// Push is out of scope (§1), so this count on `/groups` and the group overview
+	// is the whole recall mechanism. Against a real DB because every claim is about
+	// a real WHERE: "only open" cannot be shown by discarding a row in a stub.
+
+	it('counts ONLY open rows — a resolved or discarded one stops counting', async () => {
+		const group = await freshGroup();
+		const txn = await recordTransaction(group.id);
+		const args = { userId: userA.id, groupId: group.id };
+
+		await createCapture({ ...args, input: { note: 'still open' } });
+		const toResolve = await createCapture({ ...args, input: { note: 'about to be recorded' } });
+		const toDiscard = await createCapture({ ...args, input: { note: 'about to be dropped' } });
+
+		const count = async () =>
+			(await countOpenCapturesByGroup({ userId: userA.id, groupIds: [group.id] })).get(group.id);
+
+		expect(await count()).toBe(3);
+
+		await resolveCapture({ ...args, captureId: toResolve.id, transactionId: txn.id });
+		expect(await count()).toBe(2);
+
+		// The one `resolved_at IS NULL` alone would keep counting forever.
+		await discardCapture({ ...args, captureId: toDiscard.id });
+		expect(await count()).toBe(1);
+
+		// …and the count never disagrees with the tray it sits above.
+		expect(await listOpenCaptures(userA.id, group.id)).toHaveLength(1);
+	});
+
+	it('counts every requested group in one call, and omits ones with nothing open', async () => {
+		const withNotes = await freshGroup('count-a');
+		const empty = await freshGroup('count-b');
+		await createCapture({ userId: userA.id, groupId: withNotes.id, input: { note: 'one' } });
+		await createCapture({ userId: userA.id, groupId: withNotes.id, input: { note: 'two' } });
+
+		const counts = await countOpenCapturesByGroup({
+			userId: userA.id,
+			groupIds: [withNotes.id, empty.id]
+		});
+
+		expect(counts.get(withNotes.id)).toBe(2);
+		expect(counts.has(empty.id)).toBe(false);
+	});
+
+	it('counts the WHOLE group tray for any member, not just their own notes', async () => {
+		const group = await freshGroup();
+		await addSecondMember(group.id);
+		await createCapture({ userId: userA.id, groupId: group.id, input: { note: 'dinner' } });
+
+		// userB wrote none of them and is told about all of them — deduplication (§7.7).
+		const counts = await countOpenCapturesByGroup({ userId: userB.id, groupIds: [group.id] });
+		expect(counts.get(group.id)).toBe(1);
+	});
+
+	it('reports NOTHING for a group the caller is not a member of (§12)', async () => {
+		const group = await freshGroup();
+		await createCapture({ userId: userA.id, groupId: group.id, input: { note: 'dinner' } });
+
+		// A non-member gets no row rather than a count — the membership INNER JOIN is
+		// the batched form of the same access check, and absence leaks nothing.
+		const counts = await countOpenCapturesByGroup({ userId: userB.id, groupIds: [group.id] });
+		expect(counts.has(group.id)).toBe(false);
 	});
 
 	// ── 4. Resolve ────────────────────────────────────────────────────────────

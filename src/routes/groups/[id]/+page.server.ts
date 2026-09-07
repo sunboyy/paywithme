@@ -19,6 +19,7 @@ import { listMembers } from '$lib/server/members';
 import { listTransactions, type TransactionListItem } from '$lib/server/transactions';
 import { resolveEntryCurrencies } from '$lib/server/entry-currency';
 import { listGroupActivity, type ActivityEntry } from '$lib/server/activity';
+import { countOpenCapturesByGroup } from '$lib/server/captures';
 import { orderByWhoShouldPay, type MemberBalance } from '$lib/transactions/balances';
 import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import type { PageServerLoad } from './$types';
@@ -64,33 +65,44 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	const settlementCurrency = group.settlementCurrency as SeededCurrencyCode;
 	const currency = getCurrency(settlementCurrency);
 
-	// Fetch balances + member roster and the two recent lists in parallel.
-	const [balances, members, recentTransactions, recentActivity] = await Promise.all([
-		getGroupBalances({ userId: user.id, groupId: params.id }).catch((e) => {
-			if (e instanceof GroupAccessError) error(404, 'Group not found');
-			return [] as MemberBalance[];
-		}),
-		listMembers({ userId: user.id, groupId: params.id }).catch((e) => {
-			if (e instanceof GroupAccessError) error(404, 'Group not found');
-			return [] as Awaited<ReturnType<typeof listMembers>>;
-		}),
-		listTransactions({
-			userId: user.id,
-			groupId: params.id,
-			limit: RECENT_LIMIT
-		}).catch((e) => {
-			if (e instanceof GroupAccessError) error(404, 'Group not found');
-			return [] as TransactionListItem[];
-		}),
-		listGroupActivity({
-			userId: user.id,
-			groupId: params.id,
-			limit: RECENT_LIMIT
-		}).catch((e) => {
-			if (e instanceof GroupAccessError) error(404, 'Group not found');
-			return [] as ActivityEntry[];
-		})
-	]);
+	// Fetch balances + member roster, the two recent lists, and the unrecorded count
+	// in parallel.
+	const [balances, members, recentTransactions, recentActivity, unrecordedByGroup] =
+		await Promise.all([
+			getGroupBalances({ userId: user.id, groupId: params.id }).catch((e) => {
+				if (e instanceof GroupAccessError) error(404, 'Group not found');
+				return [] as MemberBalance[];
+			}),
+			listMembers({ userId: user.id, groupId: params.id }).catch((e) => {
+				if (e instanceof GroupAccessError) error(404, 'Group not found');
+				return [] as Awaited<ReturnType<typeof listMembers>>;
+			}),
+			listTransactions({
+				userId: user.id,
+				groupId: params.id,
+				limit: RECENT_LIMIT
+			}).catch((e) => {
+				if (e instanceof GroupAccessError) error(404, 'Group not found');
+				return [] as TransactionListItem[];
+			}),
+			listGroupActivity({
+				userId: user.id,
+				groupId: params.id,
+				limit: RECENT_LIMIT
+			}).catch((e) => {
+				if (e instanceof GroupAccessError) error(404, 'Group not found');
+				return [] as ActivityEntry[];
+			}),
+			// The persistent UNRECORDED COUNT (PLAN §7.7 "Recall (no push)"). This and
+			// the count on `/groups` are the WHOLE recall mechanism — push is out of
+			// scope (§1) — so it is recomputed on every load rather than cached.
+			// Degrades to no count, never to a wrong one: showing "0 not recorded yet"
+			// because a read failed would tell the user the queue is empty.
+			countOpenCapturesByGroup({ userId: user.id, groupIds: [params.id] }).catch((e) => {
+				if (e instanceof GroupAccessError) error(404, 'Group not found');
+				return new Map<string, number>();
+			})
+		]);
 
 	// ── The ENTRY currency of each recent row (PLAN §7.5.2; issue #69 finding 2) ──
 	// A row shows its ORIGINAL amount in the currency it was RECORDED in (§7.6
@@ -172,6 +184,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 			? { code: currency.code, symbol: currency.symbol, exponent: currency.exponent }
 			: { code: settlementCurrency, symbol: settlementCurrency, exponent: 2 },
 		balances: balanceRows,
+		// Absent from the map = none open (see `countOpenCapturesByGroup`).
+		unrecordedCount: unrecordedByGroup.get(params.id) ?? 0,
 		recentTransactions,
 		// One descriptor per DISTINCT entry currency among the rows above; the page
 		// indexes them by `code` to format each row's original amount.
