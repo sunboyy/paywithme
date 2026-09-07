@@ -34,23 +34,59 @@
 // details before there is a reason to give them, which is the onboarding step the
 // plan refuses to add. Off by default means a new surface has to say it qualifies.
 //
+// ── The code is built here too, per TARGET (issue #88; ADR-0017) ─────────────
+// A target may carry the AMOUNT its surface is asking for, and a method whose rail
+// can encode one then comes back with a scannable code carrying that figure. That
+// is why targets are keyed by an arbitrary id rather than by member: one creditor
+// can be owed by two people for two different amounts, and each row's code must
+// carry its own. The rail decides whether a payload exists at all — this module
+// never learns what is inside one.
+//
 // Values are RESOLVED FOR DISPLAY here (a select's option label, not its stored
 // value) so the component never sees the registry.
 
-import { findRail, parseRailDetails } from './payout-rails';
+import { buildRailQr, findRail, parseRailDetails } from './payout-rails';
 import { listForViewer, listOwn, type ReceivingMethod } from './receiving-methods';
+import { toQrSvg } from './qr-code';
+import { formatAmount, type SeededCurrencyCode } from '$lib/money';
 import type { RailField } from '$lib/payout-rail-fields';
 import type {
 	ReceivingFieldView,
 	ReceivingMethodView,
-	ReceivingProfileView
+	ReceivingProfileView,
+	ReceivingQrView
 } from '$lib/receiving-method-view';
+
+/**
+ * The transfer a surface is asking the payer to make (issue #88).
+ *
+ * Passing one is what turns a method into a SCANNABLE code with the figure
+ * already in it. A surface that is not naming an amount — the members roster,
+ * which lists people rather than debts — passes none and shows the details alone:
+ * a code carrying no figure, on a screen that also carries no figure, invites the
+ * payer to assume the amount is in there when it is not.
+ */
+export type ReceivingAmount = {
+	/** Integer minor units of `currency` — never a float (CLAUDE.md; PLAN §7.5). */
+	amount: number;
+	/** The group's settlement currency. Rails that cannot carry it produce no code. */
+	currency: SeededCurrencyCode;
+};
 
 /** A member, reduced to what the receiving lookup needs. */
 export type ReceivingTarget = {
+	/**
+	 * The key this target's profile comes back under.
+	 *
+	 * Usually the member id — but the settle screen keys by SUGGESTED TRANSFER,
+	 * because one creditor can be owed by two people for two different amounts, and
+	 * the code in each row has to carry that row's figure.
+	 */
 	id: string;
 	/** The linked account, or null for a participant slot (PLAN §6.1). */
 	userId: string | null;
+	/** What this row is asking for, when the surface knows. */
+	amount?: ReceivingAmount;
 };
 
 /** Per-surface choices about what an empty profile is allowed to say. */
@@ -84,23 +120,28 @@ export async function loadReceivingProfiles(
 		...new Set(targets.map((t) => t.userId).filter((id): id is string => id != null))
 	];
 
-	const profiles = new Map<string, ReceivingProfileView>(
+	// Each user is READ once; the view is BUILT per target, because two targets can
+	// name the same creditor for different amounts and each needs its own code.
+	const methodsByUser = new Map<string, readonly ReceivingMethod[]>(
 		await Promise.all(
 			userIds.map(async (userId) => {
-				const isViewer = userId === viewerUserId;
-				const methods = isViewer
-					? await listOwn(userId)
-					: await listForViewer(viewerUserId, userId);
-				return [userId, toProfileView(methods, isViewer && promptViewerToAdd)] as const;
+				const methods =
+					userId === viewerUserId
+						? await listOwn(userId)
+						: await listForViewer(viewerUserId, userId);
+				return [userId, methods] as const;
 			})
 		)
 	);
 
 	return Object.fromEntries(
-		targets.map((target) => [
-			target.id,
-			(target.userId && profiles.get(target.userId)) || { state: 'unlinked' as const }
-		])
+		targets.map((target) => {
+			const methods = target.userId && methodsByUser.get(target.userId);
+			if (!methods) return [target.id, { state: 'unlinked' as const }];
+
+			const isViewer = target.userId === viewerUserId;
+			return [target.id, toProfileView(methods, isViewer && promptViewerToAdd, target.amount)];
+		})
 	);
 }
 
@@ -115,10 +156,11 @@ export async function loadReceivingProfiles(
  */
 export function toProfileView(
 	methods: readonly ReceivingMethod[],
-	promptViewerToAdd = false
+	promptViewerToAdd = false,
+	amount?: ReceivingAmount
 ): ReceivingProfileView {
 	if (methods.length === 0) return { state: promptViewerToAdd ? 'own-empty' : 'no-methods' };
-	return { state: 'methods', methods: methods.map(toMethodView) };
+	return { state: 'methods', methods: methods.map((method) => toMethodView(method, amount)) };
 }
 
 /**
@@ -128,18 +170,51 @@ export function toProfileView(
  * value is what gets read: a row whose `details` its rail no longer accepts yields
  * `fields: null` rather than a partial account number (see `ReceivingMethodView`).
  */
-export function toMethodView(method: ReceivingMethod): ReceivingMethodView {
+export function toMethodView(
+	method: ReceivingMethod,
+	amount?: ReceivingAmount
+): ReceivingMethodView {
 	const rail = findRail(method.rail);
 	const parsed = parseRailDetails(method.rail, method.details);
+	const renderable = rail !== undefined && parsed.success;
 
 	return {
 		id: method.id,
 		// A rail the registry no longer knows has no label to give; its own key is
 		// still better than an empty heading over an "unavailable" notice.
 		railLabel: rail?.label ?? method.rail,
-		fields:
-			rail && parsed.success ? rail.fields.map((field) => toFieldView(field, parsed.details)) : null
+		fields: renderable ? rail.fields.map((field) => toFieldView(field, parsed.details)) : null,
+		// No code beside details we are already refusing to render.
+		qr: amount && renderable ? toQrView(method, amount) : null
 	};
+}
+
+/**
+ * The scannable code for one method and one amount, or `null`.
+ *
+ * The rail decides whether a payload exists at all (`buildRailQr` — it may have no
+ * encoder, or refuse the currency); this only draws whatever comes back. NOTHING
+ * HERE KNOWS WHICH RAIL IT IS HOLDING, which is what keeps ADR-0016's "no rail is
+ * privileged" true on the read surfaces.
+ */
+function toQrView(method: ReceivingMethod, { amount, currency }: ReceivingAmount) {
+	try {
+		const payload = buildRailQr(method.rail, method.details, { amount, currency });
+		if (!payload) return null;
+
+		const { size, path } = toQrSvg(payload);
+		// The caption reads the SAME minor units the payload encoded, formatted by the
+		// money layer — so the figure on screen cannot drift from the figure inside.
+		return {
+			size,
+			path,
+			amountFormatted: formatAmount(amount, currency, { code: false })
+		} satisfies ReceivingQrView;
+	} catch {
+		// A code is an extra route to a transfer the details already describe. Losing
+		// it must never cost the payer the account number underneath.
+		return null;
+	}
 }
 
 /** One descriptor plus its parsed value, resolved to label + display text. */

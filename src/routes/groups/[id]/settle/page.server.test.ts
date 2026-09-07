@@ -74,6 +74,7 @@ type LoadResult = {
 		isCreditor: boolean;
 	}[];
 	suggestions: {
+		key: string;
 		fromMemberId: string;
 		toMemberId: string;
 		fromDisplayName: string;
@@ -202,10 +203,40 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 
 		// Alice (m1) is owed; Bob and Carol are paying. Only Alice's details belong
 		// on this page — nobody's account is loaded because they happen to be in the
-		// group.
-		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm1', userId: 'u1' }], {
-			promptViewerToAdd: true
-		});
+		// group. Both rows name her, and both go through one read of her profile.
+		expect(loadReceivingProfiles).toHaveBeenCalledWith(
+			'u1',
+			[
+				{ id: 'm2→m1', userId: 'u1', amount: { amount: 12000, currency: 'THB' } },
+				{ id: 'm3→m1', userId: 'u1', amount: { amount: 3000, currency: 'THB' } }
+			],
+			{ promptViewerToAdd: true }
+		);
+	});
+
+	it('asks for each transfer’s OWN amount (issue #88)', async () => {
+		// One creditor, two debtors, two different figures. The QR in each row carries
+		// that row's amount, so the details are requested per transfer — a per-creditor
+		// request could only ever put one of the two figures in front of both payers.
+		balancesOwedToAlice();
+
+		await load(makeLoadEvent());
+
+		const targets = loadReceivingProfiles.mock.calls[0][1] as {
+			id: string;
+			amount: { amount: number };
+		}[];
+		expect(targets.map((t) => t.amount.amount)).toEqual([12000, 3000]);
+		expect(new Set(targets.map((t) => t.id)).size).toBe(2);
+	});
+
+	it('keys the details by the same key the suggestions carry', async () => {
+		balancesOwedToAlice();
+
+		const result = (await load(makeLoadEvent())) as LoadResult;
+
+		const targets = loadReceivingProfiles.mock.calls[0][1] as { id: string }[];
+		expect(result.suggestions.map((s) => s.key)).toEqual(targets.map((t) => t.id));
 	});
 
 	it('loads nobody’s details when the group is all settled', async () => {
@@ -219,19 +250,19 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [], { promptViewerToAdd: true });
 	});
 
-	it('hands the page the view keyed by member id', async () => {
+	it('hands the page the view keyed by suggested transfer', async () => {
 		balancesOwedToAlice();
-		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'methods', methods: [] } });
+		loadReceivingProfiles.mockResolvedValue({ 'm2→m1': { state: 'methods', methods: [] } });
 
 		const result = (await load(makeLoadEvent())) as LoadResult;
 
-		expect(result.receiving.m1.state).toBe('methods');
+		expect(result.receiving['m2→m1'].state).toBe('methods');
 	});
 
 	it('fetches the group’s newest invite link when a creditor is unlinked', async () => {
 		// Empty state 1 (§17.4): the only thing that will ever help here is an invite.
 		balancesOwedToAlice();
-		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'unlinked' } });
+		loadReceivingProfiles.mockResolvedValue({ 'm2→m1': { state: 'unlinked' } });
 		listActiveInvites.mockResolvedValue([
 			{ id: 'i1', token: 'tok_new', expiresAt: '', createdAt: '' },
 			{ id: 'i2', token: 'tok_old', expiresAt: '', createdAt: '' }
@@ -253,9 +284,11 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 
 		await load(makeLoadEvent());
 
-		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm2', userId: null }], {
-			promptViewerToAdd: true
-		});
+		expect(loadReceivingProfiles).toHaveBeenCalledWith(
+			'u1',
+			[{ id: 'm1→m2', userId: null, amount: { amount: 12000, currency: 'THB' } }],
+			{ promptViewerToAdd: true }
+		);
 	});
 
 	it('opts into the case-3 prompt, because BEING A CREDITOR is what earns it', async () => {
@@ -270,7 +303,7 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 
 	it('does not go looking for an invite link when every creditor has an account', async () => {
 		balancesOwedToAlice();
-		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'no-methods' } });
+		loadReceivingProfiles.mockResolvedValue({ 'm2→m1': { state: 'no-methods' } });
 
 		const result = (await load(makeLoadEvent())) as LoadResult;
 
@@ -281,7 +314,7 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 	it('renders the page without an invite link rather than failing on one', async () => {
 		// A transient invites failure costs the nudge, not the settle screen.
 		balancesOwedToAlice();
-		loadReceivingProfiles.mockResolvedValue({ m1: { state: 'unlinked' } });
+		loadReceivingProfiles.mockResolvedValue({ 'm2→m1': { state: 'unlinked' } });
 		listActiveInvites.mockRejectedValue(new Error('boom'));
 
 		const result = (await load(makeLoadEvent())) as LoadResult;

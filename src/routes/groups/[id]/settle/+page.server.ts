@@ -30,6 +30,11 @@
 // They are loaded here rather than fetched on tap so the disclosure opens with JS
 // disabled; the row itself never prints them (§17.3).
 //
+// A method whose rail can encode this transfer also arrives as a SCANNABLE CODE
+// with the row's amount already in it (issue #88; ADR-0017) — built here, in
+// `load`, for the same reason: the code is in the HTML, so it renders with JS off.
+// Which methods those are is the rail's answer, never this route's.
+//
 // The group's newest active invite link rides along for the unlinked-creditor
 // empty state (§17.4 case 1). Reading it is a read; CREATING one is a mutation
 // and stays on the members screen.
@@ -109,6 +114,11 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// from/to ids + raw minor-unit amount so the "Settle up" link can seed a Transfer
 	// without re-deriving anything (and with NO float parsing).
 	const suggestions = suggestSettlements(balances).map((s) => ({
+		// This row's own key. A creditor can appear in more than one suggestion (two
+		// people owing them different amounts), so the receiving details — and the
+		// QR carrying THIS row's figure (issue #88) — are keyed by transfer, not by
+		// member.
+		key: `${s.fromMemberId}→${s.toMemberId}`,
 		fromMemberId: s.fromMemberId,
 		toMemberId: s.toMemberId,
 		fromDisplayName: displayName(s.fromMemberId),
@@ -126,10 +136,26 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// targets if a suggestion says someone owes them money, so `own-empty` — "add
 	// how people should pay you" — cannot reach a debtor or a settled member. A
 	// surface without this gate (the members roster) must NOT pass the flag.
-	const creditorIds = new Set(suggestions.map((s) => s.toMemberId));
+	//
+	// One target per SUGGESTED TRANSFER rather than per creditor, because each row
+	// asks for its own amount and the QR carries it (issue #88). The creditor's rows
+	// still cost one read between them — `loadReceivingProfiles` reads each user
+	// once — and a creditor nobody is being asked to pay is never loaded at all.
+	const memberById = new Map(members.map((m) => [m.id, m]));
 	const receiving = await loadReceivingProfiles(
 		user.id,
-		members.filter((m) => creditorIds.has(m.id)).map((m) => ({ id: m.id, userId: m.userId })),
+		suggestions.flatMap((s) => {
+			const creditor = memberById.get(s.toMemberId);
+			return creditor
+				? [
+						{
+							id: s.key,
+							userId: creditor.userId,
+							amount: { amount: s.amount, currency: settlementCurrency }
+						}
+					]
+				: [];
+		}),
 		{ promptViewerToAdd: true }
 	);
 
@@ -148,7 +174,8 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	return {
 		group: { id: group.id, name: group.name, settlementCurrency },
-		// memberId → the §17.4 view of that creditor's receiving details.
+		// suggestion key → the §17.4 view of that creditor's receiving details, with
+		// that row's amount already inside any QR.
 		receiving,
 		inviteUrl,
 		currency: currency

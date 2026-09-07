@@ -24,6 +24,22 @@
 	// and branches only on a field's PAYER ROLE — which value to copy, which name to
 	// check. Adding a country later is a registry entry (ADR-0016), not an edit here.
 	//
+	// ── The code leads, when there is one (issue #88; PLAN §17.4; ADR-0017) ──────
+	// A method whose rail could encode this transfer arrives with a QR carrying the
+	// amount, and it goes FIRST: scanning it is the whole point — no digits typed,
+	// no figure typed, no transposed digit to make. The raw value then sits behind a
+	// reveal, because a receiving profile is visible to every co-member of every
+	// shared group (PLAN §17.3) and a national ID is a far more sensitive thing to
+	// print in a list than a phone number.
+	//
+	// That reveal is OBFUSCATION, NOT PROTECTION: the proxy is inside the code in
+	// plain digits, and anyone who screenshots it has the number. So the summary
+	// says "show", and nothing anywhere claims the code hides anything.
+	//
+	// The name check is UNCHANGED by any of this. A QR proves nothing about who owns
+	// the account — the payload carries no name at all — so the instruction and the
+	// holder name stay exactly where they were, outside every fold.
+	//
 	// Copy is progressive enhancement: every value is real selectable text
 	// (`select-all`), so a no-JS payer copies it by hand.
 	//
@@ -35,7 +51,11 @@
 	import CopyIcon from '@lucide/svelte/icons/copy';
 	import CheckIcon from '@lucide/svelte/icons/check';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
-	import type { ReceivingMethodView, ReceivingProfileView } from '$lib/receiving-method-view';
+	import type {
+		ReceivingFieldView,
+		ReceivingMethodView,
+		ReceivingProfileView
+	} from '$lib/receiving-method-view';
 
 	let {
 		view,
@@ -77,43 +97,94 @@
 	}
 </script>
 
+{#snippet fieldRow(m: ReceivingMethodView, field: ReceivingFieldView)}
+	{@const key = `${m.id}:${field.label}`}
+	<div class="space-y-0.5">
+		<dt class="text-xs text-muted-foreground">{field.label}</dt>
+		<dd class="flex items-start justify-between gap-2">
+			<span class="min-w-0 break-words select-all">{field.value}</span>
+			{#if field.payerRole === 'copy'}
+				<!-- Only the value a payer types into their bank goes on the
+				     clipboard: copying the whole line would paste a bank name and
+				     a person's name into an account-number box. -->
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					class="min-h-9 shrink-0 gap-1"
+					onclick={() => copy(key, field.value)}
+					aria-label="Copy {field.label.toLowerCase()}"
+				>
+					{#if copiedKey === key}
+						<CheckIcon class="size-4" aria-hidden="true" />
+						Copied
+					{:else}
+						<CopyIcon class="size-4" aria-hidden="true" />
+						Copy
+					{/if}
+				</Button>
+			{/if}
+		</dd>
+	</div>
+{/snippet}
+
 {#snippet method(m: ReceivingMethodView)}
 	<div class="space-y-3 rounded-md border bg-background p-3" data-testid="receiving-method">
 		<p class="text-sm font-medium">{m.railLabel}</p>
 
 		{#if m.fields}
-			<dl class="space-y-2.5">
-				{#each m.fields as field (field.label)}
-					{@const key = `${m.id}:${field.label}`}
-					<div class="space-y-0.5">
-						<dt class="text-xs text-muted-foreground">{field.label}</dt>
-						<dd class="flex items-start justify-between gap-2">
-							<span class="min-w-0 break-words select-all">{field.value}</span>
-							{#if field.payerRole === 'copy'}
-								<!-- Only the value a payer types into their bank goes on the
-								     clipboard: copying the whole line would paste a bank name and
-								     a person's name into an account-number box. -->
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									class="min-h-9 shrink-0 gap-1"
-									onclick={() => copy(key, field.value)}
-									aria-label="Copy {field.label.toLowerCase()}"
-								>
-									{#if copiedKey === key}
-										<CheckIcon class="size-4" aria-hidden="true" />
-										Copied
-									{:else}
-										<CopyIcon class="size-4" aria-hidden="true" />
-										Copy
-									{/if}
-								</Button>
-							{/if}
-						</dd>
+			<!-- With a code on screen, the value it already contains moves behind the
+			     reveal; everything else — the holder name above all — stays put. Without
+			     one, `behindReveal` is empty and this renders exactly as it did before. -->
+			{@const behindReveal = m.qr ? m.fields.filter((f) => f.payerRole === 'copy') : []}
+			{@const alwaysShown = m.fields.filter((f) => !behindReveal.includes(f))}
+
+			{#if m.qr}
+				<figure class="space-y-2" data-testid="receiving-qr">
+					<!-- DARK ON LIGHT, in both themes: the ground is painted here rather than
+					     inherited, because a code drawn over a dark background is one no
+					     scanner will read. The quiet zone is inside the viewBox. -->
+					<div class="mx-auto w-full max-w-56 rounded-md border bg-white p-2">
+						<svg
+							viewBox="0 0 {m.qr.size} {m.qr.size}"
+							class="block h-auto w-full"
+							shape-rendering="crispEdges"
+							role="img"
+							aria-label="QR code to pay {displayName} {m.qr.amountFormatted}"
+						>
+							<rect width={m.qr.size} height={m.qr.size} fill="#ffffff" />
+							<path d={m.qr.path} fill="#000000" />
+						</svg>
 					</div>
+					<figcaption class="text-center text-sm text-muted-foreground">
+						Scan with your banking app — {m.qr.amountFormatted} is already in the code.
+					</figcaption>
+				</figure>
+			{/if}
+
+			<dl class="space-y-2.5">
+				{#each alwaysShown as field (field.label)}
+					{@render fieldRow(m, field)}
 				{/each}
 			</dl>
+
+			{#if behindReveal.length > 0}
+				<!-- Native <details>, so the digits are one tap away with JS disabled. The
+				     summary says only "show": the code is not a hiding place, and copy that
+				     implied it were would be a promise this app cannot keep. -->
+				<details data-testid="receiving-reveal">
+					<summary
+						class="inline-flex min-h-11 cursor-pointer list-none items-center text-sm underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+					>
+						Show {behindReveal[0].label}
+					</summary>
+					<dl class="space-y-2.5 pt-2">
+						{#each behindReveal as field (field.label)}
+							{@render fieldRow(m, field)}
+						{/each}
+					</dl>
+				</details>
+			{/if}
 		{:else}
 			<!-- The rail refuses to render these details (see `ReceivingMethodView`).
 			     Half an account number is worse than none when the next step is a

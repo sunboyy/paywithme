@@ -31,7 +31,12 @@ const { listForViewer, listOwn } = vi.hoisted(() => ({
 
 vi.mock('./receiving-methods', () => ({ listForViewer, listOwn }));
 
-import { loadReceivingProfiles, toMethodView, toProfileView } from './receiving-view';
+import {
+	loadReceivingProfiles,
+	toMethodView,
+	toProfileView,
+	type ReceivingAmount
+} from './receiving-view';
 
 /** A stored row, shaped like the table's `$inferSelect`. */
 function row(overrides: Record<string, unknown> = {}) {
@@ -247,5 +252,91 @@ describe('loadReceivingProfiles', () => {
 		]);
 
 		expect(Object.keys(profiles).sort()).toEqual(['m1', 'm2']);
+	});
+});
+
+describe('the code the payer scans (issue #88; PLAN §17.4)', () => {
+	/** ฿1,200.00 in the integer minor units the ledger stores. */
+	const THB: ReceivingAmount = { amount: 120000, currency: 'THB' };
+
+	/** The methods of a profile built for one target. */
+	async function methodsFor(amount?: ReceivingAmount) {
+		listForViewer.mockResolvedValue([PROMPTPAY, row()]);
+		const profiles = await loadReceivingProfiles('u1', [{ id: 'm3', userId: 'u2', amount }]);
+		const profile = profiles.m3;
+		if (profile.state !== 'methods') throw new Error(`expected methods, got ${profile.state}`);
+		return profile.methods;
+	}
+
+	it('draws a code for a rail that can encode the transfer', async () => {
+		const [promptpay] = await methodsFor(THB);
+
+		expect(promptpay.qr?.size).toBeGreaterThan(0);
+		expect(promptpay.qr?.path).toMatch(/^M\d/);
+		// The caption is formatted from the SAME minor units the payload encoded, so
+		// the figure on screen cannot claim one amount while the code carries another.
+		expect(promptpay.qr?.amountFormatted).toBe('฿1,200.00');
+	});
+
+	it('draws none for a rail that cannot, without hiding the details', async () => {
+		// `th_bank_account` has no encoder (the #82 result). The account number is
+		// still the answer — a missing code costs the scan, never the transfer.
+		const [, bank] = await methodsFor(THB);
+
+		expect(bank.qr).toBeNull();
+		expect(bank.fields?.some((f) => f.value === '1234567890')).toBe(true);
+	});
+
+	it('draws none in any currency but the rail’s own', async () => {
+		// The Thai payload hard-codes THB. A euro figure inside it is one a banking
+		// app reads as baht, so the only safe answer is no code at all.
+		const [promptpay] = await methodsFor({ amount: 120000, currency: 'EUR' });
+
+		expect(promptpay.qr).toBeNull();
+		expect(promptpay.fields?.some((f) => f.value === '0812345678')).toBe(true);
+	});
+
+	it('draws none where the surface names no amount', async () => {
+		// The members roster lists people, not debts. A code with no figure, on a
+		// screen with no figure, invites the payer to assume one is in there.
+		const methods = await methodsFor();
+
+		for (const method of methods) expect(method.qr).toBeNull();
+	});
+
+	it('gives one creditor’s two transfers two different codes, from one read', async () => {
+		// Two people can owe the same person two different amounts. Each row's code
+		// carries its own figure — and both come out of a single visibility read.
+		listForViewer.mockResolvedValue([PROMPTPAY]);
+
+		const profiles = await loadReceivingProfiles('u1', [
+			{ id: 'm2→m1', userId: 'u2', amount: { amount: 12000, currency: 'THB' } },
+			{ id: 'm3→m1', userId: 'u2', amount: { amount: 3000, currency: 'THB' } }
+		]);
+
+		const first = profiles['m2→m1'];
+		const second = profiles['m3→m1'];
+		if (first.state !== 'methods' || second.state !== 'methods')
+			throw new Error('expected methods');
+
+		expect(first.methods[0].qr?.amountFormatted).toBe('฿120.00');
+		expect(second.methods[0].qr?.amountFormatted).toBe('฿30.00');
+		expect(first.methods[0].qr?.path).not.toBe(second.methods[0].qr?.path);
+		expect(listForViewer).toHaveBeenCalledTimes(1);
+	});
+
+	it('draws none over details the rail refuses to render', async () => {
+		// Same rule as the fields: half a method is worse than none when the next step
+		// is a transfer.
+		listForViewer.mockResolvedValue([
+			row({ id: 'rm9', rail: 'th_promptpay', details: { proxyType: 'mobile' } })
+		]);
+
+		const profiles = await loadReceivingProfiles('u1', [{ id: 'm3', userId: 'u2', amount: THB }]);
+		const profile = profiles.m3;
+		if (profile.state !== 'methods') throw new Error('expected methods');
+
+		expect(profile.methods[0].fields).toBeNull();
+		expect(profile.methods[0].qr).toBeNull();
 	});
 });

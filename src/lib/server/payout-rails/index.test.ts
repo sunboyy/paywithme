@@ -4,6 +4,7 @@ import {
 	RAILS,
 	RAIL_IDS,
 	UnknownRailError,
+	buildRailQr,
 	findRail,
 	formatRailDetails,
 	getRail,
@@ -270,5 +271,66 @@ describe('rail field descriptors', () => {
 				rail.fields.map((field) => ({ ...field }))
 			);
 		}
+	});
+});
+
+describe('buildRailQr (issue #88; ADR-0017)', () => {
+	/** A transfer of ฿1,200.00, in the integer minor units the ledger stores. */
+	const THB = { amount: 120000, currency: 'THB' } as const;
+
+	it('answers a payload for a rail that has an encoder, and null for one that has none', () => {
+		// Written over the whole registry rather than naming the rail with the code:
+		// "which rails can be scanned" is a fact about payment networks, and every
+		// caller must cope with either answer WITHOUT asking which rail it is holding.
+		const answers = RAIL_IDS.map((id) => buildRailQr(id, VALID_DETAILS[id], THB));
+
+		for (const [index, payload] of answers.entries()) {
+			const where = RAIL_IDS[index];
+			expect(payload === null || payload.length > 0, where).toBe(true);
+			// Every rail's answer is decided by the rail itself, and matches whether it
+			// declared an encoder at all.
+			expect(payload !== null, where).toBe(PAYOUT_RAILS[where].encodeQr !== undefined);
+		}
+
+		// …and today exactly one rail can be scanned. A second one appearing here is
+		// fine; it appearing WITHOUT a spike behind it is what this pins.
+		expect(answers.filter((payload) => payload !== null)).toHaveLength(1);
+	});
+
+	it('gives a bank account and free text no code at all (the #82 result)', () => {
+		// Not a gap: the spike established that a bank plus an account number encodes
+		// to nothing any Thai banking app reads, and `other` is prose.
+		expect(buildRailQr('th_bank_account', VALID_DETAILS.th_bank_account, THB)).toBeNull();
+		expect(buildRailQr('other', VALID_DETAILS.other, THB)).toBeNull();
+	});
+
+	it('encodes the amount the caller asked for', () => {
+		const payload = buildRailQr('th_promptpay', VALID_DETAILS.th_promptpay, THB);
+
+		// Tag 54, seven bytes: the figure the settle row is showing, to the satang.
+		expect(payload).toContain('54071200.00');
+	});
+
+	it('REFUSES any currency but THB', () => {
+		// The payload hard-codes ISO 4217 764. A euro figure inside it is one a
+		// banking app reads as baht, and the payer cannot tell from the screen — so
+		// the only safe answer is no code (PLAN §17.4; correctness, not polish).
+		for (const currency of ['EUR', 'USD', 'JPY', 'thb', '']) {
+			expect(
+				buildRailQr('th_promptpay', VALID_DETAILS.th_promptpay, { amount: 120000, currency }),
+				currency
+			).toBeNull();
+		}
+	});
+
+	it('refuses details its own rail no longer accepts', () => {
+		// Same rule as the formatter, different failure: a half-read method must not
+		// become a code that sends money somewhere unintended.
+		expect(buildRailQr('th_promptpay', { proxyType: 'mobile' }, THB)).toBeNull();
+		expect(buildRailQr('th_promptpay', null, THB)).toBeNull();
+	});
+
+	it('refuses a rail the registry does not know', () => {
+		expect(buildRailQr('br_pix', { anything: true }, THB)).toBeNull();
 	});
 });

@@ -33,6 +33,10 @@ willing to publish a phone number, which changes the feature's priority. A QR
 that silently fails to scan is worse than no QR, because the payer discovers it
 at the moment they are trying to pay.
 
+> **Superseded by ADR-0017.** The spike ran (#82): the account-number proxy is
+> rejected outright, and the encoder belongs to `th_promptpay` over the proxy
+> already stored there. `th_bank_account` gets no encoder — a result, not a gap.
+
 ## Changing a receiving method writes no audit row
 
 `CLAUDE.md` requires every mutation to write an append-only `audit_log` row in the

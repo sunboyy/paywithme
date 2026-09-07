@@ -33,6 +33,15 @@ vi.mock('$app/paths', () => ({
 
 afterEach(cleanup);
 
+/**
+ * The one suggested transfer the fixtures below describe.
+ *
+ * Receiving details are keyed by TRANSFER, not by creditor (issue #88): one person
+ * can be owed by two others for two different amounts, and each row's QR carries
+ * its own figure.
+ */
+const TRANSFER = 'm2→m1';
+
 const BANK: PageData['receiving'][string] = {
 	state: 'methods',
 	methods: [
@@ -74,6 +83,7 @@ function pageData(overrides: Partial<PageData> = {}): PageData {
 		],
 		suggestions: [
 			{
+				key: TRANSFER,
 				fromMemberId: 'm2',
 				toMemberId: 'm1',
 				fromDisplayName: 'Bob',
@@ -83,7 +93,7 @@ function pageData(overrides: Partial<PageData> = {}): PageData {
 			}
 		],
 		allSettled: false,
-		receiving: { m1: BANK },
+		receiving: { [TRANSFER]: BANK },
 		inviteUrl: null,
 		...overrides
 	} as PageData;
@@ -131,6 +141,7 @@ describe('the suggested-transfer row', () => {
 			pageData({
 				suggestions: [
 					{
+						key: TRANSFER,
 						fromMemberId: 'm2',
 						toMemberId: 'm1',
 						fromDisplayName: 'Bob',
@@ -139,6 +150,7 @@ describe('the suggested-transfer row', () => {
 						amountFormatted: '฿1,200.00'
 					},
 					{
+						key: 'm2→m3',
 						fromMemberId: 'm2',
 						toMemberId: 'm3',
 						fromDisplayName: 'Bob',
@@ -147,7 +159,7 @@ describe('the suggested-transfer row', () => {
 						amountFormatted: '฿50.00'
 					}
 				],
-				receiving: { m1: BANK, m3: { state: 'no-methods' } }
+				receiving: { [TRANSFER]: BANK, 'm2→m3': { state: 'no-methods' } }
 			})
 		);
 
@@ -159,10 +171,41 @@ describe('the suggested-transfer row', () => {
 		expect(summaries[1]).toContain('How to pay Alex');
 	});
 
+	it('shows the row’s own code, with that row’s amount (issue #88)', () => {
+		// The route builds the code per transfer; the page's job is to put it in the
+		// right row's disclosure. A code from another row is a payment to the right
+		// person for the wrong figure.
+		const { container } = renderPage(
+			pageData({
+				receiving: {
+					[TRANSFER]: {
+						state: 'methods',
+						methods: [
+							{
+								id: 'rm1',
+								railLabel: 'PromptPay',
+								qr: { size: 33, path: 'M4 4h7v1h-7z', amountFormatted: '฿1,200.00' },
+								fields: [
+									{ label: 'PromptPay number', value: '0812345678', payerRole: 'copy' },
+									{ label: 'Account holder name', value: 'Nan Suphaporn', payerRole: 'name-check' }
+								]
+							}
+						]
+					}
+				}
+			})
+		);
+
+		const disclosure = container.querySelector('[data-testid="how-to-pay"]')!;
+		const qr = disclosure.querySelector('[data-testid="receiving-qr"]');
+		expect(qr).not.toBeNull();
+		expect(qr!.textContent).toContain('฿1,200.00');
+	});
+
 	it('offers the invite link when the creditor has no account yet (§17.4)', () => {
 		const { container } = renderPage(
 			pageData({
-				receiving: { m1: { state: 'unlinked' } },
+				receiving: { [TRANSFER]: { state: 'unlinked' } },
 				inviteUrl: 'http://localhost/invite/tok_abc'
 			})
 		);
@@ -209,7 +252,7 @@ describe('when everyone is square', () => {
 describe('the viewer’s own empty profile (issue #87; PLAN §17.4 case 3)', () => {
 	/** The single suggestion, with the creditor's profile in whatever state. */
 	function withCreditorProfile(state: PageData['receiving'][string]) {
-		return renderPage(pageData({ receiving: { m1: state } }));
+		return renderPage(pageData({ receiving: { [TRANSFER]: state } }));
 	}
 
 	it('offers the editor link when the creditor is the viewer and has nothing recorded', () => {

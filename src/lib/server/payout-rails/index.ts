@@ -15,9 +15,9 @@ import type { z } from 'zod';
 import { thBankAccountRail } from './th-bank-account';
 import { thPromptPayRail } from './th-promptpay';
 import { otherRail } from './other';
-import type { PayoutRail } from './types';
+import type { PayoutRail, RailQrRequest } from './types';
 
-export type { PayoutRail } from './types';
+export type { PayoutRail, RailQrRequest } from './types';
 
 /**
  * Every rail, keyed by the id stored in `receiving_method.rail`.
@@ -113,4 +113,19 @@ export function parseRailDetails(rail: string, details: unknown): ParsedRailDeta
  */
 export function formatRailDetails(rail: string, details: unknown): string {
 	return getRail(rail).format(details);
+}
+
+/**
+ * The scannable payload for one transfer into this method, or `null` (issue #88).
+ *
+ * `null` is the ordinary answer and covers every way a code cannot be produced:
+ * an unknown rail, a rail with no encoder at all (`th_bank_account`, `other` —
+ * see {@link PayoutRail.encodeQr}), details the rail no longer accepts, a
+ * currency it cannot carry, or an amount it cannot express. The caller renders a
+ * code when it gets one and the details alone when it does not — WITHOUT asking
+ * which rail this is, which is what keeps "no rail is privileged" true on the
+ * read surfaces too.
+ */
+export function buildRailQr(rail: string, details: unknown, request: RailQrRequest): string | null {
+	return findRail(rail)?.encodeQr?.(details, request) ?? null;
 }

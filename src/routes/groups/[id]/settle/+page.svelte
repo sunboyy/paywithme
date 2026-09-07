@@ -15,6 +15,11 @@
 	// A native `<details>` per row, closed by default: §17.3 says shown on demand,
 	// never printed inline, and a native disclosure keeps that true with JS off.
 	//
+	// Inside it, a method whose rail can encode this transfer shows a QR with THIS
+	// row's amount already in it (issue #88) — which is why the receiving details are
+	// keyed by `s.key`, the transfer, and not by the creditor: one person can be owed
+	// by two others for two different figures.
+	//
 	// When the creditor is the VIEWER and their own profile is empty, that same
 	// disclosure offers the link to `/settings/receiving` (issue #87; PLAN §17.4
 	// case 3) and starts OPEN. Closed-by-default is right for the other states —
@@ -150,8 +155,8 @@
 			</Card.Header>
 			<Card.Content>
 				<ul class="space-y-2" aria-label="Suggested settlements">
-					{#each data.suggestions as s (s.fromMemberId + '→' + s.toMemberId)}
-						{@const receiving = data.receiving[s.toMemberId]}
+					{#each data.suggestions as s (s.key)}
+						{@const receiving = data.receiving[s.key]}
 						<!-- The action sits INLINE on the right at every width. It used to stack
 						     below the row on phones as a full-width primary button, so three
 						     suggestions filled the viewport with three equally-loud black CTAs

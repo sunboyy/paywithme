@@ -26,6 +26,27 @@ export type ReceivingFieldView = {
 	payerRole?: RailFieldPayerRole;
 };
 
+/**
+ * A code the payer can scan, with the transfer's amount already inside it
+ * (issue #88; PLAN §17.4).
+ *
+ * Geometry, not a picture: the server draws the symbol so the page needs no QR
+ * library and works with JS off, and the component chooses the size. The `size`
+ * includes the quiet zone, so the whole square is the code.
+ *
+ * A QR is OBFUSCATION AND NOT PROTECTION — the proxy is inside it in plain
+ * digits, and anyone who screenshots the code has the number. No copy rendered
+ * beside it may suggest otherwise (ADR-0017).
+ */
+export type ReceivingQrView = {
+	/** Side of the square in modules; the `viewBox` is `0 0 size size`. */
+	size: number;
+	/** SVG path `d` covering the dark modules. The light ground is the renderer's. */
+	path: string;
+	/** The amount inside the code, formatted — so the caption cannot claim a different figure. */
+	amountFormatted: string;
+};
+
 /** One receiving method, as a payer reads it. */
 export type ReceivingMethodView = {
 	id: string;
@@ -42,6 +63,18 @@ export type ReceivingMethodView = {
 	 * which is a different and false statement.
 	 */
 	fields: ReceivingFieldView[] | null;
+	/**
+	 * The scannable code for THIS transfer, or `null` when there is none to show
+	 * (issue #88).
+	 *
+	 * Absent on any surface that is not asking for a specific amount, and `null`
+	 * whenever the rail cannot encode one: it has no encoder at all, the transfer is
+	 * not in a currency it can carry, or the stored details cannot make a code a
+	 * bank would accept. The fields below are the answer in every one of those
+	 * cases, exactly as before — a QR is an extra route to the same transfer, never
+	 * the only one.
+	 */
+	qr?: ReceivingQrView | null;
 };
 
 /**

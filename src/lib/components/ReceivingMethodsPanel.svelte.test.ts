@@ -245,3 +245,87 @@ describe('details the rail refuses to render', () => {
 		expect(container.querySelector('button')).toBeNull();
 	});
 });
+
+describe('the scannable code (issue #88; PLAN §17.4)', () => {
+	/** The same invented rail, with a code for this transfer attached. */
+	const WITH_QR: ReceivingProfileView = {
+		state: 'methods',
+		methods: [
+			{
+				id: 'rm2',
+				railLabel: 'Instant proxy',
+				qr: { size: 33, path: 'M4 4h7v1h-7z', amountFormatted: '฿1,200.00' },
+				fields: [
+					{ label: 'Proxy type', value: 'Mobile number' },
+					{ label: 'Proxy number', value: '0812345678', payerRole: 'copy' },
+					{ label: 'Account holder name', value: 'Nan Suphaporn', payerRole: 'name-check' }
+				]
+			}
+		]
+	};
+
+	function qrSvg(container: HTMLElement) {
+		return container.querySelector<SVGSVGElement>('[data-testid="receiving-qr"] svg');
+	}
+
+	it('renders the code as an SVG the server drew, with the amount in its caption', () => {
+		const { container } = renderPanel(WITH_QR);
+
+		const svg = qrSvg(container)!;
+		expect(svg.getAttribute('viewBox')).toBe('0 0 33 33');
+		expect(svg.querySelector('path')?.getAttribute('d')).toBe('M4 4h7v1h-7z');
+		expect(svg.getAttribute('aria-label')).toContain('฿1,200.00');
+		expect(container.textContent).toContain('฿1,200.00 is already in the code');
+	});
+
+	it('paints it dark on light whatever the theme is', () => {
+		// A code drawn in `currentColor` over a dark background is a code no scanner
+		// reads. Both the ground and the modules are stated outright, and the quiet
+		// zone is inside the viewBox rather than being CSS padding a crop would lose.
+		const { container } = renderPanel(WITH_QR);
+
+		const svg = qrSvg(container)!;
+		expect(svg.querySelector('rect')?.getAttribute('fill')).toBe('#ffffff');
+		expect(svg.querySelector('path')?.getAttribute('fill')).toBe('#000000');
+	});
+
+	it('leads with the code and puts the value it contains behind a reveal', () => {
+		const { container, getByText } = renderPanel(WITH_QR);
+
+		const reveal = container.querySelector<HTMLDetailsElement>(
+			'details[data-testid="receiving-reveal"]'
+		);
+		expect(reveal).not.toBeNull();
+		// Native and closed, so the digits are one tap away with JS disabled.
+		expect(reveal!.open).toBe(false);
+		expect(reveal!.querySelector('summary')?.textContent).toContain('Show Proxy number');
+		expect(reveal!.contains(getByText('0812345678'))).toBe(true);
+	});
+
+	it('claims nothing about privacy, because the proxy is inside the code', () => {
+		// Obfuscation, not protection: anyone who screenshots the code has the number.
+		const { container } = renderPanel(WITH_QR);
+
+		expect(container.textContent).not.toMatch(/hidden|private|secure|protect/i);
+	});
+
+	it('keeps the holder name and the name check on screen, outside every fold', () => {
+		// A QR proves nothing about who owns the account — it carries no name at all —
+		// so the one defence against a valid-but-wrong number is untouched by it.
+		const { container, getByText } = renderPanel(WITH_QR);
+
+		expect(getByText('Nan Suphaporn').closest('details')).toBeNull();
+		expect(
+			container.querySelector('[data-testid="receiving-name-check"]')!.closest('details')
+		).toBeNull();
+	});
+
+	it('changes nothing for a method with no code', () => {
+		// Every field stays exactly where issue #86 put it: no reveal, no empty figure.
+		const { container, getByText } = renderPanel({ state: 'methods', methods: [FIRST.methods[0]] });
+
+		expect(container.querySelector('[data-testid="receiving-qr"]')).toBeNull();
+		expect(container.querySelector('[data-testid="receiving-reveal"]')).toBeNull();
+		expect(getByText('1234567890').closest('details')).toBeNull();
+	});
+});

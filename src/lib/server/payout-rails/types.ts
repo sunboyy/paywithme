@@ -51,6 +51,32 @@ export interface PayoutRail {
 	 * `parseRailDetails` (see `./index.ts`) rather than catching here.
 	 */
 	readonly format: (details: unknown) => string;
+	/**
+	 * Encode this method as a scannable payload for one transfer, or `null` when
+	 * it cannot produce one (issue #88; ADR-0017).
+	 *
+	 * OPTIONAL, and most rails will never have it. There is no universal QR: `other`
+	 * has nothing to encode, and the #82 spike established that a bank and an
+	 * account number produce nothing any Thai banking app will read — so the absence
+	 * is a RESULT, not a gap waiting to be filled.
+	 *
+	 * The rail owns the whole decision, including which currencies it can carry: a
+	 * payload that hard-codes a currency must answer `null` for every other one,
+	 * rather than emit a foreign figure into a field a banking app reads as its own
+	 * money. Callers get a string or nothing and never learn the shape of either.
+	 */
+	readonly encodeQr?: (details: unknown, request: RailQrRequest) => string | null;
+}
+
+/** The transfer a {@link PayoutRail.encodeQr} payload is being built for. */
+export interface RailQrRequest {
+	/**
+	 * The amount, in INTEGER MINOR UNITS of `currency` (CLAUDE.md, PLAN §7.5).
+	 * Never a float and never a major-unit figure.
+	 */
+	readonly amount: number;
+	/** The transfer's currency code, e.g. `'THB'`. A rail that cannot carry it answers `null`. */
+	readonly currency: string;
 }
 
 /**
@@ -67,12 +93,24 @@ export function defineRail<Schema extends z.ZodType>(definition: {
 	detailsSchema: Schema;
 	fields: readonly RailField[];
 	format: (details: z.output<Schema>) => string;
+	encodeQr?: (details: z.output<Schema>, request: RailQrRequest) => string | null;
 }): PayoutRail {
+	const { detailsSchema, encodeQr } = definition;
+
 	return {
 		id: definition.id,
 		label: definition.label,
-		detailsSchema: definition.detailsSchema,
+		detailsSchema,
 		fields: definition.fields,
-		format: (details) => definition.format(definition.detailsSchema.parse(details))
+		format: (details) => definition.format(detailsSchema.parse(details)),
+		// Unlike `format`, this SWALLOWS details the schema rejects: a QR is an extra
+		// affordance beside the digits, so a row the rail can no longer read loses its
+		// code rather than throwing the surface that was about to say so.
+		encodeQr:
+			encodeQr &&
+			((details, request) => {
+				const parsed = detailsSchema.safeParse(details);
+				return parsed.success ? encodeQr(parsed.data, request) : null;
+			})
 	};
 }

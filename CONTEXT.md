@@ -124,3 +124,11 @@ An entry also carries **field descriptors** — the name, label and control of e
 of its fields, as plain data. That is what lets the owner's editor build an
 add/edit form for a rail it has never heard of, so adding a country stays a new
 registry entry and never a change to a screen.
+
+A rail may also carry a **QR encoder**, and most never will: `th_promptpay` has
+one, `th_bank_account` has none because no payload a bank and an account number
+produce is one a Thai banking app reads, and `other` has nothing to encode
+(ADR-0017). A caller asks for a payload and gets one or nothing, without asking
+which rail it holds. A code carries an amount but never a name — it proves nothing
+about who owns the account, so it never replaces the name check — and it is
+**obfuscation, not protection**: the proxy is inside it in plain digits.
