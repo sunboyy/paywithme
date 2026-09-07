@@ -203,7 +203,9 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 		// Alice (m1) is owed; Bob and Carol are paying. Only Alice's details belong
 		// on this page — nobody's account is loaded because they happen to be in the
 		// group.
-		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm1', userId: 'u1' }]);
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm1', userId: 'u1' }], {
+			promptViewerToAdd: true
+		});
 	});
 
 	it('loads nobody’s details when the group is all settled', async () => {
@@ -214,7 +216,7 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 
 		await load(makeLoadEvent());
 
-		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', []);
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [], { promptViewerToAdd: true });
 	});
 
 	it('hands the page the view keyed by member id', async () => {
@@ -239,6 +241,31 @@ describe('the creditor’s receiving details (issue #86; PLAN §8.4, §17.3–§
 
 		expect(listActiveInvites).toHaveBeenCalledWith({ userId: 'u1', groupId: 'g1' });
 		expect(result.inviteUrl).toBe('http://localhost/invite/tok_new');
+	});
+
+	it('does not read the viewer’s own profile when they owe rather than are owed', async () => {
+		// PLAN §17.4 case 3 only fires for a CREDITOR. Alice (u1/m1) is paying here,
+		// so her member is not among the targets and no `own-empty` can be produced.
+		getGroupBalances.mockResolvedValue([
+			{ memberId: 'm1', balance: -12000 },
+			{ memberId: 'm2', balance: 12000 }
+		]);
+
+		await load(makeLoadEvent());
+
+		expect(loadReceivingProfiles).toHaveBeenCalledWith('u1', [{ id: 'm2', userId: null }], {
+			promptViewerToAdd: true
+		});
+	});
+
+	it('opts into the case-3 prompt, because BEING A CREDITOR is what earns it', async () => {
+		// The targets are already filtered to creditors, so the flag can only ever
+		// reach the viewer on a row that says someone owes them money (PLAN §17.4).
+		balancesOwedToAlice();
+
+		await load(makeLoadEvent());
+
+		expect(loadReceivingProfiles.mock.calls[0][2]).toEqual({ promptViewerToAdd: true });
 	});
 
 	it('does not go looking for an invite link when every creditor has an account', async () => {

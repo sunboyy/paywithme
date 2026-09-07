@@ -602,6 +602,16 @@ describe('member detail — how to pay them (issue #86; PLAN §17.3–§17.4)', 
 		]);
 	});
 
+	it('never opts into the case-3 prompt — nothing here has earned the ask', async () => {
+		// The roster carries the caller's own member (m1 → u1) whatever their balance
+		// is, so "add how people should pay you" would fire for a debtor or a settled
+		// member. That is the onboarding step PLAN §17.4 rules out, so the option is
+		// not passed at all (issue #87) and the viewer's own blank stays `no-methods`.
+		await load(makeLoadEvent(AUTH_USER));
+
+		expect(loadReceivingProfiles.mock.calls[0][2]).toBeUndefined();
+	});
+
 	it('hands the page the view keyed by member id', async () => {
 		loadReceivingProfiles.mockResolvedValue({
 			m1: { state: 'no-methods' },

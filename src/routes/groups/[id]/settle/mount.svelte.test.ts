@@ -19,6 +19,12 @@ import type { PageData } from './$types';
 // The panel's own contents (first method, the fold, the name check, the empty
 // states) are specified in `lib/components/ReceivingMethodsPanel.svelte.test.ts`;
 // this file checks the wiring around it.
+//
+// Issue #87 adds the one case addressed to the VIEWER: when they are the creditor
+// and their own profile is empty, the same disclosure offers the link to
+// `/settings/receiving` (PLAN §17.4 case 3). The route decides that — `own-empty`
+// arrives in `data.receiving` — so what this file checks is that the page renders
+// it, and renders nothing like it for anyone else's blank.
 
 vi.mock('$app/paths', () => ({
 	resolve: (path: string, params?: Record<string, string>) =>
@@ -187,5 +193,66 @@ describe('when everyone is square', () => {
 		);
 
 		expect(container.querySelector('[data-testid="how-to-pay"]')).toBeNull();
+	});
+
+	it('does not ask a settled member for their bank details (issue #87)', () => {
+		// Nobody owes them anything, so there is no reason yet to care — and an ask
+		// with no reason behind it is the onboarding step PLAN §17.4 refuses to add.
+		const { container } = renderPage(
+			pageData({ suggestions: [], allSettled: true, receiving: {} })
+		);
+
+		expect(container.textContent).not.toMatch(/Add how people should pay you/);
+	});
+});
+
+describe('the viewer’s own empty profile (issue #87; PLAN §17.4 case 3)', () => {
+	/** The single suggestion, with the creditor's profile in whatever state. */
+	function withCreditorProfile(state: PageData['receiving'][string]) {
+		return renderPage(pageData({ receiving: { m1: state } }));
+	}
+
+	it('offers the editor link when the creditor is the viewer and has nothing recorded', () => {
+		const { getByText } = withCreditorProfile({ state: 'own-empty' });
+
+		const link = getByText(/Add how people should pay you/).closest('a');
+		expect(link?.getAttribute('href')).toBe('/settings/receiving');
+	});
+
+	it('opens that row on arrival, because nobody taps "How to pay <me>"', () => {
+		// The disclosure exists for the DEBTOR, who opens it when they are ready to
+		// pay. A creditor has no reason to open a fold about herself, so a prompt
+		// left behind that tap is a prompt its audience never sees — and this one is
+		// the whole adoption strategy (PLAN §17.4).
+		const { container } = withCreditorProfile({ state: 'own-empty' });
+
+		const details = container.querySelector<HTMLDetailsElement>('[data-testid="how-to-pay"]');
+		expect(details!.open).toBe(true);
+	});
+
+	it('leaves every other row closed, so the debtor’s view is unchanged', () => {
+		for (const state of [BANK, { state: 'no-methods' } as const, { state: 'unlinked' } as const]) {
+			const { container, unmount } = withCreditorProfile(state);
+
+			const details = container.querySelector<HTMLDetailsElement>('[data-testid="how-to-pay"]');
+			expect(details!.open, state.state).toBe(false);
+			unmount();
+		}
+	});
+
+	it('stops offering it once they have added a method', () => {
+		const { container } = withCreditorProfile(BANK);
+
+		expect(container.querySelector('[data-testid="receiving-own-empty"]')).toBeNull();
+		expect(container.textContent).not.toMatch(/Add how people should pay you/);
+	});
+
+	it('never shows it against somebody else’s empty profile', () => {
+		// The viewer is the DEBTOR here: the blank belongs to the person they owe,
+		// and nothing about it is theirs to fix.
+		const { container } = withCreditorProfile({ state: 'no-methods' });
+
+		expect(container.textContent).toMatch(/Nan hasn.t added a receiving method/);
+		expect(container.textContent).not.toMatch(/Add how people should pay you/);
 	});
 });

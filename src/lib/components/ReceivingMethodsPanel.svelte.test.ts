@@ -16,12 +16,14 @@ import type { ReceivingProfileView } from '$lib/receiving-method-view';
 //   - the name-check instruction is present whenever any method renders, as real
 //     text outside every fold (PLAN §17.2 — it is the only defence against a
 //     valid-but-wrong account number);
-//   - the three empty states say three different things (PLAN §17.4).
+//   - the empty states say different things (PLAN §17.4) — and the viewer's OWN
+//     empty profile says the only one of them that is actionable (issue #87).
 
 afterEach(cleanup);
 
 const INVITE_URL = 'https://pay.example/invite/tok_abc123';
 const MEMBERS_HREF = '/groups/g1/members';
+const RECEIVING_HREF = '/settings/receiving';
 
 /** An invented rail with the same two payer roles the shipped ones carry. */
 const FIRST: ReceivingProfileView & { state: 'methods' } = {
@@ -49,7 +51,13 @@ const FIRST: ReceivingProfileView & { state: 'methods' } = {
 
 function renderPanel(view: ReceivingProfileView, inviteUrl: string | null = INVITE_URL) {
 	return render(ReceivingMethodsPanel, {
-		props: { view, displayName: 'Nan', inviteUrl, invitesHref: MEMBERS_HREF }
+		props: {
+			view,
+			displayName: 'Nan',
+			inviteUrl,
+			invitesHref: MEMBERS_HREF,
+			receivingSettingsHref: RECEIVING_HREF
+		}
 	});
 }
 
@@ -186,6 +194,43 @@ describe('empty state 2 — linked, but nothing recorded (PLAN §17.4)', () => {
 		// a reminder the app cannot send.
 		expect(container.querySelector('[data-testid="receiving-invite-link"]')).toBeNull();
 		expect(text).not.toMatch(/remind|notify|ask them to add/i);
+	});
+});
+
+describe('empty state 3 — my own profile is empty (issue #87; PLAN §17.4)', () => {
+	it('offers the link to the editor instead of a sentence about someone else', () => {
+		const { container, getByText } = renderPanel({ state: 'own-empty' });
+
+		const prompt = container.querySelector('[data-testid="receiving-own-empty"]');
+		expect(prompt).not.toBeNull();
+
+		// The plan's own words — this link is the entire adoption strategy.
+		const link = getByText(/Add how people should pay you/).closest('a');
+		expect(link?.getAttribute('href')).toBe(RECEIVING_HREF);
+
+		// Addressed to the reader, not narrated about them in the third person.
+		expect(container.textContent).not.toMatch(/Nan hasn.t added/);
+	});
+
+	it('says nothing about inviting anyone — they are already here', () => {
+		const { container } = renderPanel({ state: 'own-empty' });
+
+		expect(container.querySelector('[data-testid="receiving-invite-link"]')).toBeNull();
+		expect(container.querySelector('[data-testid="receiving-name-check"]')).toBeNull();
+	});
+
+	it('is absent for every other state, so nobody is prompted about someone else’s blank', () => {
+		for (const view of [
+			{ state: 'no-methods' } as ReceivingProfileView,
+			{ state: 'unlinked' } as ReceivingProfileView,
+			FIRST
+		]) {
+			const { container, unmount } = renderPanel(view);
+
+			expect(container.querySelector('[data-testid="receiving-own-empty"]'), view.state).toBeNull();
+			expect(container.textContent, view.state).not.toMatch(/Add how people should pay you/);
+			unmount();
+		}
 	});
 });
 

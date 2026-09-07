@@ -33,6 +33,10 @@
 // The group's newest active invite link rides along for the unlinked-creditor
 // empty state (§17.4 case 1). Reading it is a read; CREATING one is a mutation
 // and stays on the members screen.
+//
+// ── The one surface that may ask the VIEWER for their own details (§17.4 #3) ──
+// Being a creditor here is exactly the condition the prompt needs, so this route
+// opts into `own-empty`. See the `loadReceivingProfiles` call below.
 
 import { formatAmount, getCurrency, type SeededCurrencyCode } from '$lib/money';
 import { requireGroupAccess } from '$lib/server/access';
@@ -116,10 +120,17 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 
 	// §17.4: only the members a suggestion names as the CREDITOR — nobody else's
 	// details belong on this page, and an all-settled group loads none at all.
+	//
+	// That same filter is what earns the §17.4 case 3 prompt (issue #87), which is
+	// why this is the one call site that opts in: the viewer can only be among these
+	// targets if a suggestion says someone owes them money, so `own-empty` — "add
+	// how people should pay you" — cannot reach a debtor or a settled member. A
+	// surface without this gate (the members roster) must NOT pass the flag.
 	const creditorIds = new Set(suggestions.map((s) => s.toMemberId));
 	const receiving = await loadReceivingProfiles(
 		user.id,
-		members.filter((m) => creditorIds.has(m.id)).map((m) => ({ id: m.id, userId: m.userId }))
+		members.filter((m) => creditorIds.has(m.id)).map((m) => ({ id: m.id, userId: m.userId })),
+		{ promptViewerToAdd: true }
 	);
 
 	// The invite link the unlinked-creditor empty state offers (§17.4 case 1,

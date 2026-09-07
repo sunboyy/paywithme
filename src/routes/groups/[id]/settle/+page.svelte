@@ -15,6 +15,14 @@
 	// A native `<details>` per row, closed by default: §17.3 says shown on demand,
 	// never printed inline, and a native disclosure keeps that true with JS off.
 	//
+	// When the creditor is the VIEWER and their own profile is empty, that same
+	// disclosure offers the link to `/settings/receiving` (issue #87; PLAN §17.4
+	// case 3) and starts OPEN. Closed-by-default is right for the other states —
+	// they exist for the debtor, who taps the row when they are ready to pay — but
+	// nobody taps "How to pay <their own name>" to read about themselves, and a
+	// prompt behind that tap is a prompt nobody sees. §17.4 wants it at the moment
+	// the screen says people owe them money, which is this row, on arrival.
+	//
 	// shadcn-svelte components are used from `$lib/components/ui/**` (CLI-generated;
 	// never hand-authored / edited here). Mirrors the transactions / members pages.
 	import { resolve } from '$app/paths';
@@ -37,6 +45,7 @@
 
 	const newPath = $derived(resolve('/groups/[id]/transactions/new', { id: data.group.id }));
 	const membersPath = $derived(resolve('/groups/[id]/members', { id: data.group.id }));
+	const receivingSettingsPath = resolve('/settings/receiving');
 
 	/**
 	 * Build the §8.4 "Settle up" prefill link for a suggestion: the add-transaction
@@ -205,9 +214,17 @@
 
 							<!-- §8.4 / §17.3: the account details the debtor needs in order to
 							     actually send the money. ON DEMAND — a native <details>, closed by
-							     default, never printed in the row itself. It opens without JS. -->
+							     default, never printed in the row itself. It opens without JS.
+							     The one row that starts open is the viewer's own empty profile
+							     (§17.4 case 3): that panel is addressed to them, not to a payer. -->
 							{#if receiving}
-								<details class="group border-t" data-testid="how-to-pay">
+								<!-- `open` is a one-way default, not a bound state: the viewer can still
+								     close it, and it is the browser's own <details> either way. -->
+								<details
+									class="group border-t"
+									data-testid="how-to-pay"
+									open={receiving.state === 'own-empty'}
+								>
 									<summary
 										class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-sm font-medium hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none [&::-webkit-details-marker]:hidden"
 									>
@@ -223,6 +240,7 @@
 											displayName={s.toDisplayName}
 											inviteUrl={data.inviteUrl}
 											invitesHref={membersPath}
+											receivingSettingsHref={receivingSettingsPath}
 										/>
 									</div>
 								</details>

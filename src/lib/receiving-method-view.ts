@@ -8,11 +8,11 @@
 // is already resolved for display — a select's OPTION LABEL rather than its stored
 // value — so the component never touches the registry and never branches on a rail.
 //
-// The three states below are the empty-state decision from PLAN §17.4, made on the
+// The states below are the empty-state decision from PLAN §17.4, made on the
 // server where the member row lives. `listForViewer` cannot make it: it answers []
 // both for a co-member with no methods and for a user the viewer shares no group
 // with, and the surfaces pick their copy from the MEMBER they are already looking
-// at. Case 3 ("I am the creditor and my own profile is empty") is a separate issue.
+// at.
 
 import type { RailFieldPayerRole } from './payout-rail-fields';
 
@@ -45,16 +45,22 @@ export type ReceivingMethodView = {
 };
 
 /**
- * A member's receiving details as this viewer may see them — one of the three
- * PLAN §17.4 outcomes.
+ * A member's receiving details as this viewer may see them — one of the PLAN
+ * §17.4 outcomes.
  *
  * - `unlinked` — the member is a participant slot with no account, so there will
  *   never be anything here until they join. The surface shows the invite link.
  * - `no-methods` — a real user who has not added one. Nothing to offer: v1 has no
  *   notifications, so the app must not imply it can nudge them.
+ * - `own-empty` — the same emptiness, except the member IS the viewer AND the
+ *   surface has established that someone owes them money. Another person's blank
+ *   profile is a dead end; the viewer's own is a thing they can fix in one tap, so
+ *   it gets the link instead of the sentence (PLAN §17.4 case 3). A surface with
+ *   no such gate leaves the viewer on `no-methods` — see `promptViewerToAdd`.
  * - `methods` — never empty; the first is the preferred one (PLAN §17.1).
  */
 export type ReceivingProfileView =
 	| { state: 'unlinked' }
 	| { state: 'no-methods' }
+	| { state: 'own-empty' }
 	| { state: 'methods'; methods: ReceivingMethodView[] };

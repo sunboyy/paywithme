@@ -112,3 +112,32 @@ describe('member detail', () => {
 		expect(container.textContent).toMatch(/Nan hasn.t added a receiving method\./);
 	});
 });
+
+describe('the viewer’s own row (issue #87; PLAN §17.4 case 3)', () => {
+	// `viewerUserId` is `u1`, so `m3` below is the person reading the page. The
+	// roster shows them whatever their balance is — nothing on this screen says
+	// anyone owes them money — so the prompt PLAN §17.4 reserves for that moment
+	// must not appear here. The route enforces it by not opting in; this is the
+	// rendered proof.
+	const OWN_ROW = {
+		members: [
+			{ id: 'm1', displayName: 'Nan', userId: 'u2', deactivatedAt: null, isLinked: true },
+			{ id: 'm2', displayName: 'Bob', userId: null, deactivatedAt: null, isLinked: false },
+			{ id: 'm3', displayName: 'Alice', userId: 'u1', deactivatedAt: null, isLinked: true }
+		],
+		receiving: {
+			m1: BANK,
+			m2: { state: 'unlinked' as const },
+			m3: { state: 'no-methods' as const }
+		}
+	};
+
+	it('is never asked for bank details just for being opened', () => {
+		const { container } = renderPage(pageData(OWN_ROW));
+
+		// Their own row IS rendered — and reads like anyone else's empty profile.
+		expect(container.textContent).toMatch(/Alice hasn.t added a receiving method\./);
+		expect(container.querySelector('[data-testid="receiving-own-empty"]')).toBeNull();
+		expect(container.textContent).not.toMatch(/Add how people should pay you/);
+	});
+});

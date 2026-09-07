@@ -14,13 +14,22 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 //      unlinked slot is `unlinked` without a read, and a viewer who shares no
 //      group with the target reads [] and lands on the same `no-methods` answer as
 //      a co-member with nothing recorded, so the two stay indistinguishable.
+//   3. THE VIEWER'S OWN PROFILE is the one target read with `listOwn`, and an
+//      empty one is `own-empty` — the state that becomes a link rather than a
+//      sentence (issue #87; PLAN §17.4 case 3) — but ONLY where the caller opted
+//      in. Off by default is the whole safeguard: a surface that has not
+//      established the viewer is owed money would be asking for bank details with
+//      nothing behind the ask, which is the onboarding step PLAN §17.4 refuses.
 //
 // The rail registry is REAL here: rendering a stored row is exactly what this
 // module does, and mocking the rails would leave the interesting part untested.
 
-const { listForViewer } = vi.hoisted(() => ({ listForViewer: vi.fn() }));
+const { listForViewer, listOwn } = vi.hoisted(() => ({
+	listForViewer: vi.fn(),
+	listOwn: vi.fn()
+}));
 
-vi.mock('./receiving-methods', () => ({ listForViewer }));
+vi.mock('./receiving-methods', () => ({ listForViewer, listOwn }));
 
 import { loadReceivingProfiles, toMethodView, toProfileView } from './receiving-view';
 
@@ -51,6 +60,8 @@ const PROMPTPAY = row({
 beforeEach(() => {
 	listForViewer.mockReset();
 	listForViewer.mockResolvedValue([]);
+	listOwn.mockReset();
+	listOwn.mockResolvedValue([]);
 });
 
 describe('toMethodView', () => {
@@ -121,6 +132,16 @@ describe('toProfileView', () => {
 		expect(view.state).toBe('methods');
 		expect(view.state === 'methods' && view.methods.map((m) => m.id)).toEqual(['rm1', 'rm2']);
 	});
+
+	it('reports the VIEWER’s own empty profile as `own-empty` when asked (PLAN §17.4 case 3)', () => {
+		// Same emptiness, different reader: this one can fix it.
+		expect(toProfileView([], true)).toEqual({ state: 'own-empty' });
+	});
+
+	it('says nothing special about the viewer’s own profile once it has a method', () => {
+		// Seeing your own details here is seeing what the payer sees — no prompt.
+		expect(toProfileView([row()], true).state).toBe('methods');
+	});
 });
 
 describe('loadReceivingProfiles', () => {
@@ -161,6 +182,62 @@ describe('loadReceivingProfiles', () => {
 		]);
 
 		expect(listForViewer).toHaveBeenCalledTimes(1);
+	});
+
+	it('reads the viewer’s OWN profile as its owner, not as a stranger might', async () => {
+		// Whether I can see myself is not the question — the prompt claims my profile
+		// is empty, so it has to be my profile that was read.
+		await loadReceivingProfiles('u1', [{ id: 'm1', userId: 'u1' }], {
+			promptViewerToAdd: true
+		});
+
+		expect(listOwn).toHaveBeenCalledWith('u1');
+		expect(listForViewer).not.toHaveBeenCalled();
+	});
+
+	it('asks the viewer to add their details only where the caller opted in', async () => {
+		const profiles = await loadReceivingProfiles('u1', [{ id: 'm1', userId: 'u1' }], {
+			promptViewerToAdd: true
+		});
+
+		expect(profiles.m1).toEqual({ state: 'own-empty' });
+	});
+
+	it('does NOT ask by default, so an ungated surface cannot nag the viewer', async () => {
+		// The members roster lists everyone regardless of balance. Nothing there says
+		// anyone owes the viewer anything, so their own blank reads like any other
+		// blank — PLAN §17.4 rules out the unprompted ask.
+		const profiles = await loadReceivingProfiles('u1', [{ id: 'm1', userId: 'u1' }]);
+
+		expect(profiles.m1).toEqual({ state: 'no-methods' });
+		// Still read as its owner — the opt-in governs the COPY, not the query.
+		expect(listOwn).toHaveBeenCalledWith('u1');
+	});
+
+	it('leaves everyone else’s empty profile as the dead-end `no-methods`', async () => {
+		// Only the viewer gets the "add yours" link; a co-member's blank is `no-methods`
+		// in the same call.
+		const profiles = await loadReceivingProfiles(
+			'u1',
+			[
+				{ id: 'm1', userId: 'u1' },
+				{ id: 'm3', userId: 'u2' }
+			],
+			{ promptViewerToAdd: true }
+		);
+
+		expect(profiles.m1).toEqual({ state: 'own-empty' });
+		expect(profiles.m3).toEqual({ state: 'no-methods' });
+	});
+
+	it('hands the viewer their own methods when they have some', async () => {
+		listOwn.mockResolvedValue([row({ userId: 'u1' })]);
+
+		const profiles = await loadReceivingProfiles('u1', [{ id: 'm1', userId: 'u1' }], {
+			promptViewerToAdd: true
+		});
+
+		expect(profiles.m1.state).toBe('methods');
 	});
 
 	it('returns an entry for every target, so a surface never renders a hole', async () => {

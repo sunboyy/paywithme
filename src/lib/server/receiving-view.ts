@@ -6,7 +6,7 @@
 // detail — the same, on demand"), and two copies of the empty-state decision is
 // two places for them to drift.
 //
-// ── The only read path is `listForViewer` ────────────────────────────────────
+// ── Somebody else is only ever read through `listForViewer` ─────────────────
 // Nothing here touches `receiving_method` directly. `listForViewer` is what
 // re-derives visibility from shared co-membership on every read (PLAN §17.3), and
 // routing around it is how "leaving a group revokes it" would quietly stop being
@@ -19,11 +19,26 @@
 // about at all — the answer is an invite, not data entry (PLAN §17.1). That is why
 // `unlinked` is decided here, before any read.
 //
+// ── The viewer's own profile is read with `listOwn` (PLAN §17.4 case 3) ──────
+// The one target that is not somebody else is the viewer. Visibility is not the
+// question there — nobody has to share a group with themselves to be told their
+// own profile is empty — and the prompt claims something about MY profile, not
+// about what I happen to be able to see of it. So the self case goes through the
+// owner read.
+//
+// Whether an empty answer then becomes `own-empty` — the "add how people should
+// pay you" prompt — is OPT-IN per call site, and off by default. PLAN §17.4 is
+// specific about when the ask is earned: the viewer is looking at a screen that
+// says people owe them money. A surface that has not established that (the members
+// roster, which lists everyone regardless of balance) would be asking for bank
+// details before there is a reason to give them, which is the onboarding step the
+// plan refuses to add. Off by default means a new surface has to say it qualifies.
+//
 // Values are RESOLVED FOR DISPLAY here (a select's option label, not its stored
 // value) so the component never sees the registry.
 
 import { findRail, parseRailDetails } from './payout-rails';
-import { listForViewer, type ReceivingMethod } from './receiving-methods';
+import { listForViewer, listOwn, type ReceivingMethod } from './receiving-methods';
 import type { RailField } from '$lib/payout-rail-fields';
 import type {
 	ReceivingFieldView,
@@ -38,6 +53,21 @@ export type ReceivingTarget = {
 	userId: string | null;
 };
 
+/** Per-surface choices about what an empty profile is allowed to say. */
+export type ReceivingProfileOptions = {
+	/**
+	 * May the viewer's OWN empty profile answer `own-empty` instead of
+	 * `no-methods` (PLAN §17.4 case 3)?
+	 *
+	 * Only a surface that has already established the viewer is OWED money may
+	 * turn this on — on the settle screen, that is the creditor gate the caller
+	 * applies before it picks its targets. Everywhere else the viewer's own blank
+	 * reads like everyone else's, because an unearned ask is the onboarding step
+	 * PLAN §17.4 rules out.
+	 */
+	promptViewerToAdd?: boolean;
+};
+
 /**
  * Build one {@link ReceivingProfileView} per target member, keyed by MEMBER id.
  *
@@ -47,7 +77,8 @@ export type ReceivingTarget = {
  */
 export async function loadReceivingProfiles(
 	viewerUserId: string,
-	targets: readonly ReceivingTarget[]
+	targets: readonly ReceivingTarget[],
+	{ promptViewerToAdd = false }: ReceivingProfileOptions = {}
 ): Promise<Record<string, ReceivingProfileView>> {
 	const userIds = [
 		...new Set(targets.map((t) => t.userId).filter((id): id is string => id != null))
@@ -55,10 +86,13 @@ export async function loadReceivingProfiles(
 
 	const profiles = new Map<string, ReceivingProfileView>(
 		await Promise.all(
-			userIds.map(
-				async (userId) =>
-					[userId, toProfileView(await listForViewer(viewerUserId, userId))] as const
-			)
+			userIds.map(async (userId) => {
+				const isViewer = userId === viewerUserId;
+				const methods = isViewer
+					? await listOwn(userId)
+					: await listForViewer(viewerUserId, userId);
+				return [userId, toProfileView(methods, isViewer && promptViewerToAdd)] as const;
+			})
 		)
 	);
 
@@ -70,9 +104,20 @@ export async function loadReceivingProfiles(
 	);
 }
 
-/** A linked user's methods as the payer-facing view. Empty list → `no-methods`. */
-export function toProfileView(methods: readonly ReceivingMethod[]): ReceivingProfileView {
-	if (methods.length === 0) return { state: 'no-methods' };
+/**
+ * A linked user's methods as the payer-facing view.
+ *
+ * An empty list is `no-methods` — or `own-empty` when `promptViewerToAdd` says
+ * this is the viewer's own profile ON A SURFACE THAT HAS EARNED THE ASK (PLAN
+ * §17.4 case 3). It changes nothing about a profile that HAS methods: seeing your
+ * own details on the settle screen is seeing exactly what the person paying you
+ * sees.
+ */
+export function toProfileView(
+	methods: readonly ReceivingMethod[],
+	promptViewerToAdd = false
+): ReceivingProfileView {
+	if (methods.length === 0) return { state: promptViewerToAdd ? 'own-empty' : 'no-methods' };
 	return { state: 'methods', methods: methods.map(toMethodView) };
 }
 

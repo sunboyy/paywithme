@@ -27,9 +27,10 @@
 	// Copy is progressive enhancement: every value is real selectable text
 	// (`select-all`), so a no-JS payer copies it by hand.
 	//
-	// The panel names the member in every empty state and does not care whether the
-	// viewer IS that member — the viewer's own empty profile (PLAN §17.4 case 3) is
-	// its own issue, and it changes what this says, not where it says it.
+	// The panel names the member in every empty state but one: when the empty profile
+	// is the VIEWER'S OWN (PLAN §17.4 case 3), the same blank turns from a dead end
+	// into a one-tap fix, so it is addressed to them and carries the link to the
+	// editor. Which of the two it is, is decided on the server (`own-empty`).
 	import { Button } from '$lib/components/ui/button';
 	import CopyIcon from '@lucide/svelte/icons/copy';
 	import CheckIcon from '@lucide/svelte/icons/check';
@@ -40,16 +41,19 @@
 		view,
 		displayName,
 		inviteUrl = null,
-		invitesHref
+		invitesHref,
+		receivingSettingsHref
 	}: {
 		/** The member's receiving details, as this viewer may see them. */
 		view: ReceivingProfileView;
-		/** Whose details these are — named in every empty state. */
+		/** Whose details these are — named in every empty state but `own-empty`. */
 		displayName: string;
 		/** The group's newest active invite link, or null when it has none (PLAN §6.2). */
 		inviteUrl?: string | null;
 		/** Where invite links are created and revoked — the members screen. */
 		invitesHref: string;
+		/** The viewer's own receiving editor — `/settings/receiving` (PLAN §17.4). */
+		receivingSettingsHref: string;
 	} = $props();
 
 	/** Which value was copied last, so one button at a time reads "Copied". */
@@ -167,6 +171,23 @@
 				Create an invite link
 			</Button>
 		{/if}
+	</div>
+{:else if view.state === 'own-empty'}
+	<!-- Empty state 3 (PLAN §17.4): this profile is the viewer's own. It is the
+	     whole adoption strategy — the one moment they are looking at a screen that
+	     says someone owes them money, which is the only time bank details are worth
+	     typing. So it is a link to the editor, not the sentence a third party gets. -->
+	<div class="space-y-2" data-testid="receiving-own-empty">
+		<p class="text-sm text-muted-foreground">
+			You haven’t added a receiving method, so there’s nothing here for them to pay into.
+		</p>
+		<Button
+			variant="link"
+			href={receivingSettingsHref}
+			class="h-auto min-h-11 justify-start p-0 text-sm"
+		>
+			Add how people should pay you →
+		</Button>
 	</div>
 {:else if view.state === 'no-methods'}
 	<!-- Empty state 2 (PLAN §17.4): exactly one sentence. v1 has no notifications,

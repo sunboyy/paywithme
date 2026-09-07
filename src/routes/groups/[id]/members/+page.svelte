@@ -110,6 +110,13 @@
 	// create control further down this same page.
 	const newestInviteUrl = $derived(data.invites.length ? inviteUrl(data.invites[0].token) : null);
 	const membersPath = $derived(resolve('/groups/[id]/members', { id: data.group.id }));
+	// The panel accepts every §17.4 empty state, so it is handed the editor link —
+	// but this screen never produces `own-empty` (issue #87): the roster lists every
+	// member regardless of balance, so nothing here has established that anyone owes
+	// the viewer money, and asking for their bank details on that basis is the
+	// onboarding step PLAN §17.4 rules out. The gate is the `promptViewerToAdd`
+	// option this route deliberately does not pass.
+	const receivingSettingsPath = resolve('/settings/receiving');
 
 	// Absolute + relative expiry text (PLAN §6.2 — show the expiry).
 	const relativeFormatter =
@@ -259,6 +266,7 @@
 												displayName={member.displayName}
 												inviteUrl={newestInviteUrl}
 												invitesHref={membersPath}
+												receivingSettingsHref={receivingSettingsPath}
 											/>
 										</div>
 										<Separator />
