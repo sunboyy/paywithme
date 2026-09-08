@@ -44,7 +44,8 @@
 // changes — and none of them contains the word "Capture", which is internal
 // vocabulary (CONTEXT.md): they say "not recorded yet".
 
-import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, count, eq, exists, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { QueryBuilder } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { db } from './db';
 import { captures } from './db/captures-schema';
@@ -279,19 +280,109 @@ export async function createCapture({
 }
 
 /**
- * "Open" — the ONE definition of what the tray shows and what the unrecorded count
- * counts: `resolved_at IS NULL AND discarded_at IS NULL`.
+ * A database-less query builder, for the correlated subquery in {@link reopenedArm}.
+ * `db` is a lazy proxy and would compile the same SQL, but a predicate is pure SQL
+ * and should not have to reach for a connection to say so — and this keeps
+ * {@link openCapturePredicate} compilable in a unit test that stubs `db` out.
+ */
+const qb = new QueryBuilder();
+
+/**
+ * ARM 1 of "open" — a note NOBODY HAS STAMPED: `resolved_at IS NULL AND
+ * discarded_at IS NULL`.
  *
  * Both nulls matter: a discarded Capture was never resolved, so testing
- * `resolved_at` alone would keep showing (and counting) it forever. This predicate
- * is exactly the partial index's — see `captures-schema.ts`.
- *
- * Exported so the two recall surfaces (§7.7) can be proved to share it rather than
- * to agree by inspection: a tray and a count that disagree is a badge saying "3"
- * over a list of two.
+ * `resolved_at` alone would keep showing (and counting) it forever. This is exactly
+ * the partial index `captures_group_id_open_idx` (see `captures-schema.ts`), which
+ * is why every reader below applies it as its OWN predicate rather than OR-ing it
+ * with arm 2 — an OR'd query can use neither partial index.
  */
-export function openCapturePredicate() {
+function neverStampedArm(): SQL | undefined {
 	return and(isNull(captures.resolvedAt), isNull(captures.discardedAt));
+}
+
+/**
+ * ARM 2 of "open" — a note that WAS recorded, into a transaction that has since
+ * been SOFT-DELETED (issue #91).
+ *
+ * §7.7 is explicit that "resolve is a stamp, not a delete", so a soft delete
+ * clears NOTHING here: `resolved_transaction_id` and `resolved_at` still stand, and
+ * the audit log still holds every recording. What changes is only what the stamp
+ * MEANS while the transaction it points at is deleted — the expense is in no
+ * balance, so the note is back to being a thing nobody has recorded, and it belongs
+ * in the tray and the count again. Restoring the transaction closes it again, with
+ * no write on either side. (A HARD delete is the other case and stays closed: the
+ * FK's `set null` leaves `resolved_at` standing with no link, and no link is not a
+ * deleted transaction.)
+ *
+ * `narrowTransactions` is a REDUNDANT qual on the transaction side — the caller's
+ * own group filter, restated inside the subquery. It changes no row: a resolve
+ * verifies that the transaction is in the Capture's group, so a note in group G can
+ * only point into G. It changes the PLAN, which is the whole reason the arm is
+ * shaped this way. With it, Postgres drives from `transactions_group_id_deleted_idx`
+ * — that group's soft-deleted transactions, usually none — and probes
+ * `captures_resolved_transaction_id_idx` for the note pointing at each. Without it,
+ * it reads every note in the group and tests them one by one, which is the scan the
+ * partial index exists to prevent. Omit it only where there is nothing to narrow
+ * (a lookup by capture id, which is a primary-key hit anyway).
+ */
+function reopenedArm(narrowTransactions?: SQL): SQL | undefined {
+	return and(
+		isNull(captures.discardedAt),
+		exists(
+			qb
+				.select({ one: sql`1` })
+				.from(transactions)
+				.where(
+					and(
+						eq(transactions.id, captures.resolvedTransactionId),
+						isNotNull(transactions.deletedAt),
+						narrowTransactions
+					)
+				)
+		)
+	);
+}
+
+/**
+ * "Open" — the ONE definition of what the tray shows and what the unrecorded count
+ * counts: {@link neverStampedArm} OR {@link reopenedArm}.
+ *
+ * The two arms are DISJOINT (arm 1 has no `resolved_at`, arm 2 must have one), so a
+ * reader may take them together as this predicate or run them as two queries and
+ * concatenate — the answer is the same either way, and no row is counted twice.
+ * Which shape a reader picks is a question about indexes, not about meaning: this
+ * OR'd form is for reading ONE row by id (a primary-key hit, where the plan is
+ * settled before the predicate is looked at), and the tray and the count use the
+ * arms separately so each keeps its index.
+ *
+ * Exported so the recall surfaces (§7.7) can be proved to share one definition
+ * rather than to agree by inspection: a tray and a count that disagree is a badge
+ * saying "3" over a list of two.
+ */
+export function openCapturePredicate(): SQL | undefined {
+	return or(neverStampedArm(), reopenedArm());
+}
+
+/**
+ * Newest first, mirroring the SQL the tray used when "open" was a single indexed
+ * predicate: real-world day, then the moment the note was written, then `id` as the
+ * tie-break that keeps the order stable across reads.
+ *
+ * In JS because the tray now reads its two arms as two queries; sorting their
+ * concatenation here is one ordering rule for both, where an `ORDER BY` repeated
+ * per arm plus a merge would be two. The tray is a queue to empty — its whole
+ * length is already in memory, and always was.
+ *
+ * A re-opened note therefore returns to its OWN place in the tray (its
+ * `captured_for`), not to the top: the day the expense happened has not changed.
+ */
+function newestFirst(a: Capture, b: Capture): number {
+	if (a.capturedFor !== b.capturedFor) return a.capturedFor < b.capturedFor ? 1 : -1;
+	const byWritten = b.createdAt.getTime() - a.createdAt.getTime();
+	if (byWritten !== 0) return byWritten;
+	if (a.id === b.id) return 0;
+	return a.id < b.id ? 1 : -1;
 }
 
 /**
@@ -302,17 +393,26 @@ export function openCapturePredicate() {
  * "Sur — dinner, ~฿1,200, not recorded yet" is what stops the second person who
  * paid part of that dinner entering it twice.
  *
- * Newest real-world day first, then newest entry, with the `id` tie-break that
- * keeps the order stable across reads rather than leaving it to the planner.
+ * ONE ARM PER QUERY (issue #91), concatenated and ordered by {@link newestFirst}.
+ * The arms are disjoint, so the concatenation is exactly the open set with nothing
+ * counted twice; they are read separately because each has its own index and an
+ * OR'd single query can use neither (see {@link reopenedArm}). The second arm is
+ * the cheap one in the ordinary case: a group that has deleted no transaction has
+ * nothing for it to find.
  */
 export async function listOpenCaptures(userId: string, groupId: string): Promise<Capture[]> {
 	await assertGroupAccess(userId, groupId);
 
-	return db
-		.select()
-		.from(captures)
-		.where(and(eq(captures.groupId, groupId), openCapturePredicate()))
-		.orderBy(desc(captures.capturedFor), desc(captures.createdAt), desc(captures.id));
+	const inGroup = eq(captures.groupId, groupId);
+	const [neverStamped, reopened] = await Promise.all([
+		db.select().from(captures).where(and(inGroup, neverStampedArm())),
+		db
+			.select()
+			.from(captures)
+			.where(and(inGroup, reopenedArm(eq(transactions.groupId, groupId))))
+	]);
+
+	return [...neverStamped, ...reopened].sort(newestFirst);
 }
 
 /**
@@ -329,13 +429,22 @@ export async function listOpenCaptures(userId: string, groupId: string): Promise
  * `captures_group_id_open_idx` exists precisely so it never scans a group's whole
  * history of already-recorded rows.
  *
- * AUTHORIZATION (§12) is the `members` + `groups` INNER JOIN, which is the batched
- * form of `userHasGroupAccess` — an ACTIVE member link in a group that is not
- * soft-deleted. Both halves are there because that check has both: a group the
- * caller has no live member row in, and a soft-deleted group, each contribute no
- * row, so they are simply absent from the map rather than reported as 0. Absent and
- * zero are the same to a caller that reads `?? 0`, and the distinction never leaks
- * that a group exists.
+ * ONE QUERY PER ARM (issue #91), summed here. Two round trips instead of one, and
+ * the trade is deliberate: keeping both arms in a single OR'd query costs the
+ * partial index — every page load would then read every note the group has ever
+ * recorded — while each arm on its own is an index scan of something small (see
+ * {@link reopenedArm}). Both arms are batched across ALL the caller's groups, so
+ * this is two queries for a whole dashboard, not two per card. Summing is safe
+ * because the arms are disjoint; a group with nothing open contributes no row to
+ * either.
+ *
+ * AUTHORIZATION (§12) is the `members` + `groups` INNER JOIN in {@link countArm},
+ * which is the batched form of `userHasGroupAccess` — an ACTIVE member link in a
+ * group that is not soft-deleted. Both halves are there because that check has
+ * both: a group the caller has no live member row in, and a soft-deleted group,
+ * each contribute no row, so they are simply absent from the map rather than
+ * reported as 0. Absent and zero are the same to a caller that reads `?? 0`, and
+ * the distinction never leaks that a group exists.
  */
 export async function countOpenCapturesByGroup({
 	userId,
@@ -347,7 +456,23 @@ export async function countOpenCapturesByGroup({
 	const counts = new Map<string, number>();
 	if (groupIds.length === 0) return counts;
 
-	const rows = await db
+	const ids = [...groupIds];
+	const arms = await Promise.all([
+		countArm(userId, ids, neverStampedArm()),
+		countArm(userId, ids, reopenedArm(inArray(transactions.groupId, ids)))
+	]);
+
+	for (const row of arms.flat()) counts.set(row.groupId, (counts.get(row.groupId) ?? 0) + row.open);
+	return counts;
+}
+
+/** One arm of the unrecorded count, access-gated and grouped. See above. */
+function countArm(
+	userId: string,
+	groupIds: string[],
+	arm: SQL | undefined
+): Promise<{ groupId: string; open: number }[]> {
+	return db
 		.select({ groupId: captures.groupId, open: count() })
 		.from(captures)
 		.innerJoin(
@@ -359,11 +484,8 @@ export async function countOpenCapturesByGroup({
 			)
 		)
 		.innerJoin(groups, and(eq(groups.id, captures.groupId), isNull(groups.deletedAt)))
-		.where(and(inArray(captures.groupId, [...groupIds]), openCapturePredicate()))
+		.where(and(inArray(captures.groupId, groupIds), arm))
 		.groupBy(captures.groupId);
-
-	for (const row of rows) counts.set(row.groupId, row.open);
-	return counts;
 }
 
 /**
@@ -379,9 +501,16 @@ export async function countOpenCapturesByGroup({
  * ledger could be pointed at another group's row by id, turning the trail into a
  * cross-group reference nobody can follow.
  *
- * The UPDATE carries the open predicate itself (rather than trusting a preceding
- * read), so two members resolving the same Capture at the same moment cannot both
- * succeed: the loser affects zero rows and gets {@link CaptureNotOpenError}.
+ * The UPDATE carries {@link openCapturePredicate} itself (rather than trusting a
+ * preceding read), so two members resolving the same Capture at the same moment
+ * cannot both succeed: the loser affects zero rows and gets
+ * {@link CaptureNotOpenError}.
+ *
+ * That predicate is also why a RE-OPENED note (issue #91 — recorded, then its
+ * transaction soft-deleted) can be recorded again: it is open, so the tray's
+ * "Record it" works on it like any other note, and the stamp moves to the
+ * transaction that now holds the expense. The old link is not lost — the audit log
+ * holds a `resolve` row for each recording, with its transaction id.
  */
 export async function resolveCapture({
 	userId,
@@ -447,14 +576,7 @@ async function stampCaptureResolved(
 	const [row] = await tx
 		.update(captures)
 		.set({ resolvedTransactionId: transactionId, resolvedAt: new Date() })
-		.where(
-			and(
-				eq(captures.id, captureId),
-				eq(captures.groupId, groupId),
-				isNull(captures.resolvedAt),
-				isNull(captures.discardedAt)
-			)
-		)
+		.where(and(eq(captures.id, captureId), eq(captures.groupId, groupId), openCapturePredicate()))
 		.returning();
 
 	if (!row) throw await closedCaptureError(captureId, groupId, tx);
@@ -477,7 +599,9 @@ async function stampCaptureResolved(
  * ONE open Capture, for the prefill "Record it" opens (PLAN §7.7 "Resolving").
  *
  * Returns `null` — never throws — for a capture id that is missing, another
- * group's, or already resolved/discarded, because the caller is a `load` seeding a
+ * group's, or closed — recorded into a live transaction, or discarded (it carries
+ * {@link openCapturePredicate}, so a note whose transaction was soft-deleted is
+ * open and IS returned) — because the caller is a `load` seeding a
  * form from an UNTRUSTED query parameter: a stale link should land on the ordinary
  * blank add-transaction form, not on an error page. (The `?capture=` id is only a
  * pointer at a row; nothing about it is trusted, and the resolve itself re-checks
@@ -586,14 +710,7 @@ export async function discardCapture({
 		const [row] = await tx
 			.update(captures)
 			.set({ discardedAt: new Date() })
-			.where(
-				and(
-					eq(captures.id, captureId),
-					eq(captures.groupId, groupId),
-					isNull(captures.resolvedAt),
-					isNull(captures.discardedAt)
-				)
-			)
+			.where(and(eq(captures.id, captureId), eq(captures.groupId, groupId), openCapturePredicate()))
 			.returning();
 
 		if (!row) throw await closedCaptureError(captureId, groupId, tx);
@@ -621,6 +738,15 @@ export async function discardCapture({
  * leak anything: a missing id and another group's id are one `CaptureNotFoundError`
  * (404), while a Capture this member can genuinely see, already closed by someone
  * else, is a `CaptureNotOpenError` (409) that says which ending it got.
+ *
+ * `discarded_at` is tested FIRST, and the order is load-bearing (issue #91). The
+ * two stamps used to be mutually exclusive — a discard required `resolved_at IS
+ * NULL` — but a re-opened note can now be given up on, so
+ * resolve → soft-delete → discard leaves a row carrying BOTH. `resolved_at` is
+ * never cleared and `discarded_at` is never cleared either, so the discard is the
+ * later and terminal fact: reading `resolved_at` first would tell whoever taps that
+ * row next "someone already recorded this" and send them looking for a transaction
+ * that represents nothing.
  */
 async function closedCaptureError(
 	captureId: string,
@@ -634,5 +760,5 @@ async function closedCaptureError(
 		.limit(1);
 
 	if (!existing) return new CaptureNotFoundError();
-	return new CaptureNotOpenError(existing.resolvedAt !== null ? 'resolved' : 'discarded');
+	return new CaptureNotOpenError(existing.discardedAt !== null ? 'discarded' : 'resolved');
 }

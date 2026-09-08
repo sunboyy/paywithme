@@ -1,4 +1,4 @@
-import { isNull, sql } from 'drizzle-orm';
+import { isNotNull, isNull, sql } from 'drizzle-orm';
 import { pgTable, text, bigint, date, timestamp, index } from 'drizzle-orm/pg-core';
 import { user } from './auth-schema';
 import { groups } from './groups-schema';
@@ -77,6 +77,15 @@ export const captures = pgTable(
 		// Capture RESOLVED — `resolved_at` still stands, so it does not silently
 		// reappear in the tray — with a dangling link rather than dragging a row that
 		// is "never hard-deleted" down with it.
+		//
+		// A SOFT delete is the opposite case and the one v1 actually has (issue #91).
+		// `transactions.deleted_at` touches nothing here, and it must not: the note
+		// stays stamped, but it counts as OPEN AGAIN for as long as the transaction it
+		// points at is soft-deleted, so it returns to the tray instead of leaving the
+		// expense neither on the ledger nor in the queue. Restoring the transaction
+		// closes it again. That is a READ-TIME rule — see `openCapturePredicate()` in
+		// `lib/server/captures.ts` — which is why nothing on the delete path writes
+		// here.
 		resolvedTransactionId: text('resolved_transaction_id').references(() => transactions.id, {
 			onDelete: 'set null'
 		}),
@@ -97,15 +106,33 @@ export const captures = pgTable(
 		// open set is a queue to empty — the index stays the size of what's actually
 		// pending.
 		//
-		// "Open" is `resolved_at IS NULL AND discarded_at IS NULL`, matching
-		// `listOpenCaptures` exactly. Both nulls are required: a discarded Capture was
-		// never resolved, so `resolved_at IS NULL` alone would keep counting it.
+		// The predicate is the NEVER-STAMPED arm of "open" —
+		// `resolved_at IS NULL AND discarded_at IS NULL`. Both nulls are required: a
+		// discarded Capture was never resolved, so `resolved_at IS NULL` alone would
+		// keep counting it.
+		//
+		// It is one of TWO arms since issue #91: a note whose transaction has since
+		// been soft-deleted is open again, and no partial index can say that, because
+		// the fact lives in another table. That arm is served by the two indexes below
+		// instead, and `openCapturePredicate()` in `lib/server/captures.ts` is where
+		// the two are joined into one definition.
 		//
 		// Written as an `sql` template rather than `and(...)`, whose return type is
 		// `SQL | undefined` (it collapses when every argument is undefined) and so
 		// doesn't fit `.where()`. The emitted predicate is identical.
 		index('captures_group_id_open_idx')
 			.on(table.groupId)
-			.where(sql`(${isNull(table.resolvedAt)} and ${isNull(table.discardedAt)})`)
+			.where(sql`(${isNull(table.resolvedAt)} and ${isNull(table.discardedAt)})`),
+		// The RE-OPENED arm's other half (issue #91): given a soft-deleted transaction
+		// — found through `transactions_group_id_deleted_idx`, which is the small set —
+		// this finds the note that points at it. Without it, "is this transaction's note
+		// back in the tray?" reads the group's whole recorded history on every page
+		// load, which is exactly what the partial index above exists to avoid.
+		//
+		// Partial on the link being set, so an unresolved note (most of the table, and
+		// all of the open queue) is not indexed here at all.
+		index('captures_resolved_transaction_id_idx')
+			.on(table.resolvedTransactionId)
+			.where(isNotNull(table.resolvedTransactionId))
 	]
 );

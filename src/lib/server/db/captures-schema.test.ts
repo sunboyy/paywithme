@@ -142,9 +142,15 @@ describe('captures drizzle table', () => {
 		expect(foreignKeys.some((fk) => fk.reference().columns[0].name === 'currency')).toBe(false);
 	});
 
-	it('indexes (group_id, resolved_at) plus a PARTIAL index over open rows', () => {
+	it('indexes (group_id, resolved_at) plus the two PARTIAL indexes "open" needs', () => {
 		const { indexes } = getTableConfig(captures);
-		expect(indexes).toHaveLength(2);
+		// SET EQUALITY, by name: an index that appears without a reason, or one that
+		// quietly disappears, is a query plan changing behind the count's back.
+		expect(indexes.map((i) => i.config.name).sort()).toEqual([
+			'captures_group_id_open_idx',
+			'captures_group_id_resolved_at_idx',
+			'captures_resolved_transaction_id_idx'
+		]);
 
 		const listing = indexes.find((i) => i.config.name === 'captures_group_id_resolved_at_idx');
 		expect(listing, 'PLAN §9 names this index').toBeDefined();
@@ -154,6 +160,7 @@ describe('captures drizzle table', () => {
 		]);
 		expect(listing!.config.where).toBeUndefined();
 
+		// ARM 1 of "open" (PLAN §9: a partial index on open rows for the count).
 		const open = indexes.find((i) => i.config.name === 'captures_group_id_open_idx');
 		expect(open, 'PLAN §9: a partial index on open rows for the count').toBeDefined();
 		expect(open!.config.columns.map((col) => (col as { name?: string }).name)).toEqual([
@@ -162,6 +169,16 @@ describe('captures drizzle table', () => {
 		// PARTIAL is the whole point — the resolved history grows forever, the open set
 		// is a queue to empty.
 		expect(open!.config.where).toBeDefined();
+
+		// ARM 2's half on this side (issue #91): given a soft-deleted transaction, find
+		// the note pointing at it. Partial on the link being set, so the unresolved rows
+		// — most of the table, and all of the open queue — are not in it.
+		const link = indexes.find((i) => i.config.name === 'captures_resolved_transaction_id_idx');
+		expect(link, 'issue #91: the re-open arm probes this index').toBeDefined();
+		expect(link!.config.columns.map((col) => (col as { name?: string }).name)).toEqual([
+			'resolved_transaction_id'
+		]);
+		expect(link!.config.where).toBeDefined();
 	});
 
 	it('is re-exported from the schema entry point', () => {
@@ -227,5 +244,42 @@ describe('captures migration', () => {
 		expect(ddl).toMatch(
 			/CREATE INDEX "captures_group_id_open_idx" ON "captures" USING btree \("group_id"\) WHERE .*resolved_at" is null and .*discarded_at" is null/
 		);
+	});
+});
+
+// The RE-OPEN migration (issue #91) — the second half of "open", which no partial
+// index can hold on its own because the fact lives in `transactions`.
+describe('capture re-open migration', () => {
+	function readMigration(): string {
+		const drizzleDir = join(dirname(fileURLToPath(import.meta.url)), '../../../../drizzle');
+		const matches = readdirSync(drizzleDir)
+			.filter((f) => f.endsWith('.sql'))
+			.map((f) => readFileSync(join(drizzleDir, f), 'utf8'))
+			.filter((sql) => /CREATE INDEX "captures_resolved_transaction_id_idx"/.test(sql));
+		expect(matches, 'exactly one migration should create the re-open indexes').toHaveLength(1);
+		return matches[0];
+	}
+
+	const ddl = readMigration()
+		.split('\n')
+		.filter((line) => !line.trimStart().startsWith('--'))
+		.join('\n');
+
+	it('creates BOTH partial indexes the re-open arm is driven by', () => {
+		// A group's soft-deleted transactions — the small set the arm starts from.
+		expect(ddl).toMatch(
+			/CREATE INDEX "transactions_group_id_deleted_idx" ON "transactions" USING btree \("group_id"\) WHERE .*deleted_at" is not null/
+		);
+		// ...and the note that points at each one.
+		expect(ddl).toMatch(
+			/CREATE INDEX "captures_resolved_transaction_id_idx" ON "captures" USING btree \("resolved_transaction_id"\) WHERE .*resolved_transaction_id" is not null/
+		);
+	});
+
+	it('adds NO column and clears NO stamp — re-opening is a read-time rule (§7.7)', () => {
+		// "Resolve is a stamp, not a delete": the trail from remembering to recording
+		// survives, so nothing here writes to `captures` or widens it.
+		expect(ddl).not.toMatch(/ALTER TABLE "captures"/);
+		expect(ddl).not.toMatch(/\bUPDATE\b/i);
 	});
 });

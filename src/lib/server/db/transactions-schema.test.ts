@@ -212,6 +212,23 @@ describe('transactions drizzle table', () => {
 		expect(orderOf(occurredAt)).toBe('desc');
 	});
 
+	// A group's SOFT-DELETED transactions (issue #91). PARTIAL, so it holds only what
+	// has actually been deleted — the rare exception, not the ledger. Its reader is
+	// the "Not recorded yet" tray (PLAN §7.7): a note recorded into a transaction that
+	// was then deleted is OPEN again, and this index is what makes finding those notes
+	// cost nothing for a group that has deleted nothing. Pin the shape: without the
+	// partial predicate the index covers the whole table and the planner stops driving
+	// the re-open arm from it.
+	it('indexes a group’s SOFT-DELETED transactions, partially (issue #91)', () => {
+		const { indexes } = getTableConfig(transactions);
+		const idx = indexes.find((i) => i.config.name === 'transactions_group_id_deleted_idx');
+		expect(idx).toBeDefined();
+		expect((idx?.config.columns ?? []).map((col) => (col as { name?: string }).name)).toEqual([
+			'group_id'
+		]);
+		expect(idx?.config.where).toBeDefined();
+	});
+
 	it('is re-exported from the schema entry point', () => {
 		expect((schema as Record<string, unknown>).transactions).toBe(transactions);
 	});

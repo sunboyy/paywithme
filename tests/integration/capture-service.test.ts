@@ -9,9 +9,11 @@
 //   1. AUDIT ATOMICITY (§12.1). A create that fails INSIDE the transaction leaves
 //      NEITHER a `captures` row NOR an `audit_log` row. A stub cannot show this —
 //      only a real rollback can.
-//   2. OPEN vs RESOLVED vs DISCARDED. The tray's predicate is
-//      `resolved_at IS NULL AND discarded_at IS NULL`, and the only way to prove
-//      a discarded row doesn't linger is to discard one and look.
+//   2. OPEN vs RESOLVED vs DISCARDED, and — since issue #91 — OPEN AGAIN while the
+//      transaction a note was recorded into is soft-deleted (§8 below). "Open" is
+//      two arms read as two queries, one of them across a join to `transactions`;
+//      the only way to prove a discarded row doesn't linger, or that a deleted
+//      transaction brings its note back, is to do it and look.
 //   3. MEMBERSHIP (§12) against real member rows, and GROUP VISIBILITY — a second
 //      member sees the first member's open Captures.
 //   4. RECORDING A CAPTURE IS ONE TRANSACTION (issue #51; §7.7 "Resolving"). The
@@ -44,6 +46,8 @@ import {
 } from '$lib/server/captures';
 import {
 	createTransaction,
+	restoreTransaction,
+	softDeleteTransaction,
 	TransactionNotFoundError,
 	TransactionValidationError
 } from '$lib/server/transactions';
@@ -863,5 +867,294 @@ describeIntegration('integration: capture service (issue #49; PLAN §7.7)', () =
 		await expect(
 			findOpenCapture({ userId: userB.id, groupId: group.id, captureId: capture.id })
 		).rejects.toBeInstanceOf(GroupAccessError);
+	});
+
+	// ── 8. A note RE-OPENS while its transaction is soft-deleted (issue #91) ───
+	//
+	// The gap §7.7 does not rule on. Record "night market snacks" from the tray, then
+	// delete that transaction: the expense counts for nothing in balances, and the
+	// note was stamped, so it never came back — neither on the ledger nor in the
+	// queue, which is the exact loss §7.7 exists to prevent.
+	//
+	// The ruling (issue #91): PRESERVE THE STAMP — "resolve is a stamp, not a delete"
+	// — and make openness READ the linked transaction's `deleted_at` instead. These
+	// tests are the ones a stub cannot fake: the arms are two real queries against a
+	// real WHERE, and the state they read lives in another table.
+
+	/** A group with one recorded note; returns the note, the transaction and the payer. */
+	async function recordedNote(label = 'reopen') {
+		const group = await freshGroup(label);
+		const aliceId = await creatorMemberId(group.id);
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'night market snacks', amountMinor: 9000, currency: 'THB' }
+		});
+		const txnId = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		});
+		return { group, aliceId, capture, txnId };
+	}
+
+	/** The group's open notes and its unrecorded count, read exactly as the UI does. */
+	async function recallSurfaces(groupId: string) {
+		const [open, counts] = await Promise.all([
+			listOpenCaptures(userA.id, groupId),
+			countOpenCapturesByGroup({ userId: userA.id, groupIds: [groupId] })
+		]);
+		return { ids: open.map((c) => c.id), count: counts.get(groupId) ?? 0 };
+	}
+
+	it('returns a note to the tray and the count when its transaction is soft-deleted', async () => {
+		const { group, capture, txnId } = await recordedNote();
+
+		// Recorded: out of both recall surfaces, and on the ledger.
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+		expect((await transactionRows(group.id)).map((r) => r.id)).toEqual([txnId]);
+
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		// The expense is in no balance now — so the note is back to being unrecorded,
+		// in BOTH surfaces (a badge saying 0 over a list of one is the failure here).
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [capture.id], count: 1 });
+	});
+
+	it('keeps the stamp through the whole round trip — never clears it (§7.7)', async () => {
+		const { group, txnId } = await recordedNote();
+		const [recorded] = await captureRows(group.id);
+
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+		const [reopened] = await captureRows(group.id);
+		// Open again, and STILL STAMPED: the trail from remembering to recording is
+		// what §7.7 refuses to lose, so re-opening is a read-time rule and writes
+		// nothing at all here.
+		expect(reopened.resolvedTransactionId).toBe(txnId);
+		expect(reopened.resolvedAt).toEqual(recorded.resolvedAt);
+		expect(reopened.discardedAt).toBeNull();
+
+		await restoreTransaction({ userId: userA.id, groupId: group.id, txnId });
+		const [restored] = await captureRows(group.id);
+		expect(restored.resolvedTransactionId).toBe(txnId);
+		expect(restored.resolvedAt).toEqual(recorded.resolvedAt);
+	});
+
+	it('hides it again when the transaction is restored', async () => {
+		const { group, capture, txnId } = await recordedNote();
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [capture.id], count: 1 });
+
+		await restoreTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+	});
+
+	it('leaves balances to the ledger alone, deleted and restored (§7.7, §8)', async () => {
+		// Nothing that computes a balance can see a Capture — so a note coming back to
+		// the tray must not add a "pending" anything, and the numbers must be exactly
+		// what the transaction's own soft-delete and restore produce.
+		const group = await freshGroup('balance');
+		await addSecondMember(group.id);
+		const aliceId = await creatorMemberId(group.id);
+		const [bob] = await db
+			.select({ id: members.id })
+			.from(members)
+			.where(and(eq(members.groupId, group.id), eq(members.userId, userB.id)));
+		const capture = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'night market snacks', amountMinor: 9000, currency: 'THB' }
+		});
+		const txnId = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId, bob.id], aliceId),
+			settlementCurrency: 'THB'
+		});
+		const balances = async () =>
+			(await getGroupBalances({ userId: userA.id, groupId: group.id }))
+				.map((b) => b.balance)
+				.sort((a, b) => a - b);
+
+		expect(await balances()).toEqual([-4500, 4500]);
+
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+		expect(await balances()).toEqual([0, 0]);
+		expect((await recallSurfaces(group.id)).count).toBe(1);
+
+		await restoreTransaction({ userId: userA.id, groupId: group.id, txnId });
+		expect(await balances()).toEqual([-4500, 4500]);
+		expect((await recallSurfaces(group.id)).count).toBe(0);
+	});
+
+	it('lets a re-opened note be recorded again, moving the stamp to the new transaction', async () => {
+		// The tray offering "Record it" on a row nothing can act on would be worse than
+		// not showing it: the prefill read, the resolve and the audit trail all have to
+		// treat a re-opened note as open.
+		const { group, aliceId, capture, txnId } = await recordedNote();
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		const found = await findOpenCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id
+		});
+		expect(found?.id).toBe(capture.id);
+
+		const secondTxn = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		});
+
+		expect(secondTxn).not.toBe(txnId);
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedTransactionId).toBe(secondTxn);
+		// Closed again, because the stamp now names a LIVE transaction.
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+		// The trail survives the move: one `resolve` entry per recording, each naming
+		// the transaction it produced (§12.1 — the audit log outlives the row's state).
+		// Compared as a SET: `captureAuditRows` promises no order (the feed sorts by
+		// `occurred_at` itself), and what this test is about is that NEITHER recording
+		// was overwritten when the stamp moved.
+		const resolves = (await captureAuditRows(group.id)).filter((e) => e.action === 'resolve');
+		expect(
+			resolves.map((e) => (e.metadata as { transactionId: string }).transactionId).sort()
+		).toEqual([txnId, secondTxn].sort());
+	});
+
+	it('lets a re-opened note be discarded, and it stays discarded on restore', async () => {
+		const { group, capture, txnId } = await recordedNote();
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		await discardCapture({ userId: userA.id, groupId: group.id, captureId: capture.id });
+
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+		// A discard is the other ending and it wins: restoring the transaction must not
+		// resurrect a note somebody has given up on.
+		await restoreTransaction({ userId: userA.id, groupId: group.id, txnId });
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+	});
+
+	it('tells the next person it was DISCARDED, not recorded, when the row carries both stamps', async () => {
+		// The state this change created and nothing could reach before: resolve →
+		// soft-delete (re-opens) → discard leaves BOTH stamps set, because neither is
+		// ever cleared. The two used to be mutually exclusive, so "which ending was it?"
+		// could be answered by `resolved_at` alone — it no longer can. A second tap on
+		// that row (double-submit, stale tab) must not be told "someone already recorded
+		// this": the string is user-facing, and it would send them looking for a
+		// transaction that represents nothing.
+		const { group, aliceId, capture, txnId } = await recordedNote('both');
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+		await discardCapture({ userId: userA.id, groupId: group.id, captureId: capture.id });
+
+		const [stored] = await captureRows(group.id);
+		expect(stored.resolvedAt).not.toBeNull();
+		expect(stored.discardedAt).not.toBeNull();
+
+		const onDiscard = await discardCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id
+		}).catch((e) => e);
+		expect(onDiscard).toBeInstanceOf(CaptureNotOpenError);
+		expect((onDiscard as CaptureNotOpenError).reason).toBe('discarded');
+
+		const second = await recordTransaction(group.id);
+		const onResolve = await resolveCapture({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			transactionId: second.id
+		}).catch((e) => e);
+		expect(onResolve).toBeInstanceOf(CaptureNotOpenError);
+		expect((onResolve as CaptureNotOpenError).reason).toBe('discarded');
+
+		// And the recording path says the same thing, writing nothing.
+		const onRecord = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: capture.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		}).catch((e) => e);
+		expect(onRecord).toBeInstanceOf(CaptureNotOpenError);
+		expect((onRecord as CaptureNotOpenError).reason).toBe('discarded');
+	});
+
+	it('leaves a HARD-deleted transaction closed — a dangling link is not a deleted one', async () => {
+		// The case 0020 already ruled on, kept honest now that the other one moved: a
+		// hard delete (not a v1 path) fires the FK's `set null`, so the note is resolved
+		// with NO link — and no link is not a soft-deleted transaction, so it does not
+		// silently reappear.
+		const { group, capture, txnId } = await recordedNote('hard');
+
+		await db.delete(transactions).where(eq(transactions.id, txnId));
+
+		const [stored] = await captureRows(group.id);
+		expect(stored.id).toBe(capture.id);
+		expect(stored.resolvedTransactionId).toBeNull();
+		expect(stored.resolvedAt).not.toBeNull();
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [], count: 0 });
+	});
+
+	it('re-opens only the note whose own transaction was deleted', async () => {
+		// Two notes, two transactions, one delete. The arm joins on the LINK, so the
+		// other note must stay recorded — and the count must say exactly one.
+		const { group, aliceId, capture, txnId } = await recordedNote('two');
+		const other = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'taxi home' }
+		});
+		await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: other.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		});
+
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
+
+		expect(await recallSurfaces(group.id)).toEqual({ ids: [capture.id], count: 1 });
+	});
+
+	it('orders a re-opened note by its own day, alongside the never-recorded ones', async () => {
+		// The tray reads two arms and orders their concatenation itself now; a re-opened
+		// note belongs where its real-world day puts it, not at the top or the bottom.
+		const group = await freshGroup('order');
+		const aliceId = await creatorMemberId(group.id);
+		const older = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'older', capturedFor: '2026-09-01' }
+		});
+		const middle = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'middle', capturedFor: '2026-09-05' }
+		});
+		const newer = await createCapture({
+			userId: userA.id,
+			groupId: group.id,
+			input: { note: 'newer', capturedFor: '2026-09-09' }
+		});
+		const middleTxn = await recordCaptureAsTransaction({
+			userId: userA.id,
+			groupId: group.id,
+			captureId: middle.id,
+			input: equalSpendingInput([aliceId], aliceId),
+			settlementCurrency: 'THB'
+		});
+		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId: middleTxn });
+
+		expect((await recallSurfaces(group.id)).ids).toEqual([newer.id, middle.id, older.id]);
 	});
 });

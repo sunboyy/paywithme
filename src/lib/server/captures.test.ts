@@ -14,7 +14,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 //     settlement equivalent, and no extra column in the written row;
 //   - resolve verifies the transaction belongs to THIS group first, and both
 //     endings fail closed (already resolved / already discarded / not found);
-//   - no `summary` the feed will render contains the internal word "capture".
+//   - no `summary` the feed will render contains the internal word "capture";
+//   - "open" is TWO ARMS (issue #91), and each reader runs them the way its indexes
+//     need — pinned by compiling the predicate and every WHERE to SQL, which is the
+//     one thing a fluent stub genuinely cannot fake. That a soft-deleted transaction
+//     really does bring its note back is proved against a real database next door.
 //
 // The fluent stub records every insert/update and lets a test program what each
 // table's SELECT resolves to, as a QUEUE.
@@ -37,9 +41,11 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 		/** Ordered log of DB operations, e.g. 'insert:captures'. */
 		log: [] as string[],
 		inserts: [] as { table: unknown; values: Record<string, unknown> }[],
-		updates: [] as { table: unknown; set: Record<string, unknown> }[],
+		updates: [] as { table: unknown; set: Record<string, unknown>; where?: unknown }[],
 		/** Every `innerJoin(table, on)` — the ON clause is compiled to SQL by a test. */
-		joins: [] as { table: unknown; on: unknown }[]
+		joins: [] as { table: unknown; on: unknown }[],
+		/** Every SELECT's `where(...)`, in order — compiled to SQL by the arm tests. */
+		selectWheres: [] as unknown[]
 	};
 
 	function tableName(table: unknown): string {
@@ -54,9 +60,13 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 	function selectChain() {
 		const chain: Record<string, unknown> = {};
 		let table: unknown;
-		for (const m of ['where', 'limit', 'orderBy', 'groupBy', 'for']) {
+		for (const m of ['limit', 'orderBy', 'groupBy', 'for']) {
 			chain[m] = () => chain;
 		}
+		chain.where = (where: unknown) => {
+			calls.selectWheres.push(where);
+			return chain;
+		};
 		chain.innerJoin = (t: unknown, on: unknown) => {
 			calls.joins.push({ table: t, on });
 			return chain;
@@ -98,12 +108,17 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 
 	function updateChain(table: unknown) {
 		const chain: Record<string, unknown> = {};
+		let record: { table: unknown; set: Record<string, unknown>; where?: unknown };
 		chain.set = (values: Record<string, unknown>) => {
 			calls.log.push(`update:${tableName(table)}`);
-			calls.updates.push({ table, set: values });
+			record = { table, set: values };
+			calls.updates.push(record);
 			return chain;
 		};
-		chain.where = () => chain;
+		chain.where = (where: unknown) => {
+			record.where = where;
+			return chain;
+		};
 		chain.returning = () => {
 			const rows = state.updateReturning;
 			state.updateReturning = [];
@@ -185,6 +200,12 @@ function auditInserts() {
 	return calls.inserts.filter((c) => c.table === auditLog);
 }
 
+/** The Nth recorded UPDATE's WHERE clause, compiled to SQL. */
+function updateWhere(n: number): string {
+	const where = calls.updates[n].where as Parameters<PgDialect['sqlToQuery']>[0];
+	return new PgDialect().sqlToQuery(where).sql;
+}
+
 /** A stored Capture row. */
 function captureRow(overrides: Partial<Capture> = {}): Capture {
 	return {
@@ -214,6 +235,7 @@ beforeEach(() => {
 	calls.inserts.length = 0;
 	calls.updates.length = 0;
 	calls.joins.length = 0;
+	calls.selectWheres.length = 0;
 	createTransaction.mockReset();
 });
 
@@ -376,11 +398,62 @@ describe('listOpenCaptures', () => {
 	it('reads the group tray only after the membership check', async () => {
 		setAccess(true);
 		const rows = [captureRow(), captureRow({ id: 'cap-2', createdBy: 'user-9' })];
-		programSelects(captures, rows);
+		// Arm 1 (never stamped) answers with both rows; arm 2 (re-opened) with none,
+		// which is the ordinary case — nothing in this group has been deleted.
+		programSelects(captures, rows, []);
 
 		// Every member sees EVERY member's open Captures — there is no author filter.
-		expect(await listOpenCaptures('user-42', 'group-1')).toEqual(rows);
-		expect(calls.log).toEqual(['select:members', 'select:captures']);
+		const seen = await listOpenCaptures('user-42', 'group-1');
+		expect(seen.map((c) => c.id).sort()).toEqual(['cap-1', 'cap-2']);
+		// ONE QUERY PER ARM (issue #91) — see the arm tests below for why.
+		expect(calls.log).toEqual(['select:members', 'select:captures', 'select:captures']);
+	});
+
+	it('merges the two arms newest-first, by real-world day', async () => {
+		// The tray orders the concatenation itself now, so a re-opened note (arm 2)
+		// lands where its own `captured_for` puts it — not above or below everything
+		// that was never recorded.
+		setAccess(true);
+		const older = captureRow({ id: 'cap-old', capturedFor: '2026-09-01' });
+		const newer = captureRow({ id: 'cap-new', capturedFor: '2026-09-09' });
+		const reopened = captureRow({
+			id: 'cap-reopened',
+			capturedFor: '2026-09-05',
+			resolvedTransactionId: 'txn-deleted',
+			resolvedAt: new Date('2026-09-06T00:00:00Z')
+		});
+		programSelects(captures, [older, newer], [reopened]);
+
+		const seen = await listOpenCaptures('user-42', 'group-1');
+
+		expect(seen.map((c) => c.id)).toEqual(['cap-new', 'cap-reopened', 'cap-old']);
+	});
+
+	it('breaks a same-day tie on when the note was written, then on id', async () => {
+		setAccess(true);
+		const day = '2026-09-05';
+		const early = captureRow({
+			id: 'cap-a',
+			capturedFor: day,
+			createdAt: new Date('2026-09-05T08:00:00Z')
+		});
+		const late = captureRow({
+			id: 'cap-b',
+			capturedFor: day,
+			createdAt: new Date('2026-09-05T20:00:00Z')
+		});
+		const sameMoment = captureRow({
+			id: 'cap-c',
+			capturedFor: day,
+			createdAt: new Date('2026-09-05T20:00:00Z')
+		});
+		programSelects(captures, [early, late, sameMoment], []);
+
+		const seen = await listOpenCaptures('user-42', 'group-1');
+
+		// Newest written first; `id` DESC settles the exact-tie, so the order is stable
+		// across reads instead of being left to the planner.
+		expect(seen.map((c) => c.id)).toEqual(['cap-c', 'cap-b', 'cap-a']);
 	});
 
 	it('refuses a non-member and never touches the table (§12)', async () => {
@@ -416,6 +489,12 @@ describe('resolveCapture', () => {
 			'resolvedAt',
 			'resolvedTransactionId'
 		]);
+		// The conditional UPDATE carries the WHOLE open definition, not just the two
+		// nulls: a re-opened note (recorded, then its transaction soft-deleted) is open,
+		// so the tray's "Record it" has to work on it — offering an action on a row
+		// nothing can act on would be worse than not showing it (issue #91).
+		expect(updateWhere(0)).toContain('"transactions"."deleted_at" is not null');
+		expect(updateWhere(0)).toContain('"captures"."resolved_at" is null');
 		expect(auditInserts()[0].values).toMatchObject({
 			action: 'resolve',
 			entityType: 'capture',
@@ -460,6 +539,29 @@ describe('resolveCapture', () => {
 		expect((error as CaptureNotOpenError).reason).toBe('discarded');
 	});
 
+	it('names the DISCARD when a row carries both stamps (issue #91)', async () => {
+		// A re-opened note that was then given up on keeps its resolve stamp — the two
+		// timestamps stopped being mutually exclusive the moment a discard could follow
+		// a resolve. `discarded_at` is the terminal fact and must be read FIRST; the
+		// other order tells the next person "someone already recorded this" about a
+		// note nobody recorded.
+		setAccess(true);
+		programSelects(transactions, [{ id: 'txn-1' }]);
+		state.updateReturning = [];
+		programSelects(captures, [
+			{
+				resolvedAt: new Date('2026-09-06T00:00:00Z'),
+				discardedAt: new Date('2026-09-07T00:00:00Z')
+			}
+		]);
+
+		const error = await resolveCapture(RESOLVE).catch((e) => e);
+
+		expect(error).toBeInstanceOf(CaptureNotOpenError);
+		expect((error as CaptureNotOpenError).reason).toBe('discarded');
+		expect((error as CaptureNotOpenError).message).toBe('This has already been discarded');
+	});
+
 	it("reports another group's capture as NOT FOUND (§12 don't leak)", async () => {
 		setAccess(true);
 		programSelects(transactions, [{ id: 'txn-1' }]);
@@ -492,6 +594,10 @@ describe('discardCapture', () => {
 		// A soft stamp, never a delete: "we decided this wasn't worth recording" is
 		// itself part of the trail.
 		expect(Object.keys(calls.updates[0].set)).toEqual(['discardedAt']);
+		// The same whole open definition as the resolve: a re-opened note can be given
+		// up on too, and a discard is the ending that wins — restoring the transaction
+		// afterwards must not resurrect it (issue #91).
+		expect(updateWhere(0)).toContain('"transactions"."deleted_at" is not null');
 		expect(auditInserts()[0].values).toMatchObject({
 			action: 'discard',
 			entityType: 'capture',
@@ -566,24 +672,30 @@ describe('the audit summaries never say the internal word (CONTEXT.md)', () => {
 // a fluent stub genuinely cannot fake.
 
 describe('countOpenCapturesByGroup', () => {
-	it('counts per group in ONE query, keyed by group id', async () => {
-		programSelects(captures, [
-			{ groupId: 'group-1', open: 3 },
-			{ groupId: 'group-2', open: 1 }
-		]);
+	it('counts per group in ONE query PER ARM, keyed by group id', async () => {
+		programSelects(
+			captures,
+			[
+				{ groupId: 'group-1', open: 3 },
+				{ groupId: 'group-2', open: 1 }
+			],
+			// Arm 2: `group-1` also has a note whose transaction was soft-deleted, so the
+			// two arms are SUMMED. They are disjoint, so nothing is counted twice.
+			[{ groupId: 'group-1', open: 1 }]
+		);
 
 		const counts = await countOpenCapturesByGroup({
 			userId: 'user-42',
 			groupIds: ['group-1', 'group-2', 'group-3']
 		});
 
-		expect(counts.get('group-1')).toBe(3);
+		expect(counts.get('group-1')).toBe(4);
 		expect(counts.get('group-2')).toBe(1);
 		// A group with nothing open contributes no row — the callers read `?? 0`, so
 		// absent and zero are the same to them and nothing leaks about what exists.
 		expect(counts.has('group-3')).toBe(false);
-		// ONE query for every card on the dashboard, not one per card.
-		expect(calls.log).toEqual(['select:captures']);
+		// TWO queries for a whole dashboard (one per arm), not one per card.
+		expect(calls.log).toEqual(['select:captures', 'select:captures']);
 	});
 
 	it('issues NO query at all for an empty group list', async () => {
@@ -593,14 +705,90 @@ describe('countOpenCapturesByGroup', () => {
 		expect(calls.log).toEqual([]);
 	});
 
-	it('counts ONLY OPEN rows — both nulls, not just `resolved_at`', () => {
+	it('counts ONLY OPEN rows — the WHOLE two-arm definition, compiled', () => {
+		// The predicate is pinned WHOLE, not by fragments: this is the one thing a
+		// fluent stub cannot fake, and a predicate that quietly loses an arm is exactly
+		// the drift that puts a note in neither the ledger nor the queue.
 		const { sql } = new PgDialect().sqlToQuery(openCapturePredicate()!);
 
-		expect(sql).toContain('"resolved_at" is null');
-		// The one that is easy to forget: a discarded Capture was never resolved, so
-		// without this it would be counted (and shown) forever.
+		expect(sql).toBe(
+			'(("captures"."resolved_at" is null and "captures"."discarded_at" is null) or ' +
+				'("captures"."discarded_at" is null and exists (select 1 from "transactions" where ' +
+				'("transactions"."id" = "captures"."resolved_transaction_id" and ' +
+				'"transactions"."deleted_at" is not null))))'
+		);
+	});
+
+	it('keeps arm 1 EXACTLY the partial index’s predicate', () => {
+		// `captures_group_id_open_idx` is `resolved_at IS NULL AND discarded_at IS NULL`.
+		// The tray and the count run this arm as its own query so Postgres can use that
+		// index; the day the arm stops matching it, the index silently stops applying and
+		// every page load reads the group's whole recorded history instead.
+		const { sql } = new PgDialect().sqlToQuery(openCapturePredicate()!);
+
+		expect(sql).toContain(
+			'("captures"."resolved_at" is null and "captures"."discarded_at" is null)'
+		);
+		// Both nulls: a discarded Capture was never resolved, so `resolved_at IS NULL`
+		// alone would keep counting it forever.
 		expect(sql).toContain('"discarded_at" is null');
-		expect(sql).not.toContain(' or ');
+	});
+
+	it('re-opens a note whose transaction is SOFT-deleted, and only that (issue #91)', () => {
+		const { sql } = new PgDialect().sqlToQuery(openCapturePredicate()!);
+
+		// Arm 2 asks the LINKED transaction whether it is soft-deleted...
+		expect(sql).toContain('"transactions"."id" = "captures"."resolved_transaction_id"');
+		expect(sql).toContain('"transactions"."deleted_at" is not null');
+		// ...and NOT whether the link is missing. A hard delete fires the FK's `set
+		// null`, and a dangling link must stay CLOSED (see `captures-schema.ts`); testing
+		// `resolved_transaction_id IS NULL` would resurrect those rows instead.
+		expect(sql).not.toContain('"resolved_transaction_id" is null');
+		// The stamp is never read as cleared: openness is decided by the OTHER table.
+		expect(sql).not.toContain('"resolved_at" is not null');
+	});
+
+	it('runs ONE ARM PER QUERY, each narrowed so its index applies', async () => {
+		// The arms are OR-able (`openCapturePredicate` does exactly that for a by-id
+		// read), but an OR'd query can use NEITHER partial index — Postgres would read
+		// every note the group has ever recorded on every page load. So the two recall
+		// surfaces issue one query per arm, and arm 2 carries the redundant
+		// `transactions.group_id` qual that lets the planner drive from the small
+		// soft-deleted set instead.
+		programSelects(captures, [], []);
+
+		await countOpenCapturesByGroup({ userId: 'user-42', groupIds: ['group-1'] });
+
+		const wheres = calls.selectWheres.map(
+			(w) => new PgDialect().sqlToQuery(w as Parameters<PgDialect['sqlToQuery']>[0]).sql
+		);
+		expect(wheres).toHaveLength(2);
+		// Arm 1: the partial index's own predicate, with no `or` to defeat it.
+		expect(wheres[0]).toContain('"captures"."resolved_at" is null');
+		expect(wheres[0]).not.toContain(' or ');
+		expect(wheres[0]).not.toContain('exists');
+		// Arm 2: the join, narrowed on the transaction side, and no `or` either.
+		expect(wheres[1]).toContain('"transactions"."deleted_at" is not null');
+		expect(wheres[1]).toContain('"transactions"."group_id" in ');
+		expect(wheres[1]).not.toContain(' or ');
+	});
+
+	it('narrows the tray’s second arm to the ONE group it is reading', async () => {
+		setAccess(true);
+		programSelects(captures, [], []);
+
+		await listOpenCaptures('user-42', 'group-1');
+
+		// The membership check (§12) is the first WHERE; the two arms follow it.
+		const wheres = calls.selectWheres.map(
+			(w) => new PgDialect().sqlToQuery(w as Parameters<PgDialect['sqlToQuery']>[0]).sql
+		);
+		expect(wheres).toHaveLength(3);
+		expect(wheres[1]).toContain('"captures"."resolved_at" is null');
+		expect(wheres[1]).not.toContain(' or ');
+		expect(wheres[2]).toContain('"transactions"."group_id" = ');
+		expect(wheres[2]).toContain('"transactions"."deleted_at" is not null');
+		expect(wheres[2]).not.toContain(' or ');
 	});
 
 	it('gates on the FULL access check — an active member AND a live group (§12)', async () => {

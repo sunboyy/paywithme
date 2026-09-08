@@ -1,3 +1,4 @@
+import { isNotNull } from 'drizzle-orm';
 import {
 	pgTable,
 	text,
@@ -169,7 +170,17 @@ export const transactions = pgTable(
 			table.groupId,
 			table.createdAt.desc(),
 			table.occurredAt.desc()
-		)
+		),
+		// A group's SOFT-DELETED transactions, and only those (issue #91). Partial
+		// because a deleted transaction is the rare exception: the index stays the size
+		// of what has actually been deleted, not of the ledger.
+		//
+		// The reader is the "Not recorded yet" tray and its unrecorded count (PLAN
+		// §7.7): a record-later note whose transaction has since been soft-deleted is
+		// OPEN again, and finding those notes means finding this small set first. That
+		// query lives entirely in `lib/server/captures.ts` — this is an index on the
+		// ledger's own soft-delete column, not the ledger learning what a note is.
+		index('transactions_group_id_deleted_idx').on(table.groupId).where(isNotNull(table.deletedAt))
 	]
 );
 
