@@ -90,32 +90,27 @@ type CapturePrefill = {
 };
 
 /**
- * Read the Capture named by `?capture=`, if it names an open one in this group.
+ * Read the Capture named by `captureId`, if it names an open one in this group.
  *
  * Falls back to `null` — never throws — on anything unusable, exactly like
- * {@link resolveTransferPrefill}: an absent param, a stale id, another group's row,
- * or one somebody already recorded or discarded. A dead link then renders the
- * ordinary blank add-transaction form (and saves an ordinary transaction, stamping
- * nothing), rather than an error page.
+ * {@link resolveTransferPrefill}: a stale id, another group's row, or one somebody
+ * already recorded or discarded. A dead link then renders the ordinary blank
+ * add-transaction form (and saves an ordinary transaction, stamping nothing),
+ * rather than an error page.
  */
 async function resolveCapturePrefill({
-	url,
+	captureId,
 	userId,
 	groupId,
 	entryCurrencies,
 	settlementCurrency
 }: {
-	url: URL;
+	captureId: string;
 	userId: string;
 	groupId: string;
 	entryCurrencies: readonly GroupCurrency[];
 	settlementCurrency: SeededCurrencyCode;
 }): Promise<CapturePrefill | null> {
-	const captureId = url.searchParams.get('capture');
-	if (!captureId) {
-		return null;
-	}
-
 	let capture;
 	try {
 		capture = await findOpenCapture({ userId, groupId, captureId });
@@ -220,6 +215,26 @@ function resolveTransferPrefill(
 	return { from, to, amount, categoryId };
 }
 
+/**
+ * WHAT THIS URL IS ABOUT — the one decision `load` and the `default` action are not
+ * allowed to make differently (issue #89).
+ *
+ * `load` degrades a `?capture=` it cannot use to `null` and renders the blank form;
+ * the action then writes what `load` decided, because the page posts back the id
+ * only when there is one (see the `action` attribute in `+page.svelte`). Made
+ * separately, the two drifted: a form opened blank still posted to the URL it was
+ * opened at, so a note somebody had already discarded made an ordinary save fail
+ * over and over, and a hand-built `?type=transfer&…&capture=<id>` stamped a note the
+ * settle link was never about.
+ *
+ * A settle-via-transfer prefill therefore CLAIMS the form here as well: one seeded
+ * form has one source, and that link never carries a note id of its own.
+ */
+function resolvePrefillSources(url: URL, activeMemberIds: ReadonlySet<string>) {
+	const transfer = resolveTransferPrefill(url, activeMemberIds);
+	return { transfer, captureId: transfer ? null : url.searchParams.get('capture') || null };
+}
+
 export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// Centralized guard (task 3.8): anonymous → redirect; no-access/not-found →
 	// 404. Returns the already-loaded group so we don't re-query. THROWS control
@@ -265,20 +280,24 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
 	// (payer = debtor, single beneficiary = creditor, the amount, Debt settlement).
 	// On ANY invalid/absent param this is null → the normal blank spending default
 	// below is used unchanged (task 4.7's behavior is preserved).
-	const prefill = resolveTransferPrefill(url, new Set(activeMembers.map((m) => m.id)));
+	//
+	// "Record it" on the tray (issue #51; PLAN §7.7) reads `?capture=` through the
+	// SAME `resolvePrefillSources` the action does, so the id this form is about is
+	// decided once (issue #89).
+	const { transfer: prefill, captureId } = resolvePrefillSources(
+		url,
+		new Set(activeMembers.map((m) => m.id))
+	);
 
-	// "Record it" on the tray (issue #51; PLAN §7.7). Read only when the settle
-	// prefill above didn't claim the form — the two links never carry each other's
-	// params, and one seeded form can only come from one place.
-	const capturePrefill = prefill
-		? null
-		: await resolveCapturePrefill({
-				url,
+	const capturePrefill = captureId
+		? await resolveCapturePrefill({
+				captureId,
 				userId: user.id,
 				groupId: params.id,
 				entryCurrencies,
 				settlementCurrency
-			});
+			})
+		: null;
 
 	// Seed a default form: spending / equal split, payer = the viewer's member,
 	// beneficiaries = all active members. amountTotal 0 (the user fills it in).
@@ -391,7 +410,7 @@ export const actions: Actions = {
 		// Rebuild the shared schema server-side from TRUSTED group context — the
 		// settlement currency, the active member allow-list and the group's entry
 		// currencies, all re-read rather than taken from the payload.
-		const { settlementCurrency, schema } = await loadTransactionWriteContext(
+		const { settlementCurrency, activeMemberIds, schema } = await loadTransactionWriteContext(
 			user.id,
 			params.id,
 			'Group not found'
@@ -406,30 +425,39 @@ export const actions: Actions = {
 		// Recording a Capture (issue #51; PLAN §7.7 "Resolving")? The id rides in the
 		// action's own query string — the same `?capture=` the prefill came from, which
 		// the form posts back to and which survives a failed save (`load` re-runs at the
-		// same URL). It is UNTRUSTED, exactly like the prefill: the service re-checks
-		// membership, the group, and that the row is still open, inside the write.
-		const captureId = url.searchParams.get('capture');
+		// same URL). Read through the SAME `resolvePrefillSources` `load` used (issue
+		// #89), against the same trusted member allow-list, so a settle-via-transfer URL
+		// carrying a hand-appended note id stamps nothing here either. It stays
+		// UNTRUSTED, exactly like the prefill: the service re-checks membership, the
+		// group, and that the row is still open, inside the write.
+		const { captureId } = resolvePrefillSources(url, activeMemberIds);
+
+		// The trusted, re-read write context both endings share — the only difference
+		// between them is whether a note gets stamped alongside the insert.
+		const write = { userId: user.id, groupId: params.id, input: form.data, settlementCurrency };
 
 		try {
 			if (captureId) {
-				// ONE DB transaction: the transaction, its audit row, and the Capture's
-				// `resolved_transaction_id` + `resolved_at` stamp (§12.1). The payload took
-				// the SAME §7.4 validation above and inside the service — a prefill buys no
-				// shortcut.
-				await recordCaptureAsTransaction({
-					userId: user.id,
-					groupId: params.id,
-					captureId,
-					input: form.data,
-					settlementCurrency
-				});
+				try {
+					// ONE DB transaction: the transaction, its audit row, and the Capture's
+					// `resolved_transaction_id` + `resolved_at` stamp (§12.1). The payload took
+					// the SAME §7.4 validation above and inside the service — a prefill buys no
+					// shortcut.
+					await recordCaptureAsTransaction({ ...write, captureId });
+				} catch (e) {
+					if (!(e instanceof CaptureNotFoundError)) throw e;
+					// The id names nothing in this group — never did, or not since. `load`
+					// answers that id with the blank form and the promise of an ordinary save
+					// (`resolveCapturePrefill`), so the save keeps that promise instead of
+					// failing on a pointer the user never typed. Nothing was written: the stamp
+					// threw from inside the insert's own DB transaction, taking it with it.
+					//
+					// A note that was open at load and CLOSED underneath the user is the other
+					// case entirely — `CaptureNotOpenError` below — and still stops the save.
+					await createTransaction(write);
+				}
 			} else {
-				await createTransaction({
-					userId: user.id,
-					groupId: params.id,
-					input: form.data,
-					settlementCurrency
-				});
+				await createTransaction(write);
 			}
 		} catch (e) {
 			if (e instanceof GroupAccessError) {
@@ -452,16 +480,6 @@ export const actions: Actions = {
 								: 'Someone already discarded that one, so nothing was saved. Check the transaction list before adding it again.'
 					},
 					{ status: 409 }
-				);
-			}
-			if (e instanceof CaptureNotFoundError) {
-				// A stale link (the note is not this group's, or never existed). Nothing was
-				// written; the form itself is still valid, so it is kept rather than replaced
-				// by a 404 page.
-				return message(
-					form,
-					{ type: 'error', text: 'That note is no longer here, so nothing was saved.' },
-					{ status: 404 }
 				);
 			}
 			if (e instanceof TransactionValidationError) {

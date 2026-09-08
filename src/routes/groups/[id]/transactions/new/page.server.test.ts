@@ -416,17 +416,64 @@ describe('/groups/[id]/transactions/new default action — recording a note (§7
 		expect(msg.text.toLowerCase()).not.toContain('capture');
 	});
 
-	it('reports a stale note id as a form failure, not a 404 page', async () => {
+	// ── Issue #89: the action must act on what `load` decided ──────────────────
+	// `load` degrades a missing / discarded / foreign `?capture=` to null and hands
+	// back the ordinary blank form, promising an ordinary save. The action used to
+	// break that promise: it read the param unconditionally, so Alice — who opened the
+	// tray link a moment after Bob discarded the note — filled in a real transaction
+	// and got "nothing was saved" on every single retry.
+	it('saves an ORDINARY transaction when the note id no longer resolves', async () => {
 		recordCaptureAsTransaction.mockRejectedValueOnce(new CaptureNotFoundError());
 
-		const result = (await actions.default(
-			makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=gone')
-		)) as { status: number };
+		try {
+			await actions.default(makeActionEvent({ id: 'u1', name: 'Alice' }, '?capture=gone'));
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
 
-		expect(result.status).toBe(404);
-		const [, msg] = message.mock.calls[0];
-		expect(msg.text).toContain('no longer here');
-		expect(msg.text.toLowerCase()).not.toContain('capture');
+		// The user's transaction is saved (the stamp rolled its own attempt back, so
+		// nothing was written before this), and no note is stamped.
+		expect(createTransaction).toHaveBeenCalledTimes(1);
+		expect(createTransaction.mock.calls[0][0].input.title).toBe('Dinner');
+	});
+
+	it('stamps nothing when a note id is appended to a settle-up prefill URL', async () => {
+		// The settle link (§8.4) never carries a note id, so a hand-built one names an
+		// unrelated OPEN note — and `load` seeds the Transfer and ignores it. The action
+		// reads the query string through the same decision, so it ignores it too.
+		try {
+			await actions.default(
+				makeActionEvent(
+					{ id: 'u1', name: 'Alice' },
+					'?type=transfer&from=m2&to=m1&amount=12000&category=transfer-debt-settlement&capture=cap-1'
+				)
+			);
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
+
+		expect(recordCaptureAsTransaction).not.toHaveBeenCalled();
+		expect(createTransaction).toHaveBeenCalledTimes(1);
+	});
+
+	it('still records the note when the settle params are not a usable prefill', async () => {
+		// `from`/`to` name nobody in this group, so `load` falls through to the note —
+		// and so must the action. The two answer this URL the same way or neither is
+		// trustworthy.
+		try {
+			await actions.default(
+				makeActionEvent({ id: 'u1', name: 'Alice' }, '?type=transfer&from=nope&to=m1&capture=cap-1')
+			);
+			expect.unreachable('expected a redirect');
+		} catch (e) {
+			expect(isRedirect(e)).toBe(true);
+		}
+
+		expect(recordCaptureAsTransaction).toHaveBeenCalledTimes(1);
+		expect(recordCaptureAsTransaction.mock.calls[0][0].captureId).toBe('cap-1');
+		expect(createTransaction).not.toHaveBeenCalled();
 	});
 
 	it('preserves the ?capture= link when authentication must resume', async () => {

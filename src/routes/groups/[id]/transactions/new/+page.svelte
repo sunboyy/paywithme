@@ -42,14 +42,24 @@
 	const { message } = form;
 
 	/**
-	 * Where the form posts. When this page is recording a note from the "Not recorded
-	 * yet" tray (issue #51; PLAN §7.7), the `?capture=` id must ride along: the action
-	 * reads it from its own query string to stamp the note in the same DB transaction
-	 * as the insert. A form's `action` replaces the WHOLE query string, so it is
-	 * spelled out here rather than left to the browser's default.
+	 * Where the form posts — spelled out in BOTH branches, because a form's `action`
+	 * replaces the WHOLE query string and each branch needs a different one.
+	 *
+	 * Recording a note from the "Not recorded yet" tray (issue #51; PLAN §7.7): the
+	 * `?capture=` id must ride along, because the action reads it from its own query
+	 * string to stamp the note in the same DB transaction as the insert.
+	 *
+	 * Otherwise the post goes to the BARE route (issue #89). Leaving the attribute off
+	 * posts to the current URL instead — which still carries the `?capture=` `load`
+	 * just decided not to use (a note discarded before this page loaded, or one
+	 * appended by hand to a settle-up link), so an ordinary save kept failing on a
+	 * pointer this form is not about. `captureId` is `load`'s answer, and this is the
+	 * form that acts on it.
 	 */
 	const action = $derived(
-		data.captureId ? `?capture=${encodeURIComponent(data.captureId)}` : undefined
+		data.captureId
+			? `?capture=${encodeURIComponent(data.captureId)}`
+			: resolve('/groups/[id]/transactions/new', { id: data.group.id })
 	);
 </script>
 

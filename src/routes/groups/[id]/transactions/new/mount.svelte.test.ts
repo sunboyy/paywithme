@@ -83,9 +83,15 @@ describe('add-transaction page mounts without an effect loop', () => {
 		expect(container.querySelector('form')?.getAttribute('action')).toBe('?capture=cap-1');
 	});
 
-	it('posts to the plain route when no note is being recorded', () => {
+	// Issue #89: the other branch has to be spelled out too. An omitted `action` posts
+	// to the CURRENT url — which still carries the `?capture=` `load` decided not to
+	// use (someone discarded the note first, or it was appended to a settle-up link),
+	// so the action stamped, or failed on, a note this form is not about.
+	it('posts to the bare route — no stale ?capture= — when no note is being recorded', () => {
 		const { container } = render(Page, { props: { data: pageData() } });
-		expect(container.querySelector('form')?.getAttribute('action')).toBeNull();
+		const action = container.querySelector('form')?.getAttribute('action');
+		expect(action).toBe('/groups/g1/transactions/new');
+		expect(action).not.toContain('capture');
 	});
 
 	it('never says "capture" to the user (§7.7 naming)', () => {

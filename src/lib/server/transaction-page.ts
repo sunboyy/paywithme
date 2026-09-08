@@ -97,6 +97,10 @@ export function toCategoryOptions() {
  * payload. Shared by the add and edit actions so the two can never validate against
  * different notions of what this group permits.
  *
+ * `activeMemberIds` is that same allow-list handed back, so an action that must
+ * re-read its own query string (the add page's `?type=transfer&…` / `?capture=`
+ * prefills) can judge those params against exactly what `load` judged them against.
+ *
  * 404s (with the route's own wording) when the group is gone or was never the
  * caller's — existence is never leaked (§12).
  */
@@ -116,11 +120,14 @@ export async function loadTransactionWriteContext(
 	);
 	const entryCurrencies = await loadEntryCurrencies(userId, groupId, notFoundMessage);
 
+	const activeMemberIds = activeMembers.map((m) => m.id);
+
 	return {
 		settlementCurrency,
+		activeMemberIds: new Set(activeMemberIds),
 		schema: buildTransactionSchema({
 			settlementCurrency,
-			memberIds: activeMembers.map((m) => m.id),
+			memberIds: activeMemberIds,
 			entryCurrencies
 		})
 	};
