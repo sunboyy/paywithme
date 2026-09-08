@@ -29,7 +29,7 @@
 
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { and, eq, sql } from 'drizzle-orm';
-import { createGroup, GroupAccessError } from '$lib/server/groups';
+import { createGroup, softDeleteGroup, GroupAccessError } from '$lib/server/groups';
 import {
 	createCapture,
 	listOpenCaptures,
@@ -377,6 +377,22 @@ describeIntegration('integration: capture service (issue #49; PLAN §7.7)', () =
 		// userB wrote none of them and is told about all of them — deduplication (§7.7).
 		const counts = await countOpenCapturesByGroup({ userId: userB.id, groupIds: [group.id] });
 		expect(counts.get(group.id)).toBe(1);
+	});
+
+	it('reports NOTHING for a SOFT-DELETED group — the same check, not half of it (§12)', async () => {
+		const group = await freshGroup();
+		await createCapture({ userId: userA.id, groupId: group.id, input: { note: 'dinner' } });
+		expect(
+			(await countOpenCapturesByGroup({ userId: userA.id, groupIds: [group.id] })).get(group.id)
+		).toBe(1);
+
+		await softDeleteGroup({ userId: userA.id, groupId: group.id });
+
+		// The member row survives a soft delete, so the membership join alone would keep
+		// counting a deleted group's notes — `userHasGroupAccess` gates on BOTH, and the
+		// batched form has to gate on both too.
+		const counts = await countOpenCapturesByGroup({ userId: userA.id, groupIds: [group.id] });
+		expect(counts.has(group.id)).toBe(false);
 	});
 
 	it('reports NOTHING for a group the caller is not a member of (§12)', async () => {

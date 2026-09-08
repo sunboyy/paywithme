@@ -17,14 +17,67 @@ import type { Group } from '$lib/server/groups';
 import type { MemberListItem } from '$lib/server/members';
 import type { McpToolResult } from '../types';
 
-const { getGroupForUser, listMembers, createCapture, consumeRateLimit, withDerivedIdempotency } =
-	vi.hoisted(() => ({
+const {
+	getGroupForUser,
+	listMembers,
+	createCapture,
+	consumeRateLimit,
+	withDerivedIdempotency,
+	idempotencyRows,
+	memoryIdempotencyStore
+} = vi.hoisted(() => {
+	// The idempotency store as a Map — enough for the REAL guard to run against in the
+	// `#90` block below, where what is under test is precisely which rows a rejected
+	// call leaves behind. `insertPending` returning `false` on a duplicate is the
+	// unique constraint the production store relies on.
+	const rows = new Map<
+		string,
+		{
+			requestHash: string;
+			status: 'pending' | 'completed';
+			responseStatus: number | null;
+			responseBody: unknown;
+			createdAt: Date;
+		}
+	>();
+	return {
 		getGroupForUser: vi.fn(),
 		listMembers: vi.fn(),
 		createCapture: vi.fn(),
 		consumeRateLimit: vi.fn(),
-		withDerivedIdempotency: vi.fn()
-	}));
+		withDerivedIdempotency: vi.fn(),
+		idempotencyRows: rows,
+		memoryIdempotencyStore: {
+			async insertPending(row: {
+				keyId: string;
+				idempotencyKey: string;
+				requestHash: string;
+				createdAt: Date;
+			}) {
+				const id = `${row.keyId}|${row.idempotencyKey}`;
+				if (rows.has(id)) return false;
+				rows.set(id, {
+					requestHash: row.requestHash,
+					status: 'pending',
+					responseStatus: null,
+					responseBody: null,
+					createdAt: row.createdAt
+				});
+				return true;
+			},
+			async load(keyId: string, key: string) {
+				return rows.get(`${keyId}|${key}`) ?? null;
+			},
+			async markCompleted(keyId: string, key: string, response: { status: number; body: unknown }) {
+				const row = rows.get(`${keyId}|${key}`);
+				if (!row) return;
+				row.status = 'completed';
+				row.responseStatus = response.status;
+				row.responseBody = response.body;
+			}
+		}
+	};
+});
 
 vi.mock('$lib/server/groups', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/groups')>()),
@@ -46,10 +99,11 @@ vi.mock('../idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../idempotency')>()),
 	withDerivedIdempotency
 }));
-// The store is a DB handle the stubbed guard never uses.
+// An in-memory store in place of the DB handle: unused by the stubbed guard, and the
+// thing the `#90` block inspects when it runs the real one.
 vi.mock('$lib/server/api/idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/api/idempotency')>()),
-	createDbIdempotencyStore: () => ({}) as never
+	createDbIdempotencyStore: () => memoryIdempotencyStore
 }));
 
 // Imported AFTER the mocks are registered.
@@ -137,6 +191,7 @@ function serviceInput(): {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	idempotencyRows.clear();
 	consumeRateLimit.mockResolvedValue({
 		allowed: true,
 		count: 1,
@@ -300,20 +355,102 @@ describe('the date (§7.1 / §7.7)', () => {
 	});
 
 	it('a rejection from the SHARED schema is re-labelled onto the argument the agent sent', async () => {
-		// The service validates `capturedFor`; the model sent `date`. Reporting the
+		// The schema validates `capturedFor`; the model sent `date`. Reporting the
 		// internal name would name a field it cannot find in its own schema (ADR-0009).
-		createCapture.mockRejectedValueOnce(
-			new CaptureValidationError([
-				{ code: 'custom', path: ['capturedFor'], message: 'The date cannot be in the future' }
-			] as never)
-		);
-
 		const result = await call({ groupId: GROUP_ID, note: 'dinner', date: '2030-01-01' });
 
 		expect(result.isError).toBe(true);
 		const details = envelopeOf(result).details as { fieldErrors: Record<string, string[]> };
 		expect(details.fieldErrors.date).toEqual(['The date cannot be in the future']);
 		expect(details.fieldErrors).not.toHaveProperty('capturedFor');
+		// The gate ran BEFORE the write was attempted at all (#90).
+		expect(createCapture).not.toHaveBeenCalled();
+	});
+
+	it('a LATE rejection from the service is re-labelled too — it stays authoritative', async () => {
+		// `createCapture` re-parses inside its own transaction (it is the shared gate the
+		// web route uses), so its verdict still reaches the agent in the tool's own
+		// vocabulary even though the identical check has already passed above.
+		createCapture.mockRejectedValueOnce(
+			new CaptureValidationError([
+				{ code: 'custom', path: ['capturedFor'], message: 'The date cannot be in the future' }
+			] as never)
+		);
+
+		const result = await call({ groupId: GROUP_ID, note: 'dinner', date: '2026-09-05' });
+
+		const details = envelopeOf(result).details as { fieldErrors: Record<string, string[]> };
+		expect(details.fieldErrors.date).toEqual(['The date cannot be in the future']);
+		expect(details.fieldErrors).not.toHaveProperty('capturedFor');
+	});
+});
+
+// ── #90 — the defect: validation that ran INSIDE the guard's `fn` ───────────────
+//
+// `withIdempotency` inserts its pending row BEFORE `fn` and never removes it when
+// `fn` throws. With the shared schema running inside `fn`, a rejected call left a
+// reserved key behind, and the agent's identical retry met `conflict/in_progress`
+// ("your own preceding call, which has NOT failed — do NOT retry") for a note that
+// was never written and never would be — the misleading, non-self-correctable
+// guidance ADR-0009 exists to forbid.
+//
+// So these run the REAL guard against the in-memory store and read the rows.
+describe('a REJECTED call reserves no idempotency key (#90)', () => {
+	beforeEach(async () => {
+		const actual = await vi.importActual<typeof import('../idempotency')>('../idempotency');
+		withDerivedIdempotency.mockImplementation(actual.withDerivedIdempotency);
+	});
+
+	it.each([
+		['an amount of zero', { amount: '0' }, /more than zero/i, 'amount'],
+		['a future date', { date: '2030-01-01' }, /cannot be in the future/i, 'date']
+	])(
+		'%s: rejected, NO row stored, and the identical retry repeats the same error',
+		async (_label, extra, messagePattern, field) => {
+			const args = { groupId: GROUP_ID, note: 'dinner', ...extra };
+
+			const first = await call(args);
+			expect(first.isError).toBe(true);
+			expect(envelopeOf(first).code).toBe('validation_error');
+			const firstFields = (envelopeOf(first).details as { fieldErrors: Record<string, string[]> })
+				.fieldErrors;
+			expect(firstFields[field].join(' ')).toMatch(messagePattern);
+			// The whole point: nothing was reserved, so nothing is stuck.
+			expect(idempotencyRows.size).toBe(0);
+			expect(createCapture).not.toHaveBeenCalled();
+
+			// The retry an agent actually makes when a call looks like it failed.
+			// The SAME self-correctable error, not the `conflict/in_progress` the stuck
+			// pending row used to produce.
+			const second = await call(args);
+			expect(envelopeOf(second).code).toBe('validation_error');
+			expect(envelopeOf(second)).toEqual(envelopeOf(first));
+			expect(idempotencyRows.size).toBe(0);
+		}
+	);
+
+	it('a CORRECTED retry after a rejection is noted normally', async () => {
+		await call({ groupId: GROUP_ID, note: 'dinner', amount: '0' });
+
+		const result = await call({ groupId: GROUP_ID, note: 'dinner', amount: '1200' });
+
+		expect(result.isError).toBeUndefined();
+		expect(payloadOf(result).replayed).toBe(false);
+		expect(createCapture).toHaveBeenCalledTimes(1);
+	});
+
+	it('a SUCCESSFUL call still reserves a key, so the identical retry REPLAYS', async () => {
+		const args = { groupId: GROUP_ID, note: 'dinner', amount: '1200' };
+
+		const first = await call(args);
+		expect(payloadOf(first).replayed).toBe(false);
+		expect(idempotencyRows.size).toBe(1);
+
+		const second = await call(args);
+		expect(second.isError).toBeUndefined();
+		expect(payloadOf(second).replayed).toBe(true);
+		// One note, one write — the guard is still doing its job.
+		expect(createCapture).toHaveBeenCalledTimes(1);
 	});
 });
 

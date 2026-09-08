@@ -47,6 +47,7 @@ import { addMember, removeMember, renameMember } from '$lib/server/members';
 import { createTransaction, softDeleteTransaction } from '$lib/server/transactions';
 import { createCapture } from '$lib/server/captures';
 import { members as membersTable } from '$lib/server/db/groups-schema';
+import { captures as capturesTable } from '$lib/server/db/captures-schema';
 import {
 	transactionCharges,
 	transactionShares,
@@ -2050,6 +2051,73 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			await createLunch({ title: 'Coffee', amount: '60.00' });
 
 			expect(await rows()).toHaveLength(2);
+		});
+	});
+
+	// ── 11c-bis. create_capture — a REJECTED call reserves nothing (#90) ──────
+	//            The defect: the shared `buildCreateCaptureSchema` ran INSIDE the
+	//            guard's `fn`, but `withIdempotency` writes its pending row BEFORE
+	//            `fn` and never removes it on a throw. So a rejected call left a key
+	//            reserved, and the agent's identical retry met `conflict/in_progress`
+	//            ("your own preceding call, which has NOT failed — do NOT retry") for
+	//            a note that was never written. Against the REAL store, because the
+	//            stuck row is a real row.
+
+	describe('tools/call create_capture idempotency (#90)', () => {
+		/** Note the same thing twice, exactly as an agent retrying a call would. */
+		async function noteTwice(args: Record<string, unknown>) {
+			const first = await mcpToolCall(
+				'create_capture',
+				{ groupId: s.group.id, ...args },
+				{ key: s.writeKey.key }
+			);
+			const second = await mcpToolCall(
+				'create_capture',
+				{ groupId: s.group.id, ...args },
+				{ key: s.writeKey.key }
+			);
+			return { first: first.body.result, second: second.body.result };
+		}
+
+		/** The envelope an `isError` tool result carries (ADR-0009). */
+		function envelope(result: unknown) {
+			return (result as { structuredContent?: { error?: { code: string; message: string } } })
+				?.structuredContent?.error;
+		}
+
+		/** Every record-later note stored for the fixture group. */
+		async function noteRows() {
+			return db.select().from(capturesTable).where(eq(capturesTable.groupId, s.group.id));
+		}
+
+		it.each([
+			['an amount of zero', { note: 'dinner', amount: '0' }],
+			['a future date', { note: 'dinner', date: '2099-01-01' }]
+		])(
+			'%s: the identical retry repeats the SAME validation_error, never a conflict',
+			async (_label, args) => {
+				const { first, second } = await noteTwice(args);
+
+				expect(first?.isError).toBe(true);
+				expect(envelope(first)?.code).toBe('validation_error');
+				// The regression: `conflict` here tells the agent a note it can see nowhere
+				// might have landed, and forbids the retry that would fix the call.
+				expect(second?.isError).toBe(true);
+				expect(envelope(second)?.code).toBe('validation_error');
+				expect(envelope(second)).toEqual(envelope(first));
+
+				// Nothing was written either — the rejection is the whole outcome.
+				expect(await noteRows()).toHaveLength(0);
+			}
+		);
+
+		it('a valid note still de-duplicates — the guard was moved, not weakened', async () => {
+			const { first, second } = await noteTwice({ note: 'night market snacks' });
+
+			expect(first?.isError).toBeUndefined();
+			expect(second?.isError).toBeUndefined();
+			expect((second?.structuredContent as unknown as { replayed: boolean }).replayed).toBe(true);
+			expect(await noteRows()).toHaveLength(1);
 		});
 	});
 

@@ -37,7 +37,9 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 		/** Ordered log of DB operations, e.g. 'insert:captures'. */
 		log: [] as string[],
 		inserts: [] as { table: unknown; values: Record<string, unknown> }[],
-		updates: [] as { table: unknown; set: Record<string, unknown> }[]
+		updates: [] as { table: unknown; set: Record<string, unknown> }[],
+		/** Every `innerJoin(table, on)` — the ON clause is compiled to SQL by a test. */
+		joins: [] as { table: unknown; on: unknown }[]
 	};
 
 	function tableName(table: unknown): string {
@@ -52,9 +54,13 @@ const { state, calls, makeDb } = vi.hoisted(() => {
 	function selectChain() {
 		const chain: Record<string, unknown> = {};
 		let table: unknown;
-		for (const m of ['innerJoin', 'where', 'limit', 'orderBy', 'groupBy', 'for']) {
+		for (const m of ['where', 'limit', 'orderBy', 'groupBy', 'for']) {
 			chain[m] = () => chain;
 		}
+		chain.innerJoin = (t: unknown, on: unknown) => {
+			calls.joins.push({ table: t, on });
+			return chain;
+		};
 		chain.from = (t: unknown) => {
 			table = t;
 			return chain;
@@ -155,9 +161,10 @@ import { captures } from './db/captures-schema';
 import { auditLog } from './db/audit-schema';
 import { currencies } from './db/currencies-schema';
 import { transactions } from './db/transactions-schema';
-import { members } from './db/groups-schema';
+import { groups, members } from './db/groups-schema';
 
 state.names.set(members, 'members');
+state.names.set(groups, 'groups');
 state.names.set(captures, 'captures');
 state.names.set(currencies, 'currencies');
 state.names.set(transactions, 'transactions');
@@ -206,6 +213,7 @@ beforeEach(() => {
 	calls.log.length = 0;
 	calls.inserts.length = 0;
 	calls.updates.length = 0;
+	calls.joins.length = 0;
 	createTransaction.mockReset();
 });
 
@@ -593,6 +601,26 @@ describe('countOpenCapturesByGroup', () => {
 		// without this it would be counted (and shown) forever.
 		expect(sql).toContain('"discarded_at" is null');
 		expect(sql).not.toContain(' or ');
+	});
+
+	it('gates on the FULL access check — an active member AND a live group (§12)', async () => {
+		// The join is the BATCHED form of `userHasGroupAccess`, and it has to be the
+		// whole of it. Dropping `groups.deleted_at IS NULL` would leave a soft-deleted
+		// group's open notes counted — two access predicates differing silently, which is
+		// how one of them quietly stops meaning what its docstring says.
+		programSelects(captures, []);
+
+		await countOpenCapturesByGroup({ userId: 'user-42', groupIds: ['group-1'] });
+
+		const joined = calls.joins.map((j) => ({
+			table: j.table,
+			sql: new PgDialect().sqlToQuery(j.on as Parameters<PgDialect['sqlToQuery']>[0]).sql
+		}));
+		const memberJoin = joined.find((j) => j.table === members);
+		const groupJoin = joined.find((j) => j.table === groups);
+
+		expect(memberJoin?.sql).toContain('"deactivated_at" is null');
+		expect(groupJoin?.sql).toContain('"deleted_at" is null');
 	});
 
 	it('shares that definition with the tray, rather than agreeing by inspection', () => {

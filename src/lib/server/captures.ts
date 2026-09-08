@@ -49,12 +49,12 @@ import { z } from 'zod';
 import { db } from './db';
 import { captures } from './db/captures-schema';
 import { currencies } from './db/currencies-schema';
-import { members } from './db/groups-schema';
+import { groups, members } from './db/groups-schema';
 import { transactions } from './db/transactions-schema';
 import { GroupAccessError, userHasGroupAccess } from './groups';
 import { createTransaction, TransactionNotFoundError } from './transactions';
 import { writeAuditLog, type AuditVia } from './audit';
-import { buildCreateCaptureSchema } from '$lib/schemas/capture';
+import { buildCreateCaptureSchema, type CreateCaptureInput } from '$lib/schemas/capture';
 import type { EntryCurrencyOption } from '$lib/schemas/currency';
 import { CURRENCY_CODES, getCurrency, type SeededCurrencyCode } from '$lib/money';
 
@@ -168,6 +168,36 @@ async function allowedCurrencies(
 		.where(eq(currencies.groupId, groupId));
 
 	return [...SEEDED_CURRENCY_OPTIONS, ...rows];
+}
+
+/**
+ * Run the create-Capture gate against the SEEDED currency set ALONE, without
+ * opening a database transaction — throwing the same {@link CaptureValidationError}
+ * {@link createCapture} throws.
+ *
+ * For a caller that cannot name a group's CUSTOM currency, this is the identical
+ * verdict `createCapture` will reach: {@link allowedCurrencies} widens the set only
+ * for a submitted non-seeded code, so an absent or seeded `currency` already makes
+ * that query return exactly `SEEDED_CURRENCY_OPTIONS`.
+ *
+ * That caller is the MCP `create_capture` tool. A group's custom currency lives
+ * under an opaque `cur_…` key the agent has never seen and must never be handed
+ * (ADR-0014 decision 7), so the tool restricts `currency` to the seeded codes before
+ * anything else — and then needs to know whether the call can succeed BEFORE its
+ * idempotency guard reserves a key for it, because a rejection raised after that
+ * reservation would answer the agent's corrected retry with a phantom
+ * `conflict/in_progress` (ADR-0005, ADR-0009).
+ *
+ * This does NOT replace the parse inside `createCapture`: that one stays the
+ * authority, runs for the web route too, and re-checks the same input inside the
+ * write's own transaction.
+ */
+export function parseSeededCaptureInput(input: unknown): CreateCaptureInput {
+	const parsed = buildCreateCaptureSchema(SEEDED_CURRENCY_OPTIONS).safeParse(input);
+	if (!parsed.success) {
+		throw new CaptureValidationError(parsed.error.issues);
+	}
+	return parsed.data;
 }
 
 /** The `currency` value a raw input object carries, if it carries one at all. */
@@ -299,11 +329,13 @@ export async function listOpenCaptures(userId: string, groupId: string): Promise
  * `captures_group_id_open_idx` exists precisely so it never scans a group's whole
  * history of already-recorded rows.
  *
- * AUTHORIZATION (§12) is the `members` INNER JOIN, which is the batched form of
- * `userHasGroupAccess`'s active-member-link check — a group the caller has no live
- * member row in contributes no row, so it is simply absent from the map rather than
- * reported as 0. Absent and zero are the same to a caller that reads `?? 0`, and the
- * distinction never leaks that a group exists.
+ * AUTHORIZATION (§12) is the `members` + `groups` INNER JOIN, which is the batched
+ * form of `userHasGroupAccess` — an ACTIVE member link in a group that is not
+ * soft-deleted. Both halves are there because that check has both: a group the
+ * caller has no live member row in, and a soft-deleted group, each contribute no
+ * row, so they are simply absent from the map rather than reported as 0. Absent and
+ * zero are the same to a caller that reads `?? 0`, and the distinction never leaks
+ * that a group exists.
  */
 export async function countOpenCapturesByGroup({
 	userId,
@@ -326,6 +358,7 @@ export async function countOpenCapturesByGroup({
 				isNull(members.deactivatedAt)
 			)
 		)
+		.innerJoin(groups, and(eq(groups.id, captures.groupId), isNull(groups.deletedAt)))
 		.where(and(inArray(captures.groupId, [...groupIds]), openCapturePredicate()))
 		.groupBy(captures.groupId);
 

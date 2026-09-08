@@ -52,8 +52,9 @@
 //     as the insert (§12.1), carrying `auditVia(principal)` provenance.
 //   - Validate the note/date/currency itself beyond shape: the SHARED
 //     `buildCreateCaptureSchema` (which the web form uses) is the one authority, so
-//     the two entry points cannot drift. This tool only re-labels the field paths
-//     into its own argument names.
+//     the two entry points cannot drift. This tool RUNS that schema — once, ahead of
+//     the idempotency guard, over the seeded currency set (see below) — and re-labels
+//     its field paths into its own argument names; it never restates its rules.
 //
 // ── Idempotency (§16.6, ADR-0005) — the guard, without the peek ──────────────
 // The write is routed through the same server-derived ~60s sliding window every
@@ -61,6 +62,14 @@
 // `Idempotency-Key`, so the server derives one from (key + group + tool + arguments
 // + window). A content-identical retry REPLAYS and says so; the same note an hour
 // later is a new row, as it must be.
+//
+// EVERY rejection happens BEFORE the guard is entered (#90). That is a property the
+// guard cannot provide for itself: `withIdempotency` writes its pending row first and
+// leaves it there if `fn` throws, so validation living inside `fn` would answer a
+// corrected retry with `conflict/in_progress` for a note that was never written. The
+// shared schema is therefore run above, via `parseSeededCaptureInput` — legitimate
+// only because this tool accepts SEEDED currency codes alone, which is exactly the
+// set `createCapture` will validate against for the same input.
 //
 // It does NOT call `peekIdempotentReplay` first, and that is a considered omission.
 // That pre-check exists for one reason: since ADR-0015 the ledger tools resolve
@@ -74,7 +83,11 @@
 import { z } from 'zod';
 import { parseAmount, SEEDED_CURRENCY_DESCRIPTORS, type CurrencyDescriptor } from '$lib/money';
 import { CAPTURE_NOTE_MAX_LENGTH } from '$lib/schemas/capture';
-import { createCapture, CaptureValidationError } from '$lib/server/captures';
+import {
+	createCapture,
+	parseSeededCaptureInput,
+	CaptureValidationError
+} from '$lib/server/captures';
 import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { auditVia } from '$lib/server/api/provenance';
 import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
@@ -271,6 +284,23 @@ export const createCaptureTool: McpTool<z.infer<typeof createCaptureArgs>> = {
 			...(date !== undefined ? { capturedFor: date } : {})
 		};
 
+		// ── The SHARED gate runs BEFORE the guard reserves a key (#90) ─────────────
+		// `withDerivedIdempotency` inserts its pending row BEFORE it runs `fn`, and never
+		// removes it when `fn` throws. So a rejection raised inside `fn` — which is where
+		// `createCapture`'s own parse lives — would leave a key reserved for a call that
+		// wrote nothing and never will: the agent's identical retry would then meet
+		// `conflict/in_progress` ("your own preceding call, which has NOT failed — do NOT
+		// retry"), which is precisely the misleading, non-self-correctable guidance
+		// ADR-0009 forbids. Running the SAME `buildCreateCaptureSchema` here, over the
+		// seeded set this tool has already restricted `currency` to, keeps every rejection
+		// outside the store. It runs AFTER `loadGroupView`, so a group the caller cannot
+		// see is still the conflated `not_found` and validation never becomes an oracle.
+		try {
+			parseSeededCaptureInput(input);
+		} catch (err) {
+			throw err instanceof CaptureValidationError ? relabelIssues(err) : err;
+		}
+
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005) ────────
 		// Everything above is validation that has now succeeded and has touched nothing,
 		// so a call that was going to be rejected never inserts an idempotency row and
@@ -295,9 +325,9 @@ export const createCaptureTool: McpTool<z.infer<typeof createCaptureArgs>> = {
 						via: auditVia(principal)
 					});
 				} catch (err) {
-					// Re-label the SHARED schema's field paths into this tool's argument names, so
-					// a rejected date is reported on `date` (not `capturedFor`) and the agent can
-					// self-correct against the arguments it actually sent (ADR-0009).
+					// The service re-parses inside its own transaction and stays authoritative, so
+					// its rejection is re-labelled here too — `date` (not `capturedFor`) — even
+					// though the identical gate above has already passed (ADR-0009).
 					throw err instanceof CaptureValidationError ? relabelIssues(err) : err;
 				}
 
