@@ -119,10 +119,10 @@ export function deriveIdempotencyKey({
 
 /** The outcome of an idempotent MCP write. */
 export interface DerivedIdempotencyOutcome {
-	/** The response — freshly produced by `fn`, or replayed from the store. */
+	/** The response — freshly produced by `respond`, or replayed from the store. */
 	response: IdempotentResponse;
 	/**
-	 * `null` when `fn` actually RAN. Otherwise how long ago the original create
+	 * `null` when `write` actually RAN. Otherwise how long ago the original create
 	 * landed, in ms — the "3 seconds" in "already recorded 3s ago". A replay is
 	 * SURFACED to the agent, never hidden (ADR-0005).
 	 */
@@ -249,8 +249,10 @@ export async function peekIdempotentReplay({
 }
 
 /**
- * Run `fn` at most once per (calling key + group + tool + arguments) within the
- * ~60s sliding window, via the existing `withIdempotency` store (ADR-0005).
+ * Run `write` at most once per (calling key + group + tool + arguments) within the
+ * ~60s sliding window, via the existing `withIdempotency` store (ADR-0005). A `write`
+ * that throws frees its reservation, exactly as in `withIdempotency`; `respond`
+ * shapes the stored response after the commit.
  *
  * The order of the two checks is the load-bearing part:
  *
@@ -263,8 +265,8 @@ export async function peekIdempotentReplay({
  *      the unique constraint, so concurrent retries race safely and the loser sees
  *      `in_progress` rather than both running the create (§16.6).
  *
- * Neither hit → `fn` runs, exactly once, and its response is stored for the rest of
- * the window.
+ * Neither hit → `write` runs, exactly once, and its response is stored for the rest
+ * of the window.
  *
  * A tool that calls `peekIdempotentReplay` first (to stay safe against
  * validation resolving mutable state ahead of this guard) will almost always
@@ -276,13 +278,14 @@ export async function peekIdempotentReplay({
  * Pure aside from the injected `store` and `now`, so every branch — including the
  * boundary case — unit-tests without a database.
  */
-export async function withDerivedIdempotency({
+export async function withDerivedIdempotency<W>({
 	keyId,
 	groupId,
 	toolName,
 	args,
 	store,
-	fn,
+	write,
+	respond,
 	now = () => new Date()
 }: {
 	keyId: string;
@@ -290,7 +293,8 @@ export async function withDerivedIdempotency({
 	toolName: string;
 	args: unknown;
 	store: IdempotencyStore;
-	fn: () => Promise<IdempotentResponse>;
+	write: () => Promise<W>;
+	respond: (written: W) => Promise<IdempotentResponse>;
 	now?: () => Date;
 }): Promise<DerivedIdempotencyOutcome> {
 	const at = now();
@@ -321,7 +325,8 @@ export async function withDerivedIdempotency({
 		idempotencyKey: derive(bucket),
 		rawBody,
 		store,
-		fn,
+		write,
+		respond,
 		// The SAME instant the buckets were derived from — a `now()` that drifted across
 		// the boundary mid-call would file the pending row in a bucket this call never
 		// checked, leaving it invisible to the next retry.

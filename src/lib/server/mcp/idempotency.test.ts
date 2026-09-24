@@ -60,6 +60,9 @@ function makeStore(): IdempotencyStore & { rows: Map<string, IdempotencyRecord> 
 				responseStatus: response.status,
 				responseBody: response.body
 			});
+		},
+		async releasePending(keyId, key) {
+			if (rows.get(at(keyId, key))?.status === 'pending') rows.delete(at(keyId, key));
 		}
 	};
 }
@@ -67,12 +70,15 @@ function makeStore(): IdempotencyStore & { rows: Map<string, IdempotencyRecord> 
 /** The arguments of a ฿240 lunch — the ADR's own example. */
 const LUNCH = { groupId: 'grp_1', title: 'Lunch', amount: '240', splitBetween: ['m_1', 'm_2'] };
 
+/** A `respond` that stores whatever `write` produced, for tests where `write` builds the response. */
+const passThrough = async (response: IdempotentResponse) => response;
+
 /** Drive the mechanism at instant `at` with a create that returns a fresh row id. */
 async function callAt(
 	store: IdempotencyStore,
 	at: Date,
 	args: unknown = LUNCH,
-	fn: () => Promise<IdempotentResponse> = async () => ({ status: 200, body: { id: 'txn_1' } })
+	write: () => Promise<IdempotentResponse> = async () => ({ status: 200, body: { id: 'txn_1' } })
 ) {
 	return withDerivedIdempotency({
 		keyId: 'key_1',
@@ -80,7 +86,8 @@ async function callAt(
 		toolName: 'create_transaction',
 		args,
 		store,
-		fn,
+		write,
+		respond: passThrough,
 		now: () => at
 	});
 }
@@ -406,7 +413,8 @@ describe('withDerivedIdempotency — concurrency and clock hazards', () => {
 			toolName: 'create_transaction',
 			args: LUNCH,
 			store,
-			fn: async () => ({ status: 200, body: { id: 't1' } }),
+			write: async () => ({ status: 200, body: { id: 't1' } }),
+			respond: passThrough,
 			now: drifting
 		});
 
@@ -432,6 +440,22 @@ describe('withDerivedIdempotency — concurrency and clock hazards', () => {
 		expect(out.replayedAfterMs).toBe(0);
 	});
 
+	it('a REJECTED write frees its key: the identical retry runs again instead of meeting in_progress', async () => {
+		const store = makeStore();
+		const rejection = new Error('amount must be positive');
+		const write = vi
+			.fn<() => Promise<IdempotentResponse>>()
+			.mockRejectedValueOnce(rejection)
+			.mockResolvedValueOnce({ status: 200, body: { id: 't1' } });
+
+		await expect(callAt(store, T0, LUNCH, write)).rejects.toBe(rejection);
+		expect(store.rows.size).toBe(0);
+
+		const retry = await callAt(store, at(2), LUNCH, write);
+		expect(retry).toEqual({ response: { status: 200, body: { id: 't1' } }, replayedAfterMs: null });
+		expect(write).toHaveBeenCalledTimes(2);
+	});
+
 	it('scopes the window to the CALLING key: another key’s identical create is its own', async () => {
 		const store = makeStore();
 		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({ status: 200, body: {} }));
@@ -443,7 +467,8 @@ describe('withDerivedIdempotency — concurrency and clock hazards', () => {
 			toolName: 'create_transaction',
 			args: LUNCH,
 			store,
-			fn,
+			write: fn,
+			respond: passThrough,
 			now: () => at(1)
 		});
 

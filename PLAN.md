@@ -1565,6 +1565,8 @@ Every error is `{ "error": { "code": <stable string>, "message": <human>,
   - same key + different body → **409 conflict**;
   - row inserted **pending-first under a unique constraint** → concurrent retries
     race safely, the loser gets **409 (request in progress)**;
+  - a create the ledger **rejects** (e.g. 422) frees its key, so a corrected retry
+    with the same key runs; a failure **after** the write committed keeps it;
   - no header → at-least-once (a retry may create a duplicate; documented).
     The idempotency key is the **sole** dedup guard (no fuzzy dedup, no client id).
 - **Concurrency = last-write-wins in v1** — `PUT`/`DELETE`/restore carry **no

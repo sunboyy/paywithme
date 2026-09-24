@@ -128,10 +128,18 @@ beforeEach(() => {
 	loadMemberViews.mockResolvedValue(members);
 	createTransaction.mockResolvedValue('txn_1');
 	getTransactionDetail.mockImplementation(async () => persistedDetail());
-	withDerivedIdempotency.mockImplementation(async ({ fn }: { fn: () => Promise<unknown> }) => ({
-		response: await fn(),
-		replayedAfterMs: null
-	}));
+	withDerivedIdempotency.mockImplementation(
+		async ({
+			write,
+			respond
+		}: {
+			write: () => Promise<unknown>;
+			respond: (written: unknown) => Promise<unknown>;
+		}) => ({
+			response: await respond(await write()),
+			replayedAfterMs: null
+		})
+	);
 	// Its own suite lives in `../idempotency.test.ts`; by default there is no earlier
 	// completed match, so the ordinary path (validate, then the guard above) runs.
 	peekIdempotentReplay.mockResolvedValue(null);

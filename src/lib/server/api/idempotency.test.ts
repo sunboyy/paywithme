@@ -84,12 +84,15 @@ function makeStore({
 }): IdempotencyStore & {
 	inserted: unknown[];
 	completed: { keyId: string; key: string; response: IdempotentResponse }[];
+	released: { keyId: string; key: string }[];
 } {
 	const inserted: unknown[] = [];
 	const completed: { keyId: string; key: string; response: IdempotentResponse }[] = [];
+	const released: { keyId: string; key: string }[] = [];
 	return {
 		inserted,
 		completed,
+		released,
 		async insertPending(row) {
 			inserted.push(row);
 			return won;
@@ -99,6 +102,9 @@ function makeStore({
 		},
 		async markCompleted(keyId, key, response) {
 			completed.push({ keyId, key, response });
+		},
+		async releasePending(keyId, key) {
+			released.push({ keyId, key });
 		}
 	};
 }
@@ -116,11 +122,12 @@ describe('fingerprintRequestBody', () => {
 });
 
 describe('withIdempotency — winner runs the create ONCE', () => {
-	it('inserts pending, runs fn, stores the response, and returns it', async () => {
+	it('inserts pending, runs write then respond, stores the response, and returns it', async () => {
 		const store = makeStore({ won: true });
-		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
+		const write = vi.fn(async () => 't1');
+		const respond = vi.fn(async (id: string): Promise<IdempotentResponse> => ({
 			status: 201,
-			body: { id: 't1' }
+			body: { id }
 		}));
 		const now = new Date('2026-07-12T00:00:00.000Z');
 
@@ -129,12 +136,15 @@ describe('withIdempotency — winner runs the create ONCE', () => {
 			idempotencyKey: 'abc',
 			rawBody: '{"amount":100}',
 			store,
-			fn,
+			write,
+			respond,
 			now: () => now
 		});
 
 		expect(res).toEqual({ status: 201, body: { id: 't1' } });
-		expect(fn).toHaveBeenCalledTimes(1);
+		expect(write).toHaveBeenCalledTimes(1);
+		expect(respond).toHaveBeenCalledWith('t1');
+		expect(store.released).toEqual([]);
 		// The pending row carries the 24h TTL boundary and the body fingerprint.
 		expect(store.inserted).toHaveLength(1);
 		const row = store.inserted[0] as { requestHash: string; expiresAt: Date };
@@ -147,11 +157,76 @@ describe('withIdempotency — winner runs the create ONCE', () => {
 	});
 });
 
+describe('withIdempotency — a failed step', () => {
+	it('releases the reservation and rethrows when write throws', async () => {
+		const store = makeStore({ won: true });
+		const rejection = new Error('amount must be positive');
+		const respond = vi.fn();
+
+		const err = await withIdempotency({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			rawBody: '{"amount":0}',
+			store,
+			write: async () => {
+				throw rejection;
+			},
+			respond
+		}).catch((e) => e);
+
+		expect(err).toBe(rejection);
+		expect(store.released).toEqual([{ keyId: 'key_1', key: 'abc' }]);
+		expect(respond).not.toHaveBeenCalled();
+		expect(store.completed).toEqual([]);
+	});
+
+	it('keeps the reservation when respond throws, because write already committed', async () => {
+		const store = makeStore({ won: true });
+		const readBackFailure = new Error('connection lost');
+
+		const err = await withIdempotency({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			rawBody: '{"amount":100}',
+			store,
+			write: async () => 't1',
+			respond: async () => {
+				throw readBackFailure;
+			}
+		}).catch((e) => e);
+
+		expect(err).toBe(readBackFailure);
+		expect(store.released).toEqual([]);
+		expect(store.completed).toEqual([]);
+	});
+
+	it('still surfaces the write error when releasing the reservation fails', async () => {
+		const store = makeStore({ won: true });
+		store.releasePending = async () => {
+			throw new Error('release failed');
+		};
+		const rejection = new Error('amount must be positive');
+
+		const err = await withIdempotency({
+			keyId: 'key_1',
+			idempotencyKey: 'abc',
+			rawBody: '{"amount":0}',
+			store,
+			write: async () => {
+				throw rejection;
+			},
+			respond: vi.fn()
+		}).catch((e) => e);
+
+		expect(err).toBe(rejection);
+	});
+});
+
 /** The insert time a stored row carries (`createdAt`); only the MCP path reads it. */
 const RECORDED_AT = new Date('2026-07-12T00:00:00.000Z');
 
 describe('withIdempotency — loser (row already exists)', () => {
-	it('REPLAYS a completed row with a matching body — fn never runs', async () => {
+	it('REPLAYS a completed row with a matching body — neither step runs', async () => {
 		const hash = fingerprintRequestBody('{"amount":100}');
 		const store = makeStore({
 			won: false,
@@ -163,21 +238,21 @@ describe('withIdempotency — loser (row already exists)', () => {
 				createdAt: RECORDED_AT
 			}
 		});
-		const fn = vi.fn(async (): Promise<IdempotentResponse> => ({
-			status: 201,
-			body: { id: 'DUP' }
-		}));
+		const write = vi.fn(async () => 'DUP');
+		const respond = vi.fn();
 
 		const res = await withIdempotency({
 			keyId: 'key_1',
 			idempotencyKey: 'abc',
 			rawBody: '{"amount":100}',
 			store,
-			fn
+			write,
+			respond
 		});
 
 		expect(res).toEqual({ status: 201, body: { id: 't1' } });
-		expect(fn).not.toHaveBeenCalled();
+		expect(write).not.toHaveBeenCalled();
+		expect(respond).not.toHaveBeenCalled();
 		expect(store.completed).toHaveLength(0);
 	});
 
@@ -202,7 +277,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 			idempotencyKey: 'abc',
 			rawBody: '{"amount":100}',
 			store,
-			fn: vi.fn(),
+			write: vi.fn(),
+			respond: vi.fn(),
 			onReplay
 		});
 
@@ -224,7 +300,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 			idempotencyKey: 'abc',
 			rawBody: '{}',
 			store,
-			fn: async () => ({ status: 201, body: { id: 't1' } }),
+			write: async () => 't1',
+			respond: async (id) => ({ status: 201, body: { id } }),
 			onReplay
 		});
 
@@ -242,19 +319,20 @@ describe('withIdempotency — loser (row already exists)', () => {
 				createdAt: RECORDED_AT
 			}
 		});
-		const fn = vi.fn();
+		const write = vi.fn();
 
 		const err = await withIdempotency({
 			keyId: 'key_1',
 			idempotencyKey: 'abc',
 			rawBody: '{"amount":999}', // different body → different hash
 			store,
-			fn
+			write,
+			respond: vi.fn()
 		}).catch((e) => e);
 
 		expect(err).toBeInstanceOf(IdempotencyConflictError);
 		expect((err as IdempotencyConflictError).reason).toBe('key_reused');
-		expect(fn).not.toHaveBeenCalled();
+		expect(write).not.toHaveBeenCalled();
 	});
 
 	it('409 in_progress when the row is still pending (same body, concurrent retry)', async () => {
@@ -275,7 +353,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 			idempotencyKey: 'abc',
 			rawBody: '{"amount":100}',
 			store,
-			fn: vi.fn()
+			write: vi.fn(),
+			respond: vi.fn()
 		}).catch((e) => e);
 
 		expect(err).toBeInstanceOf(IdempotencyConflictError);
@@ -289,7 +368,8 @@ describe('withIdempotency — loser (row already exists)', () => {
 			idempotencyKey: 'abc',
 			rawBody: '{}',
 			store,
-			fn: vi.fn()
+			write: vi.fn(),
+			respond: vi.fn()
 		}).catch((e) => e);
 		expect(err).toBeInstanceOf(IdempotencyConflictError);
 		expect((err as IdempotencyConflictError).reason).toBe('in_progress');

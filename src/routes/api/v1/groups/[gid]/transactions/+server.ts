@@ -236,8 +236,8 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	// The create (service call → 422/404 via the wrapper; settlement currency loaded
 	// server-side from the group) + the 201 DTO re-read (§16.4). Wrapped so a repeated
 	// Idempotency-Key replays this exact response instead of re-running it.
-	const build = async () => {
-		const txnId = await createTransaction({
+	const write = () =>
+		createTransaction({
 			userId: principal.userId,
 			groupId: gid,
 			input,
@@ -247,6 +247,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			// audit row written in the SAME transaction as the create (no schema change).
 			via: auditVia(principal)
 		});
+	const respond = async (txnId: string) => {
 		const detail = await getTransactionDetail({
 			userId: principal.userId,
 			groupId: gid,
@@ -263,6 +264,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 		keyId: principal.keyId,
 		idempotencyKeyHeader: request.headers.get('Idempotency-Key'),
 		rawBody: raw,
-		build
+		write,
+		respond
 	});
 });
