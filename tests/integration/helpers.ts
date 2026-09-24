@@ -128,6 +128,14 @@ async function probeDb(): Promise<{ ok: boolean; reason?: string }> {
 
 const probe = await probeDb();
 
+// CI sets `INTEGRATION_DB_REQUIRED=1`: an unusable database fails the run instead of
+// skipping every suite, so the job can never pass by testing nothing.
+if (process.env.INTEGRATION_DB_REQUIRED === '1' && !probe.ok) {
+	throw new Error(
+		`INTEGRATION_DB_REQUIRED=1 but the integration database is not usable: ${probe.reason}`
+	);
+}
+
 /**
  * `describe` that runs the block ONLY when the local Postgres is reachable AND
  * migrated; otherwise it's `describe.skip` with the reason appended to the label
