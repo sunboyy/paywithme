@@ -2055,13 +2055,10 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 	});
 
 	// ── 11c-bis. create_capture — a REJECTED call reserves nothing (#90) ──────
-	//            The defect: the shared `buildCreateCaptureSchema` ran INSIDE the
-	//            guard's `fn`, but `withIdempotency` writes its pending row BEFORE
-	//            `fn` and never removes it on a throw. So a rejected call left a key
-	//            reserved, and the agent's identical retry met `conflict/in_progress`
-	//            ("your own preceding call, which has NOT failed — do NOT retry") for
-	//            a note that was never written. Against the REAL store, because the
-	//            stuck row is a real row.
+	//            A rejected call that left its key reserved would answer the agent's
+	//            identical retry with `conflict/in_progress` ("your own preceding
+	//            call, which has NOT failed — do NOT retry") for a note that was never
+	//            written. Against the REAL store, because a stuck row is a real row.
 
 	describe('tools/call create_capture idempotency (#90)', () => {
 		/** Note the same thing twice, exactly as an agent retrying a call would. */
@@ -2111,7 +2108,7 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			}
 		);
 
-		it('a valid note still de-duplicates — the guard was moved, not weakened', async () => {
+		it('a valid note still de-duplicates', async () => {
 			const { first, second } = await noteTwice({ note: 'night market snacks' });
 
 			expect(first?.isError).toBeUndefined();
@@ -2150,6 +2147,23 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			expect(res.body.result?.isError, JSON.stringify(res.body.result)).toBeUndefined();
 			return res.body.result?.structuredContent as unknown as SettledWire;
 		}
+
+		it('a ZERO amount is rejected by the ledger, and the identical retry repeats the error, never a conflict', async () => {
+			const first = (await settleUp({ to: 'Bob', amount: '0' })).body.result;
+			const second = (await settleUp({ to: 'Bob', amount: '0' })).body.result;
+
+			const codeOf = (result: unknown) =>
+				(result as { structuredContent?: { error?: { code: string } } })?.structuredContent?.error
+					?.code;
+			expect(first?.isError).toBe(true);
+			expect(codeOf(first)).toBe('validation_error');
+			expect(codeOf(second)).toBe('validation_error');
+			expect(await rows()).toHaveLength(0);
+
+			const corrected = await settleUpOk({ to: 'Bob', amount: '12.00' });
+			expect(corrected.replayed).toBe(false);
+			expect(await rows()).toHaveLength(1);
+		});
 
 		/** Add a real, active member to the fixture group. */
 		async function addMemberNamed(displayName: string): Promise<string> {

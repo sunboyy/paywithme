@@ -81,7 +81,8 @@ describeIntegration('integration: /api/v1 idempotency + rate limits (issue #25)'
 		return txnRows.length;
 	}
 
-	const body = () => spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] });
+	const ids = () => ({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] });
+	const body = () => spendingInput(ids());
 
 	function post(idempotencyKey: string | undefined, payload: unknown, key = s.writeKey.key) {
 		return apiCall<Record<string, unknown>>('POST', `/api/v1/groups/${s.group.id}/transactions`, {
@@ -185,6 +186,29 @@ describeIntegration('integration: /api/v1 idempotency + rate limits (issue #25)'
 
 			expect(await txnCount()).toBe(1);
 			expect(await createAuditCount()).toBe(1);
+		});
+
+		it('a REJECTED create frees its key: the corrected retry with the same key is created, then replays', async () => {
+			const rejected = await post('fix-01', spendingInput({ ...ids(), amount: 0 }));
+			expect(rejected.status).toBe(422);
+			const rows = await db
+				.select()
+				.from(idempotencyKeyTable)
+				.where(
+					and(
+						eq(idempotencyKeyTable.keyId, s.writeKey.id),
+						eq(idempotencyKeyTable.idempotencyKey, 'fix-01')
+					)
+				);
+			expect(rows).toEqual([]);
+
+			const corrected = await post('fix-01', body());
+			expect(corrected.status).toBe(201);
+
+			const replay = await post('fix-01', body());
+			expect(replay.status).toBe(201);
+			expect(replay.body).toEqual(corrected.body);
+			expect(await txnCount()).toBe(1);
 		});
 
 		it('settle-up is idempotent too — a retry does not record the transfer twice', async () => {

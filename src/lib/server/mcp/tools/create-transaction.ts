@@ -432,21 +432,17 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
-		// arguments; everything between it and here is validation that has now succeeded,
-		// and none of it has touched the ledger — which is why the guard starts HERE: a
-		// create that was going to be rejected never inserts an idempotency row, so the
-		// agent's corrected retry is unimpeded.
-		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it must answer "did the model already send me exactly this?", and resolving the
 		// defaults first would make an explicit `paidBy` collide with an omitted one.
 		// ADR-0005 is explicit that this protects against an IDENTICAL retry only — an
 		// agent that re-phrases the title on retry gets two rows, and nothing can fix that.
 		//
-		// `fn` runs AT MOST ONCE per (calling key + group + tool + args + window): the
-		// create, its audit row (§12.1), and the read-back that shapes the response all
-		// live inside it, so a replay re-runs NONE of them and writes no audit row (§16.6).
+		// `write` runs AT MOST ONCE per (calling key + group + tool + args + window): the
+		// create and its audit row (§12.1), then `respond` reads it back to shape the
+		// response, so a replay re-runs NONE of them and writes no audit row (§16.6). A
+		// `write` that the service rejects frees the key, so the corrected retry is
+		// unimpeded.
 		const { response, replayedAfterMs } = await withDerivedIdempotency({
 			keyId: principal.keyId,
 			groupId,
@@ -456,13 +452,12 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 			// intents; no rich input can collide with a simpler transaction.
 			args: rawArgs,
 			store: idempotencyStore,
-			fn: async () => {
+			write: async () => {
 				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 				// key's provenance (`viaKey`) into the audit row — audit comes for free, we never
 				// write it ourselves.
-				let txnId: string;
 				try {
-					txnId = await createTransaction({
+					return await createTransaction({
 						userId: principal.userId,
 						groupId,
 						input,
@@ -485,7 +480,8 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					}
 					throw error;
 				}
-
+			},
+			respond: async (txnId) => {
 				// Re-read the persisted detail and project BOTH echo forms (see `../view/echo`):
 				//   - `recorded`: the structured view, every name wrapped + attributed (ADR-0003);
 				//   - `echo`:     the prose restatement that NAMES the humans (ADR-0006 legibility).

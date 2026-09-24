@@ -117,8 +117,8 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	// unknown from/to = 422; GroupAccessError → 404). Pass the loaded settlement
 	// currency (trusted group context). Wrapped so a repeated Idempotency-Key replays
 	// the stored 201 instead of recording the settle-up transfer twice (§16.6).
-	const build = async () => {
-		const txnId = await createTransaction({
+	const write = () =>
+		createTransaction({
 			userId: principal.userId,
 			groupId: gid,
 			input,
@@ -127,6 +127,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			// that key (metadata + summary suffix) while the actor stays the user.
 			via: auditVia(principal)
 		});
+	const respond = async (txnId: string) => {
 		const detail = await getTransactionDetail({
 			userId: principal.userId,
 			groupId: gid,
@@ -143,6 +144,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 		keyId: principal.keyId,
 		idempotencyKeyHeader: request.headers.get('Idempotency-Key'),
 		rawBody,
-		build
+		write,
+		respond
 	});
 });

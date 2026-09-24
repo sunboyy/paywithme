@@ -19,28 +19,31 @@ import {
 /**
  * Produce the create's `Response`, honoring an `Idempotency-Key` header when given.
  *
- * `build` runs the actual create (service call + DTO) and returns
- * `{ status, body }`. With a header, `build` runs AT MOST ONCE per (key + body):
- * a same-body retry replays the stored response, a different body → 409
+ * `write` runs the service call (one DB transaction); `respond` re-reads what it
+ * wrote and returns `{ status, body }`. With a header, `write` runs AT MOST ONCE per
+ * (key + body): a same-body retry replays the stored response, a different body → 409
  * `key_reused`, a concurrent retry → 409 `in_progress` (all raised by
- * {@link withIdempotency}, mapped to the envelope by `withWriteErrorHandling`).
- * Without a header, `build` runs directly.
+ * {@link withIdempotency}, mapped to the envelope by `withWriteErrorHandling`). A
+ * `write` that throws frees the key, so a corrected retry can reuse it.
+ * Without a header, both run directly.
  */
-export async function runCreateWithIdempotency({
+export async function runCreateWithIdempotency<W>({
 	keyId,
 	idempotencyKeyHeader,
 	rawBody,
-	build,
+	write,
+	respond,
 	store = createDbIdempotencyStore()
 }: {
 	keyId: string;
 	idempotencyKeyHeader: string | null;
 	rawBody: string;
-	build: () => Promise<IdempotentResponse>;
+	write: () => Promise<W>;
+	respond: (written: W) => Promise<IdempotentResponse>;
 	store?: IdempotencyStore;
 }): Promise<Response> {
 	if (!idempotencyKeyHeader) {
-		const { status, body } = await build();
+		const { status, body } = await respond(await write());
 		return json(body, { status });
 	}
 
@@ -49,7 +52,8 @@ export async function runCreateWithIdempotency({
 		idempotencyKey: idempotencyKeyHeader,
 		rawBody,
 		store,
-		fn: build
+		write,
+		respond
 	});
 	return json(body, { status });
 }

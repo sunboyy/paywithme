@@ -73,6 +73,11 @@ export interface IdempotencyStore {
 	load(keyId: string, idempotencyKey: string): Promise<IdempotencyRecord | null>;
 	/** Flip the row to `completed` and store the produced response. */
 	markCompleted(keyId: string, idempotencyKey: string, response: IdempotentResponse): Promise<void>;
+	/**
+	 * Delete the row, but only while it is still `pending`: a `completed` row holds a
+	 * response a retry must still be able to replay.
+	 */
+	releasePending(keyId: string, idempotencyKey: string): Promise<void>;
 }
 
 /**
@@ -100,26 +105,32 @@ export function fingerprintRequestBody(rawBody: string): string {
 }
 
 /**
- * Run `fn` AT MOST ONCE for a given `(keyId, idempotencyKey, rawBody)` (§16.6).
+ * Run `write` AT MOST ONCE for a given `(keyId, idempotencyKey, rawBody)` (§16.6),
+ * then `respond` to turn its result into the stored response.
  *
  * Flow:
  *   1. Fingerprint the raw body and try the PENDING-FIRST insert.
- *   2. WON the insert → run `fn`, store its `{status, body}`, mark the row
- *      `completed`, and return the response. `fn` runs exactly once, so the create
- *      + its audit row happen once.
+ *   2. WON the insert → run `write`. If it throws, release the reservation and
+ *      rethrow. Otherwise run `respond`, store its `{status, body}`, mark the row
+ *      `completed`, and return the response.
  *   3. LOST the insert (row already exists) → load it:
  *        - `completed` + matching hash → REPLAY the stored response (re-run nothing).
  *        - hash differs (whether pending or completed) → 409 `key_reused`.
  *        - still `pending` (same hash) → 409 `in_progress` (a concurrent retry).
  *
- * Pure aside from the injected `store`, so the three outcomes unit-test directly.
+ * `write` must be ONE database transaction, so a throw means nothing was committed
+ * and a corrected retry may reuse the key. `respond` runs after the commit: a throw
+ * there keeps the reservation, because releasing it would let a retry write twice.
+ *
+ * Pure aside from the injected `store`, so every outcome unit-tests directly.
  */
-export async function withIdempotency({
+export async function withIdempotency<W>({
 	keyId,
 	idempotencyKey,
 	rawBody,
 	store,
-	fn,
+	write,
+	respond,
 	now = () => new Date(),
 	onReplay
 }: {
@@ -127,12 +138,13 @@ export async function withIdempotency({
 	idempotencyKey: string;
 	rawBody: string;
 	store: IdempotencyStore;
-	fn: () => Promise<IdempotentResponse>;
+	write: () => Promise<W>;
+	respond: (written: W) => Promise<IdempotentResponse>;
 	now?: () => Date;
 	/**
-	 * Called with the STORED row when this call REPLAYED it (and therefore did NOT
-	 * run `fn`). The return value is unchanged either way — this is a notification,
-	 * not a hook that can alter the outcome.
+	 * Called with the STORED row when this call REPLAYED it (and therefore ran neither
+	 * `write` nor `respond`). The return value is unchanged either way — this is a
+	 * notification, not a hook that can alter the outcome.
 	 *
 	 * REST does not pass it: a replayed 201 is byte-identical to the original, which
 	 * is the entire contract. The MCP path (ADR-0005) does, because there a replay
@@ -154,9 +166,17 @@ export async function withIdempotency({
 		expiresAt
 	});
 
-	// We won the pending-first insert → run the create ONCE and store the response.
 	if (won) {
-		const response = await fn();
+		let written: W;
+		try {
+			written = await write();
+		} catch (error) {
+			// A failed release leaves the row pending, which is no worse than not trying,
+			// and must not replace the error the caller needs to see.
+			await store.releasePending(keyId, idempotencyKey).catch(() => {});
+			throw error;
+		}
+		const response = await respond(written);
 		await store.markCompleted(keyId, idempotencyKey, response);
 		return response;
 	}
@@ -248,6 +268,17 @@ export function createDbIdempotencyStore(): IdempotencyStore {
 				})
 				.where(
 					and(eq(idempotencyKeyTable.keyId, keyId), eq(idempotencyKeyTable.idempotencyKey, key))
+				);
+		},
+		async releasePending(keyId, key) {
+			await db
+				.delete(idempotencyKeyTable)
+				.where(
+					and(
+						eq(idempotencyKeyTable.keyId, keyId),
+						eq(idempotencyKeyTable.idempotencyKey, key),
+						eq(idempotencyKeyTable.status, 'pending')
+					)
 				);
 		}
 	};

@@ -348,11 +348,8 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 
 		// ── The WRITE, guarded by the server-derived ~60s window (ADR-0005, #33) ──
 		//
-		// The `peekIdempotentReplay` above already ruled out a completed match on the RAW
-		// arguments; everything between it and here is validation that has now succeeded,
-		// and none of it has touched the ledger — which is why the guard starts HERE: a
-		// settle-up that was going to be rejected never inserts an idempotency row, so the
-		// agent's corrected retry meets a clean path.
+		// A `write` the service rejects (a zero amount, a member deactivated since the
+		// roster was read) frees its key, so the agent's corrected retry meets a clean path.
 		//
 		// The key is derived from the RAW arguments the model sent, not the resolved ones:
 		// it answers "did the model already send me exactly this?", and resolving `from`
@@ -363,18 +360,18 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 			toolName: TOOL_NAME,
 			args: { groupId, to, from, amount },
 			store: idempotencyStore,
-			fn: async () => {
-				// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
-				// key's `viaKey` provenance into the audit row — we never write audit ourselves.
-				const txnId = await createTransaction({
+			// Create + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
+			// key's `viaKey` provenance into the audit row — we never write audit ourselves.
+			write: () =>
+				createTransaction({
 					userId: principal.userId,
 					groupId,
 					input,
 					settlementCurrency,
 					expectedMemberNames,
 					via: auditVia(principal)
-				});
-
+				}),
+			respond: async (txnId) => {
 				// Re-read the PERSISTED detail and project both echo forms (see `../view/echo`):
 				//   - `recorded`: the structured view, every name wrapped + attributed (ADR-0003);
 				//   - `echo`:     the prose that names the humans (ADR-0006 legibility).
