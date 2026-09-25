@@ -19,8 +19,8 @@ import {
 /**
  * Produce the create's `Response`, honoring an `Idempotency-Key` header when given.
  *
- * `write` runs the service call (one DB transaction); `respond` re-reads what it
- * wrote and returns `{ status, body }`. With a header, `write` runs AT MOST ONCE per
+ * `write` runs the service call (one DB transaction); `respond` shapes what it
+ * returned into `{ status, body }`. With a header, `write` runs AT MOST ONCE per
  * (key + body): a same-body retry replays the stored response, a different body → 409
  * `key_reused`, a concurrent retry → 409 `in_progress` (all raised by
  * {@link withIdempotency}, mapped to the envelope by `withWriteErrorHandling`). A

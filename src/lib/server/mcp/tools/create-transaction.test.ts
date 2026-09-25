@@ -6,14 +6,12 @@ const {
 	loadGroupView,
 	loadMemberViews,
 	createTransaction,
-	getTransactionDetail,
 	peekIdempotentReplay,
 	withDerivedIdempotency
 } = vi.hoisted(() => ({
 	loadGroupView: vi.fn(),
 	loadMemberViews: vi.fn(),
 	createTransaction: vi.fn(),
-	getTransactionDetail: vi.fn(),
 	peekIdempotentReplay: vi.fn(),
 	withDerivedIdempotency: vi.fn()
 }));
@@ -21,8 +19,7 @@ const {
 vi.mock('./load', () => ({ loadGroupView, loadMemberViews }));
 vi.mock('$lib/server/transactions', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/transactions')>()),
-	createTransaction,
-	getTransactionDetail
+	createTransaction
 }));
 vi.mock('../idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../idempotency')>()),
@@ -126,8 +123,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	loadGroupView.mockResolvedValue({ settlementCurrency: 'THB' });
 	loadMemberViews.mockResolvedValue(members);
-	createTransaction.mockResolvedValue('txn_1');
-	getTransactionDetail.mockImplementation(async () => persistedDetail());
+	createTransaction.mockImplementation(async () => persistedDetail());
 	withDerivedIdempotency.mockImplementation(
 		async ({
 			write,

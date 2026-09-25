@@ -63,22 +63,26 @@ describeIntegration('integration: Captures never reach the ledger (issue #53)', 
 		s = await createApiScenario('cap53');
 		seeded = [
 			// Alice pays $90 split between both → Bob owes Alice $45.
-			await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob], amount: 9000 })
-			}),
-			// Bob pays $30 split between both → the net narrows to $30.
-			await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				input: spendingInput({
-					payerId: s.bob,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 3000,
-					title: 'Taxi'
+			(
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob], amount: 9000 })
 				})
-			})
+			).id,
+			// Bob pays $30 split between both → the net narrows to $30.
+			(
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					input: spendingInput({
+						payerId: s.bob,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 3000,
+						title: 'Taxi'
+					})
+				})
+			).id
 		];
 	});
 

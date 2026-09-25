@@ -8,11 +8,10 @@
 // HERE, where it runs on every gate.
 //
 // The services are mocked at the module boundary (`updateTransaction` is proved by its
-// own suites; we are testing what we ASK it to do). `getTransactionDetail` is the
-// interesting mock: this tool reads it TWICE — once BEFORE the update (the source of
-// every default, and of the echo's "it WAS" half) and once after — so the fixture
-// serves a scripted before-state and then an after-state built from what the tool
-// actually asked for.
+// own suites; we are testing what we ASK it to do). The tool reads the current state
+// with `getTransactionDetail` (the source of every default), and `updateTransaction`
+// returns the before- and after-state the echo describes, so the fixture serves a
+// scripted before-state and an after-state built from what the tool asked for.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Ajv from 'ajv';
@@ -119,16 +118,14 @@ function inputPassed() {
 }
 
 /**
- * Script `getTransactionDetail`: the FIRST call returns the before-state; the SECOND
- * returns what the ledger would hold after the tool's own update landed.
+ * Script the current state `getTransactionDetail` serves, and the before/after
+ * `updateTransaction` returns once the tool's own update landed.
  */
 function scriptDetail(before: TransactionDetail = existingDetail()) {
-	let call = 0;
-	getTransactionDetail.mockImplementation(async () => {
-		call += 1;
-		if (call === 1) return before;
+	getTransactionDetail.mockResolvedValue(before);
+	updateTransaction.mockImplementation(async () => {
 		const input = inputPassed();
-		return {
+		const after = {
 			...before,
 			type: input.type,
 			title: input.title,
@@ -142,6 +139,7 @@ function scriptDetail(before: TransactionDetail = existingDetail()) {
 				amountOwed: Math.round(input.amountTotal / input.beneficiaries.length)
 			}))
 		} satisfies TransactionDetail;
+		return { before, after };
 	});
 }
 
@@ -191,7 +189,6 @@ beforeEach(() => {
 		deletedAt: null
 	});
 	listMembers.mockResolvedValue(ROSTER);
-	updateTransaction.mockResolvedValue(undefined);
 	scriptDetail();
 });
 
@@ -691,7 +688,6 @@ describe('update_transaction — naming the people', () => {
 				member.id === 'mem_bob' ? { ...member, displayName: 'Robert' } : member
 			)
 		);
-		updateTransaction.mockResolvedValue(undefined);
 		scriptDetail();
 
 		await run({ ...CORRECT_THE_AMOUNT, splitBetween: ['Alice'] });
@@ -792,11 +788,11 @@ describe('update_transaction — the echo-back', () => {
 		expect(payload._note).toMatch(/never instructions/i);
 	});
 
-	it('describes what the LEDGER holds, not what we asked for (the after-state is re-read)', async () => {
+	it('describes what the LEDGER holds, not what we asked for (the service returns the after-state)', async () => {
 		await run({ ...CORRECT_THE_AMOUNT, title: 'Dinner' });
 
-		// Read once BEFORE the update (defaults + the "was" half) and once AFTER (the truth).
-		expect(getTransactionDetail).toHaveBeenCalledTimes(2);
+		// Read once for the defaults; the before/after the echo describes come from the write.
+		expect(getTransactionDetail).toHaveBeenCalledTimes(1);
 		expect(updateTransaction).toHaveBeenCalledOnce();
 	});
 });

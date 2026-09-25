@@ -23,14 +23,12 @@ const {
 	getGroupForUser,
 	listMembers,
 	createTransaction,
-	getTransactionDetail,
 	peekIdempotentReplay,
 	withDerivedIdempotency
 } = vi.hoisted(() => ({
 	getGroupForUser: vi.fn(),
 	listMembers: vi.fn(),
 	createTransaction: vi.fn(),
-	getTransactionDetail: vi.fn(),
 	peekIdempotentReplay: vi.fn(),
 	withDerivedIdempotency: vi.fn()
 }));
@@ -45,8 +43,7 @@ vi.mock('$lib/server/members', async (importOriginal) => ({
 }));
 vi.mock('$lib/server/transactions', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/transactions')>()),
-	createTransaction,
-	getTransactionDetail
+	createTransaction
 }));
 vi.mock('../idempotency', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../idempotency')>()),
@@ -108,7 +105,7 @@ const OTHER_NAN: MemberListItem = {
 	isLinked: true
 };
 
-/** The transfer `getTransactionDetail` reads back — built from what the tool asked for. */
+/** The transfer `createTransaction` returns — built from what the tool asked for. */
 function persistedDetail(input: {
 	payers: { memberId: string; amountPaid: number }[];
 	beneficiaries: { memberId: string }[];
@@ -179,8 +176,7 @@ beforeEach(() => {
 		deletedAt: null
 	});
 	listMembers.mockResolvedValue(ROSTER);
-	createTransaction.mockResolvedValue('txn_1');
-	getTransactionDetail.mockImplementation(async () =>
+	createTransaction.mockImplementation(async () =>
 		persistedDetail({
 			payers: inputPassed().payers,
 			beneficiaries: inputPassed().beneficiaries,

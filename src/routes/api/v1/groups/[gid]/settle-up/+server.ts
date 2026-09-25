@@ -28,7 +28,7 @@
 
 import { z } from 'zod';
 import { getGroupForUser } from '$lib/server/groups';
-import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
+import { createTransaction, type TransactionDetail } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withWriteErrorHandling, readRawJsonBody } from '$lib/server/api/write';
@@ -127,12 +127,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			// that key (metadata + summary suffix) while the actor stays the user.
 			via: auditVia(principal)
 		});
-	const respond = async (txnId: string) => {
-		const detail = await getTransactionDetail({
-			userId: principal.userId,
-			groupId: gid,
-			txnId
-		});
+	const respond = async (detail: TransactionDetail) => {
 		// A settle-up is a settlement-currency transfer by construction (§16.4), so this
 		// resolution is a no-op that costs no query — kept so every route that serves a
 		// transaction DTO resolves its entry currency the same way (ADR-0014 decision 7).

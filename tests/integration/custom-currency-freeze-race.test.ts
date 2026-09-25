@@ -297,13 +297,15 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 		await holder.query('begin');
 		await holder.query(`select * from currencies where code = $1 for share`, [beerCode]);
 
-		const id = await createTransaction({
-			userId: user.id,
-			groupId: group.id,
-			// A title the trigger does NOT arm on — the point here is the currency lock.
-			input: beerInput(`${IT_PREFIX}shared-lock`),
-			settlementCurrency: 'THB'
-		});
+		const id = (
+			await createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				// A title the trigger does NOT arm on — the point here is the currency lock.
+				input: beerInput(`${IT_PREFIX}shared-lock`),
+				settlementCurrency: 'THB'
+			})
+		).id;
 		expect(typeof id).toBe('string');
 
 		await holder.query('commit');
@@ -317,17 +319,19 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 		await holder.query('begin');
 		await holder.query(`select * from currencies where code = $1 for update`, [beerCode]);
 
-		const id = await createTransaction({
-			userId: user.id,
-			groupId: group.id,
-			input: {
-				...beerInput(`${IT_PREFIX}seeded-fast-path`),
-				currency: 'THB',
-				exchangeRate: '1',
-				amountTotalSettlement: 300
-			},
-			settlementCurrency: 'THB'
-		});
+		const id = (
+			await createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				input: {
+					...beerInput(`${IT_PREFIX}seeded-fast-path`),
+					currency: 'THB',
+					exchangeRate: '1',
+					amountTotalSettlement: 300
+				},
+				settlementCurrency: 'THB'
+			})
+		).id;
 		expect(typeof id).toBe('string');
 
 		await holder.query('commit');
@@ -416,18 +420,20 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 			input: { exponent: 0 }
 		});
 
-		const id = await createTransaction({
-			userId: user.id,
-			groupId: group.id,
-			input: {
-				...beerInput(`${IT_PREFIX}re-entered`),
-				amountTotal: 3,
-				currencyExponent: 0,
-				amountTotalSettlement: 450,
-				payers: [{ memberId, amountPaid: 3 }]
-			},
-			settlementCurrency: 'THB'
-		});
+		const id = (
+			await createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				input: {
+					...beerInput(`${IT_PREFIX}re-entered`),
+					amountTotal: 3,
+					currencyExponent: 0,
+					amountTotalSettlement: 450,
+					payers: [{ memberId, amountPaid: 3 }]
+				},
+				settlementCurrency: 'THB'
+			})
+		).id;
 		expect(typeof id).toBe('string');
 	});
 
@@ -493,12 +499,14 @@ describeIntegration('integration: the exponent freeze under real concurrency (is
 			input: { displayCode: 'PINT' }
 		});
 
-		const id = await createTransaction({
-			userId: user.id,
-			groupId: group.id,
-			input: beerInput(`${IT_PREFIX}web-write`),
-			settlementCurrency: 'THB'
-		});
+		const id = (
+			await createTransaction({
+				userId: user.id,
+				groupId: group.id,
+				input: beerInput(`${IT_PREFIX}web-write`),
+				settlementCurrency: 'THB'
+			})
+		).id;
 		expect(typeof id).toBe('string');
 	});
 });

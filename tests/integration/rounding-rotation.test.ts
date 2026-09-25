@@ -96,12 +96,14 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 		const txnIds: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			txnIds.push(
-				await createTransaction({
-					userId: userA.id,
-					groupId: group.id,
-					settlementCurrency: 'THB',
-					input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
-				})
+				(
+					await createTransaction({
+						userId: userA.id,
+						groupId: group.id,
+						settlementCurrency: 'THB',
+						input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
+					})
+				).id
 			);
 		}
 
@@ -122,12 +124,14 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 		const txnIds: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			txnIds.push(
-				await createTransaction({
-					userId: userA.id,
-					groupId: group.id,
-					settlementCurrency: 'THB',
-					input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
-				})
+				(
+					await createTransaction({
+						userId: userA.id,
+						groupId: group.id,
+						settlementCurrency: 'THB',
+						input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
+					})
+				).id
 			);
 		}
 
@@ -156,12 +160,14 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 			settlementCurrency: 'THB',
 			input: hundredBahtEqually(first.memberIds, first.memberIds[0])
 		});
-		const otherTxn = await createTransaction({
-			userId: userA.id,
-			groupId: second.group.id,
-			settlementCurrency: 'THB',
-			input: hundredBahtEqually(second.memberIds, second.memberIds[0])
-		});
+		const otherTxn = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: second.group.id,
+				settlementCurrency: 'THB',
+				input: hundredBahtEqually(second.memberIds, second.memberIds[0])
+			})
+		).id;
 
 		const { transactions } = await import('$lib/server/db/transactions-schema');
 		const [row] = await db
@@ -177,7 +183,7 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 		// writes serialise on it. A read-then-write would hand out duplicates here.
 		const { group, memberIds } = await freshGroupOfThree();
 
-		const txnIds = await Promise.all(
+		const created = await Promise.all(
 			Array.from({ length: 5 }, (_, i) =>
 				createTransaction({
 					userId: userA.id,
@@ -187,6 +193,7 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 				})
 			)
 		);
+		const txnIds = created.map((detail) => detail.id);
 
 		const { transactions } = await import('$lib/server/db/transactions-schema');
 		const rows = await db
@@ -212,12 +219,14 @@ describeIntegration('integration: rounding rotation (ADR-0013; PLAN §7.2)', () 
 			settlementCurrency: 'THB',
 			input: hundredBahtEqually(memberIds, memberIds[0], 'First')
 		});
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: hundredBahtEqually(memberIds, memberIds[0], 'Second')
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: hundredBahtEqually(memberIds, memberIds[0], 'Second')
+			})
+		).id;
 
 		const before = await extraSatangHolder(txnId);
 

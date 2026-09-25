@@ -69,17 +69,19 @@ describeIntegration('integration: /api/v1 HTTP boundary (issue #25; PLAN §16.10
 
 	/** Create a transaction directly through the service (a fast, non-API seed). */
 	async function seedSpending(title: string, amount = 9000): Promise<string> {
-		return createTransaction({
-			userId: s.user.id,
-			groupId: s.group.id,
-			input: spendingInput({
-				payerId: s.alice,
-				beneficiaryIds: [s.alice, s.bob],
-				amount,
-				title
-			}),
-			settlementCurrency: SETTLEMENT_CURRENCY
-		});
+		return (
+			await createTransaction({
+				userId: s.user.id,
+				groupId: s.group.id,
+				input: spendingInput({
+					payerId: s.alice,
+					beneficiaryIds: [s.alice, s.bob],
+					amount,
+					title
+				}),
+				settlementCurrency: SETTLEMENT_CURRENCY
+			})
+		).id;
 	}
 
 	/** This group's audit rows for one entity + action. */
@@ -256,12 +258,14 @@ describeIntegration('integration: /api/v1 HTTP boundary (issue #25; PLAN §16.10
 			});
 			strangerGroupId = group.id;
 			const strangerMember = await creatorMemberId(group.id, stranger.id);
-			strangerTxnId = await createTransaction({
-				userId: stranger.id,
-				groupId: group.id,
-				input: spendingInput({ payerId: strangerMember, beneficiaryIds: [strangerMember] }),
-				settlementCurrency: SETTLEMENT_CURRENCY
-			});
+			strangerTxnId = (
+				await createTransaction({
+					userId: stranger.id,
+					groupId: group.id,
+					input: spendingInput({ payerId: strangerMember, beneficiaryIds: [strangerMember] }),
+					settlementCurrency: SETTLEMENT_CURRENCY
+				})
+			).id;
 		});
 
 		it.each([

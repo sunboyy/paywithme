@@ -153,12 +153,14 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 		const txnIds: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			txnIds.push(
-				await createTransaction({
-					userId: userA.id,
-					groupId: group.id,
-					settlementCurrency: 'THB',
-					input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
-				})
+				(
+					await createTransaction({
+						userId: userA.id,
+						groupId: group.id,
+						settlementCurrency: 'THB',
+						input: hundredBahtEqually(memberIds, memberIds[0], `Dinner ${i + 1}`)
+					})
+				).id
 			);
 		}
 		const victim = await rewindToLegacyRounding(txnIds, memberIds);
@@ -227,16 +229,18 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 
 		// A SHARE split with weights 1:1:1 — an all-tie distribution, so it rotates —
 		// whose stored weights must survive the rewrite untouched.
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: {
-				...hundredBahtEqually(memberIds, memberIds[0], 'Weighted'),
-				splitMode: 'share' as const,
-				beneficiaries: memberIds.map((memberId) => ({ memberId, shareWeight: 1 }))
-			}
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: {
+					...hundredBahtEqually(memberIds, memberIds[0], 'Weighted'),
+					splitMode: 'share' as const,
+					beneficiaries: memberIds.map((memberId) => ({ memberId, shareWeight: 1 }))
+				}
+			})
+		).id;
 		await db.update(transactions).set({ roundingSeq: 0 }).where(eq(transactions.id, txnId));
 
 		const [before] = await db
@@ -284,20 +288,22 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 		const { group, memberIds } = await groupOfThree();
 		const { transactionShares } = await import('$lib/server/db/transactions-schema');
 
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: {
-				...hundredBahtEqually(memberIds, memberIds[0], 'Exact amounts'),
-				splitMode: 'amount' as const,
-				beneficiaries: [
-					{ memberId: memberIds[0], rawAmount: 5000 },
-					{ memberId: memberIds[1], rawAmount: 3000 },
-					{ memberId: memberIds[2], rawAmount: 2000 }
-				]
-			}
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: {
+					...hundredBahtEqually(memberIds, memberIds[0], 'Exact amounts'),
+					splitMode: 'amount' as const,
+					beneficiaries: [
+						{ memberId: memberIds[0], rawAmount: 5000 },
+						{ memberId: memberIds[1], rawAmount: 3000 },
+						{ memberId: memberIds[2], rawAmount: 2000 }
+					]
+				}
+			})
+		).id;
 
 		const owedBefore = await db
 			.select({ memberId: transactionShares.memberId, amountOwed: transactionShares.amountOwed })
@@ -317,12 +323,14 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 	it('scopes rotation per group — one group’s history does not renumber another’s', async () => {
 		const first = await seedLegacyHistory();
 		const second = await groupOfThree();
-		const soloTxn = await createTransaction({
-			userId: userA.id,
-			groupId: second.group.id,
-			settlementCurrency: 'THB',
-			input: hundredBahtEqually(second.memberIds, second.memberIds[0], 'Only one')
-		});
+		const soloTxn = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: second.group.id,
+				settlementCurrency: 'THB',
+				input: hundredBahtEqually(second.memberIds, second.memberIds[0], 'Only one')
+			})
+		).id;
 
 		await backfillRoundingRotation({ apply: true });
 
@@ -377,30 +385,32 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 
 		// Three ฿1.00 items each split three ways — every item leaves a leftover satang,
 		// so the whole receipt is rotation-sensitive at both the item and aggregate level.
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: {
-				type: 'spending' as const,
-				title: 'Receipt',
-				categoryId: SPENDING_CATEGORY,
-				amountTotal: 300,
-				currency: 'THB',
-				exchangeRate: '1',
-				amountTotalSettlement: 300,
-				splitMode: 'itemized' as const,
-				payers: [{ memberId: memberIds[0], amountPaid: 300 }],
-				beneficiaries: [],
-				items: [1, 2, 3].map((n) => ({
-					label: `Item ${n}`,
-					amount: 100,
-					splitMode: 'equal' as const,
-					beneficiaries: memberIds.map((memberId) => ({ memberId }))
-				})),
-				charges: []
-			}
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: {
+					type: 'spending' as const,
+					title: 'Receipt',
+					categoryId: SPENDING_CATEGORY,
+					amountTotal: 300,
+					currency: 'THB',
+					exchangeRate: '1',
+					amountTotalSettlement: 300,
+					splitMode: 'itemized' as const,
+					payers: [{ memberId: memberIds[0], amountPaid: 300 }],
+					beneficiaries: [],
+					items: [1, 2, 3].map((n) => ({
+						label: `Item ${n}`,
+						amount: 100,
+						splitMode: 'equal' as const,
+						beneficiaries: memberIds.map((memberId) => ({ memberId }))
+					})),
+					charges: []
+				}
+			})
+		).id;
 		await db.update(transactions).set({ roundingSeq: 0 }).where(eq(transactions.id, txnId));
 
 		await backfillRoundingRotation({ apply: true });
@@ -536,12 +546,14 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 		const txnIds: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			txnIds.push(
-				await createTransaction({
-					userId: userA.id,
-					groupId: group.id,
-					settlementCurrency: 'THB',
-					input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
-				})
+				(
+					await createTransaction({
+						userId: userA.id,
+						groupId: group.id,
+						settlementCurrency: 'THB',
+						input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
+					})
+				).id
 			);
 		}
 		await rewindBeerRounds(txnIds, memberIds);
@@ -582,18 +594,22 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 		const { group, memberIds, beer } = await groupOfThreeWithBeer();
 		const { transactions } = await import('$lib/server/db/transactions-schema');
 
-		const thbTxn = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: hundredBahtEqually(memberIds, memberIds[0], 'Dinner')
-		});
-		const beerTxn = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'THB',
-			input: beerRound(beer.code, memberIds, memberIds[0], 'Round')
-		});
+		const thbTxn = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: hundredBahtEqually(memberIds, memberIds[0], 'Dinner')
+			})
+		).id;
+		const beerTxn = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'THB',
+				input: beerRound(beer.code, memberIds, memberIds[0], 'Round')
+			})
+		).id;
 		await db
 			.update(transactions)
 			.set({ roundingSeq: 0 })
@@ -639,12 +655,14 @@ describeIntegration('integration: rounding backfill (ADR-0013 one-shot)', () => 
 		const txnIds: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			txnIds.push(
-				await createTransaction({
-					userId: userA.id,
-					groupId: group.id,
-					settlementCurrency: 'THB',
-					input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
-				})
+				(
+					await createTransaction({
+						userId: userA.id,
+						groupId: group.id,
+						settlementCurrency: 'THB',
+						input: beerRound(beer.code, memberIds, memberIds[0], `Round ${i + 1}`)
+					})
+				).id
 			);
 		}
 		await rewindBeerRounds(txnIds, memberIds);

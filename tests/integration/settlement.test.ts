@@ -163,12 +163,14 @@ describeIntegration('integration: settlement lifecycle (plan 003; PLAN §9)', ()
 		const bob = await addMember({ userId: userA.id, groupId: group.id, displayName: 'Bob' });
 		const aliceId = await creatorMemberId(group.id);
 
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'USD',
-			input: equalSpendingInput([aliceId, bob.id], aliceId)
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'USD',
+				input: equalSpendingInput([aliceId, bob.id], aliceId)
+			})
+		).id;
 
 		// Pre-delete: balances are non-zero (Alice +4500 / Bob −4500).
 		const before = await getGroupBalances({ userId: userA.id, groupId: group.id });
@@ -248,12 +250,14 @@ describeIntegration('integration: settlement lifecycle (plan 003; PLAN §9)', ()
 		const bob = await addMember({ userId: userA.id, groupId: group.id, displayName: 'Bob' });
 		const aliceId = await creatorMemberId(group.id);
 
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'USD',
-			input: equalSpendingInput([aliceId, bob.id], aliceId)
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'USD',
+				input: equalSpendingInput([aliceId, bob.id], aliceId)
+			})
+		).id;
 		expect(
 			(await getUserNetBalanceByGroup({ userId: userA.id, groupIds: [group.id] })).get(group.id)
 		).toBe(4500);

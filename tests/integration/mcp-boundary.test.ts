@@ -768,17 +768,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		/** A group-mate pays $90 for a dinner split equally: the caller owes $45. */
 		async function seedDinner(title = INJECTION): Promise<{ txnId: string; mate: { id: string } }> {
 			const mate = await linkBobToAStranger();
-			const txnId = await createTransaction({
-				userId: mate.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({
-					payerId: s.bob,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 9000,
-					title
+			const txnId = (
+				await createTransaction({
+					userId: mate.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.bob,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title
+					})
 				})
-			});
+			).id;
 			return { txnId, mate };
 		}
 
@@ -857,17 +859,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 	describe('tools/call get_transaction (#29)', () => {
 		it('serves one transaction, with the group-mate’s INJECTED title demarcated', async () => {
 			const mate = await linkBobToAStranger();
-			const txnId = await createTransaction({
-				userId: mate.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({
-					payerId: s.bob,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 9000,
-					title: INJECTION
+			const txnId = (
+				await createTransaction({
+					userId: mate.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.bob,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title: INJECTION
+					})
 				})
-			});
+			).id;
 
 			const view = await callOk<TransactionWire>('get_transaction', {
 				groupId: s.group.id,
@@ -898,12 +902,14 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 		});
 
 		it('a transaction the CALLER recorded is attributed to them — same shape, different author', async () => {
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice], amount: 500 })
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice], amount: 500 })
+				})
+			).id;
 
 			const view = await callOk<TransactionWire>('get_transaction', {
 				groupId: s.group.id,
@@ -924,12 +930,14 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				name: 'other group',
 				settlementCurrency: SETTLEMENT_CURRENCY
 			});
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice], amount: 500 })
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice], amount: 500 })
+				})
+			).id;
 
 			const res = await mcpToolCall(
 				'get_transaction',
@@ -952,15 +960,17 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			extra: Record<string, unknown> = {},
 			amount = 9000
 		): Promise<string> {
-			return createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: {
-					...spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob], amount, title }),
-					...extra
-				}
-			});
+			return (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: {
+						...spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob], amount, title }),
+						...extra
+					}
+				})
+			).id;
 		}
 
 		it('caps the page at 25 and reports hasMore + a cursor when more exist (ADR-0008)', async () => {
@@ -2548,17 +2558,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		/** The caller's own $90 dinner, split with Bob — so the caller is owed $45. */
 		async function seedDinner(title = 'Dinner'): Promise<string> {
-			return createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({
-					payerId: s.alice,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 9000,
-					title
+			return (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.alice,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title
+					})
 				})
-			});
+			).id;
 		}
 
 		/** The caller's own balance, as `get_balances` computes it server-side (§8.1). */
@@ -2794,17 +2806,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				// by the CALLER's key: with `paidBy` defaulting to the caller (as it does on a
 				// create), Bob's dinner would silently become Alice's and the balance would flip
 				// sign. It must stay Bob's.
-				const txnId = await createTransaction({
-					userId: s.user.id,
-					groupId: s.group.id,
-					settlementCurrency: SETTLEMENT_CURRENCY,
-					input: spendingInput({
-						payerId: s.bob,
-						beneficiaryIds: [s.alice, s.bob],
-						amount: 9000,
-						title: 'Lunch'
+				const txnId = (
+					await createTransaction({
+						userId: s.user.id,
+						groupId: s.group.id,
+						settlementCurrency: SETTLEMENT_CURRENCY,
+						input: spendingInput({
+							payerId: s.bob,
+							beneficiaryIds: [s.alice, s.bob],
+							amount: 9000,
+							title: 'Lunch'
+						})
 					})
-				});
+				).id;
 				expect(await myBalance()).toBe('-45.00');
 
 				const payload = await callWriteOk<{ recorded: TransactionWire; changed: string[] }>(
@@ -2928,51 +2942,53 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			});
 
 			it('round-trips get_transaction editable itemized data and mutates VAT without detail loss', async () => {
-				const txnId = await createTransaction({
-					userId: s.user.id,
-					groupId: s.group.id,
-					settlementCurrency: SETTLEMENT_CURRENCY,
-					input: {
-						type: 'spending' as const,
-						title: 'Itemized dinner',
-						categoryId: SPENDING_CATEGORY,
-						amountTotal: 9530,
-						currency: SETTLEMENT_CURRENCY,
-						exchangeRate: '1',
-						amountTotalSettlement: 9530,
-						splitMode: 'itemized' as const,
-						payers: [{ memberId: s.alice, amountPaid: 9530 }],
-						beneficiaries: [],
-						items: [
-							{
-								label: 'Pad thai',
-								amount: 5000,
-								splitMode: 'share' as const,
-								beneficiaries: [
-									{ memberId: s.alice, shareWeight: 2 },
-									{ memberId: s.bob, shareWeight: 1 }
-								]
-							},
-							{
-								label: 'Tom yum',
-								amount: 4000,
-								splitMode: 'equal' as const,
-								beneficiaries: [{ memberId: s.bob }]
-							}
-						],
-						charges: [
-							{ kind: 'vat', mode: 'percent', value: 700, base: 'items_subtotal', sortOrder: 0 },
-							{
-								kind: 'discount',
-								mode: 'absolute',
-								value: 300,
-								base: 'running_total',
-								sortOrder: 1
-							},
-							{ kind: 'tip', mode: 'absolute', value: 200, base: 'running_total', sortOrder: 2 }
-						]
-					}
-				});
+				const txnId = (
+					await createTransaction({
+						userId: s.user.id,
+						groupId: s.group.id,
+						settlementCurrency: SETTLEMENT_CURRENCY,
+						input: {
+							type: 'spending' as const,
+							title: 'Itemized dinner',
+							categoryId: SPENDING_CATEGORY,
+							amountTotal: 9530,
+							currency: SETTLEMENT_CURRENCY,
+							exchangeRate: '1',
+							amountTotalSettlement: 9530,
+							splitMode: 'itemized' as const,
+							payers: [{ memberId: s.alice, amountPaid: 9530 }],
+							beneficiaries: [],
+							items: [
+								{
+									label: 'Pad thai',
+									amount: 5000,
+									splitMode: 'share' as const,
+									beneficiaries: [
+										{ memberId: s.alice, shareWeight: 2 },
+										{ memberId: s.bob, shareWeight: 1 }
+									]
+								},
+								{
+									label: 'Tom yum',
+									amount: 4000,
+									splitMode: 'equal' as const,
+									beneficiaries: [{ memberId: s.bob }]
+								}
+							],
+							charges: [
+								{ kind: 'vat', mode: 'percent', value: 700, base: 'items_subtotal', sortOrder: 0 },
+								{
+									kind: 'discount',
+									mode: 'absolute',
+									value: 300,
+									base: 'running_total',
+									sortOrder: 1
+								},
+								{ kind: 'tip', mode: 'absolute', value: 200, base: 'running_total', sortOrder: 2 }
+							]
+						}
+					})
+				).id;
 				const readBack = await callOk<TransactionWire>('get_transaction', {
 					groupId: s.group.id,
 					transactionId: txnId
@@ -3079,21 +3095,23 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 			// ships. This is the test that makes "an injected write is recoverable" a fact
 			// about the code rather than a hope in a document.
 			const mate = await linkBobToAStranger();
-			const txnId = await createTransaction({
-				// The GROUP-MATE plants it, not the caller. Authorship is `created_by`
-				// (see `authorOf`), so creating this as `s.user.id` made the caller the
-				// real author and 'you' the CORRECT answer — the assertion below was
-				// asserting against the scenario the test describes, not against a bug.
-				userId: mate.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({
-					payerId: s.bob,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 9000,
-					title: INJECTION
+			const txnId = (
+				await createTransaction({
+					// The GROUP-MATE plants it, not the caller. Authorship is `created_by`
+					// (see `authorOf`), so creating this as `s.user.id` made the caller the
+					// real author and 'you' the CORRECT answer — the assertion below was
+					// asserting against the scenario the test describes, not against a bug.
+					userId: mate.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.bob,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title: INJECTION
+					})
 				})
-			});
+			).id;
 			expect(await myBalance()).toBe('-45.00');
 
 			const payload = await callWriteOk<{ deleted: TransactionWire; echo: string; _note: string }>(
@@ -3173,17 +3191,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 
 		/** The caller's own $90 dinner, split with Bob — a real transaction to edit / delete. */
 		async function seedDinner(title = 'Dinner'): Promise<string> {
-			return createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				settlementCurrency: SETTLEMENT_CURRENCY,
-				input: spendingInput({
-					payerId: s.alice,
-					beneficiaryIds: [s.alice, s.bob],
-					amount: 9000,
-					title
+			return (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					settlementCurrency: SETTLEMENT_CURRENCY,
+					input: spendingInput({
+						payerId: s.alice,
+						beneficiaryIds: [s.alice, s.bob],
+						amount: 9000,
+						title
+					})
 				})
-			});
+			).id;
 		}
 
 		/** Rename the fixture's second member — its display name is Member-authored text. */
@@ -3223,17 +3243,19 @@ describeIntegration('integration: /mcp Connector HTTP boundary (issues #28, #29)
 				const mallory = (
 					await addMember({ userId: s.user.id, groupId: group.id, displayName: MEMBER_NAME })
 				).id;
-				const txnId = await createTransaction({
-					userId: s.user.id,
-					groupId: group.id,
-					settlementCurrency: SETTLEMENT_CURRENCY,
-					input: spendingInput({
-						payerId: me,
-						beneficiaryIds: [me, mallory],
-						amount: 9000,
-						title: TXN_TITLE
+				const txnId = (
+					await createTransaction({
+						userId: s.user.id,
+						groupId: group.id,
+						settlementCurrency: SETTLEMENT_CURRENCY,
+						input: spendingInput({
+							payerId: me,
+							beneficiaryIds: [me, mallory],
+							amount: 9000,
+							title: TXN_TITLE
+						})
 					})
-				});
+				).id;
 				// An OPEN record-later note, so `list_captures` has member-authored text to
 				// serve. It carries no amount: the envelope is about the TEXT.
 				await createCapture({

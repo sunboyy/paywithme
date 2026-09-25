@@ -87,7 +87,7 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 
 	// Throws TransactionValidationError (→ 422), TransactionDeletedError (→ 422),
 	// GroupAccessError / TransactionNotFoundError (→ 404) — all mapped by the wrapper.
-	await updateTransaction({
+	const { after: detail } = await updateTransaction({
 		userId: principal.userId,
 		groupId: gid,
 		txnId: txid,
@@ -99,11 +99,6 @@ export const PUT = withWriteErrorHandling(async ({ locals, params, request }) =>
 		via: auditVia(principal)
 	});
 
-	const detail = await getTransactionDetail({
-		userId: principal.userId,
-		groupId: gid,
-		txnId: txid
-	});
 	// Resolve the ENTRY currency so a transaction recorded in a currency the group
 	// defined itself is served by its `display_code`, never by the opaque row key the
 	// column stores (PLAN §7.5.2; ADR-0014 decision 7). Costs no query for the seeded 29.
@@ -130,7 +125,7 @@ export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
 	if (limited) return limited;
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
-	await softDeleteTransaction({
+	const { detail } = await softDeleteTransaction({
 		userId: principal.userId,
 		groupId: gid,
 		txnId: txid,
@@ -139,11 +134,6 @@ export const DELETE = withWriteErrorHandling(async ({ locals, params }) => {
 		via: auditVia(principal)
 	});
 
-	const detail = await getTransactionDetail({
-		userId: principal.userId,
-		groupId: gid,
-		txnId: txid
-	});
 	// Resolve the ENTRY currency so a transaction recorded in a currency the group
 	// defined itself is served by its `display_code`, never by the opaque row key the
 	// column stores (PLAN §7.5.2; ADR-0014 decision 7). Costs no query for the seeded 29.

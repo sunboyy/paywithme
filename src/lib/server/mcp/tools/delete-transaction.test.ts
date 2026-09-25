@@ -9,23 +9,19 @@
 //
 // `softDeleteTransaction` is mocked at the module boundary: it is proved idempotent by
 // its own suites (a guarded `isNull(deleted_at)` UPDATE), and what THIS tool owes it is
-// the right arguments and the right provenance. `getTransactionDetail` is read TWICE —
-// once BEFORE the delete (the one place the no-op is detectable) and once after — so
-// the fixture scripts a before-state and an after-state.
+// the right arguments and the right provenance. It returns whether it changed anything
+// and the persisted result, so the fixture scripts both from a before-state.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import type { MemberListItem } from '$lib/server/members';
 import type { TransactionDetail } from '$lib/server/transactions';
 
-const { getGroupForUser, listMembers, softDeleteTransaction, getTransactionDetail } = vi.hoisted(
-	() => ({
-		getGroupForUser: vi.fn(),
-		listMembers: vi.fn(),
-		softDeleteTransaction: vi.fn(),
-		getTransactionDetail: vi.fn()
-	})
-);
+const { getGroupForUser, listMembers, softDeleteTransaction } = vi.hoisted(() => ({
+	getGroupForUser: vi.fn(),
+	listMembers: vi.fn(),
+	softDeleteTransaction: vi.fn()
+}));
 
 vi.mock('$lib/server/groups', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/groups')>()),
@@ -37,8 +33,7 @@ vi.mock('$lib/server/members', async (importOriginal) => ({
 }));
 vi.mock('$lib/server/transactions', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/transactions')>()),
-	softDeleteTransaction,
-	getTransactionDetail
+	softDeleteTransaction
 }));
 
 // Imported AFTER the mocks are registered.
@@ -99,8 +94,8 @@ function detailOf(overrides: Partial<TransactionDetail> = {}): TransactionDetail
 }
 
 /**
- * Script `getTransactionDetail`: the FIRST call is the before-state, the SECOND is the
- * state a real `softDeleteTransaction` would leave behind (`deletedAt` stamped — and,
+ * Script `softDeleteTransaction` from a before-state: the result is the state a real
+ * delete would leave behind (`deletedAt` stamped — and,
  * when it was already deleted, the ORIGINAL delete time preserved, as the guarded
  * UPDATE does).
  */
@@ -111,8 +106,8 @@ function scriptDetail(before: TransactionDetail = detailOf()) {
 	});
 	// RESET, never append: a nested `beforeEach` re-scripting the fixture must REPLACE the
 	// queue, not queue a second before-state behind the outer one.
-	getTransactionDetail.mockReset();
-	getTransactionDetail.mockResolvedValueOnce(before).mockResolvedValue(after);
+	softDeleteTransaction.mockReset();
+	softDeleteTransaction.mockResolvedValue({ changed: before.deletedAt === null, detail: after });
 }
 
 /** Run the tool and return its structured payload (asserting it did not error). */
@@ -141,7 +136,6 @@ beforeEach(() => {
 		deletedAt: null
 	});
 	listMembers.mockResolvedValue(ROSTER);
-	softDeleteTransaction.mockResolvedValue(undefined);
 	scriptDetail();
 });
 
@@ -258,15 +252,14 @@ describe('delete_transaction — the write', () => {
 	});
 
 	it('a txn id that is absent / in another group THROWS before anything is deleted (§16.5)', async () => {
-		// `getTransactionDetail` is access-checked AND group-scoped: absent, other-group and
+		// The service is access-checked AND group-scoped: absent, other-group and
 		// not-yours all throw the same class → the same conflated `not_found`.
-		getTransactionDetail.mockReset();
-		getTransactionDetail.mockRejectedValue(new TransactionNotFoundError());
+		softDeleteTransaction.mockReset();
+		softDeleteTransaction.mockRejectedValue(new TransactionNotFoundError());
 
 		await expect(
 			deleteTransactionTool.run({ principal }, deleteTransactionTool.args.parse(ARGS))
 		).rejects.toThrow(TransactionNotFoundError);
-		expect(softDeleteTransaction).not.toHaveBeenCalled();
 	});
 });
 

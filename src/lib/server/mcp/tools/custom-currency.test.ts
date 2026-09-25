@@ -305,7 +305,10 @@ describe('delete_transaction / restore_transaction on a custom-currency transact
 	// web-app entry was wrong. So both are read surfaces for the purposes of this task.
 
 	it('`delete_transaction` serves the display code and no opaque key', async () => {
-		getTransactionDetail.mockResolvedValue(beerDetail());
+		softDeleteTransaction.mockResolvedValue({
+			changed: true,
+			detail: { ...beerDetail(), deletedAt: '2026-05-05T09:00:00.000Z' }
+		});
 
 		const result = (await deleteTransactionTool.run(
 			{ principal },
@@ -324,10 +327,7 @@ describe('delete_transaction / restore_transaction on a custom-currency transact
 	});
 
 	it('`restore_transaction` serves the display code and no opaque key', async () => {
-		getTransactionDetail.mockResolvedValue({
-			...beerDetail(),
-			deletedAt: '2026-05-05T09:00:00.000Z'
-		});
+		restoreTransaction.mockResolvedValue({ changed: true, detail: beerDetail() });
 
 		const result = (await restoreTransactionTool.run(
 			{ principal },

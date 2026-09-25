@@ -64,11 +64,7 @@
 
 import { z } from 'zod';
 import { categoriesFor } from '$lib/categories';
-import {
-	createTransaction,
-	getTransactionDetail,
-	TransactionValidationError
-} from '$lib/server/transactions';
+import { createTransaction, TransactionValidationError } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
@@ -481,11 +477,10 @@ export const createTransactionTool: McpTool<z.infer<typeof createTransactionArgs
 					throw error;
 				}
 			},
-			respond: async (txnId) => {
-				// Re-read the persisted detail and project BOTH echo forms (see `../view/echo`):
+			respond: async (detail) => {
+				// Project BOTH echo forms from the persisted detail (see `../view/echo`):
 				//   - `recorded`: the structured view, every name wrapped + attributed (ADR-0003);
 				//   - `echo`:     the prose restatement that NAMES the humans (ADR-0006 legibility).
-				const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
 				const recorded = toTransactionView({ detail, members, principal });
 				const payload: CreatedPayload = {
 					recorded,

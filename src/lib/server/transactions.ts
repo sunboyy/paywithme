@@ -211,7 +211,8 @@ function referencedMemberIds(data: TransactionInput): Set<string> {
  * RE-BUILD the shared schema from them and RE-VALIDATE the input (never trust the
  * client) → RE-RESOLVE per-member owed via the shared `resolveShares` → in ONE
  * `db.transaction`: insert the transaction row + payer rows + share rows + the
- * audit row, all through `tx`. Returns the new transaction id.
+ * audit row, all through `tx`. Returns the persisted detail, read back in the same
+ * transaction.
  *
  * @throws {GroupAccessError} (→404) when the user has no access to the group.
  * @throws {TransactionValidationError} when the input fails the shared schema.
@@ -276,7 +277,7 @@ export async function createTransaction({
 	alsoWrite?: (tx: DbExecutor, transactionId: string) => Promise<void>;
 	/** Injectable clock (tests). Defaults to the real `now`. */
 	now?: () => Date;
-}): Promise<string> {
+}): Promise<TransactionDetail> {
 	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 
@@ -337,7 +338,7 @@ export async function createTransaction({
 		// takes the transaction, its child rows and its audit row down with it.
 		await alsoWrite?.(tx, transactionId);
 
-		return transactionId;
+		return readTransactionDetail(tx, groupId, transactionId);
 	});
 }
 
@@ -1427,12 +1428,23 @@ export async function getTransactionDetail({
 	txnId: string;
 }): Promise<TransactionDetail> {
 	await assertGroupAccess(userId, groupId);
+	return readTransactionDetail(db, groupId, txnId);
+}
 
-	const settlementCurrency = await loadSettlementCurrency(groupId, db);
+/**
+ * {@link getTransactionDetail} without the access check, on `exec` — so a write can
+ * read back what it wrote inside its own transaction.
+ */
+async function readTransactionDetail(
+	exec: DbExecutor,
+	groupId: string,
+	txnId: string
+): Promise<TransactionDetail> {
+	const settlementCurrency = await loadSettlementCurrency(groupId, exec);
 
 	// The txn row — SCOPED to this group (a txn in another group → not-found, never
 	// leaked). Soft-deleted rows ARE returned here (so they can be restored).
-	const [txn] = await db
+	const [txn] = await exec
 		.select({
 			id: transactions.id,
 			groupId: transactions.groupId,
@@ -1459,7 +1471,7 @@ export async function getTransactionDetail({
 	const category = getCategory(txn.categoryId);
 
 	// Payers (entry currency `amount_paid`), ordered by member for determinism.
-	const payerRows = await db
+	const payerRows = await exec
 		.select({ memberId: transactionPayers.memberId, amountPaid: transactionPayers.amountPaid })
 		.from(transactionPayers)
 		.where(eq(transactionPayers.transactionId, txnId))
@@ -1467,7 +1479,7 @@ export async function getTransactionDetail({
 
 	// Aggregated shares (SETTLEMENT owed — §8 source of truth) + the preserved
 	// non-itemized inputs (`share_weight` / `raw_amount`) used to reconstruct the input.
-	const shareRows = await db
+	const shareRows = await exec
 		.select({
 			memberId: transactionShares.memberId,
 			amountOwed: transactionShares.amountOwed,
@@ -1480,7 +1492,7 @@ export async function getTransactionDetail({
 
 	// Items (ordered by sort_order, the application order) + their per-item shares
 	// (carrying the per-item split_mode + inputs for reconstruction).
-	const itemRows = await db
+	const itemRows = await exec
 		.select({
 			id: transactionItems.id,
 			label: transactionItems.label,
@@ -1492,7 +1504,7 @@ export async function getTransactionDetail({
 		.orderBy(asc(transactionItems.sortOrder));
 
 	const itemShareRows = itemRows.length
-		? await db
+		? await exec
 				.select({
 					itemId: transactionItemShares.itemId,
 					memberId: transactionItemShares.memberId,
@@ -1513,7 +1525,7 @@ export async function getTransactionDetail({
 				.orderBy(asc(transactionItemShares.memberId))
 		: [];
 
-	const chargeRows = await db
+	const chargeRows = await exec
 		.select({
 			kind: transactionCharges.kind,
 			mode: transactionCharges.mode,
@@ -1646,6 +1658,10 @@ export async function getTransactionDetail({
  * `groupId`. `roundingSeq` is what makes an edit reproduce the transaction's
  * original rounding (ADR-0013) — the edit path re-resolves with it rather than
  * allocating a fresh ordinal, so correcting a title never moves anyone's share.
+ *
+ * Locks the row `FOR UPDATE` until the caller's transaction ends. An edit replaces
+ * every child row; under READ COMMITTED two unlocked edits would each delete only
+ * the rows they saw and both insert, leaving shares that no longer sum to the total.
  */
 async function loadTransactionForMutation(
 	exec: DbExecutor,
@@ -1660,7 +1676,8 @@ async function loadTransactionForMutation(
 		})
 		.from(transactions)
 		.where(and(eq(transactions.id, txnId), eq(transactions.groupId, groupId)))
-		.limit(1);
+		.limit(1)
+		.for('update');
 	if (!row) {
 		throw new TransactionNotFoundError();
 	}
@@ -1679,7 +1696,8 @@ async function loadTransactionForMutation(
  * from the validated user date; bump `updated_at`) + RE-INSERT the freshly-resolved
  * child rows (the shared {@link resolveAndWriteTransaction} engine create also uses,
  * so the edit re-resolves identically and never trusts client settlement values) →
- * write the `edit` audit row (metadata carries before→after of key fields).
+ * write the `edit` audit row (metadata carries before→after of key fields). Returns
+ * the persisted detail before and after the edit, both read under the row lock.
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
@@ -1715,9 +1733,9 @@ export async function updateTransaction({
 	via?: AuditVia;
 	/** Injectable clock (tests). */
 	now?: () => Date;
-}): Promise<void> {
+}): Promise<{ before: TransactionDetail; after: TransactionDetail }> {
 	const actor = actorUserId ?? userId;
-	await db.transaction(async (tx) => {
+	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
@@ -1726,6 +1744,7 @@ export async function updateTransaction({
 		if (existing.deletedAt !== null) {
 			throw new TransactionDeletedError();
 		}
+		const before = await readTransactionDetail(tx, groupId, txnId);
 
 		const { currency, data, entryDescriptor } = await validateTransactionForWrite(tx, {
 			groupId,
@@ -1776,29 +1795,28 @@ export async function updateTransaction({
 				}
 			}
 		});
+
+		return { before, after: await readTransactionDetail(tx, groupId, txnId) };
 	});
+}
+
+/** The outcome of a delete or restore: whether it changed anything, and the persisted result. */
+export interface TransactionStateChange {
+	/** `false` when the txn was already in the requested state (an idempotent no-op). */
+	changed: boolean;
+	detail: TransactionDetail;
 }
 
 /**
  * Soft-delete a transaction (PLAN §9, §12.1) — set `deleted_at = now()`, guarded by
  * `isNull(deleted_at)` so it is IDEMPOTENT (a no-op on an already-deleted txn rather
- * than overwriting the original delete time). Access-checked; on an ACTUAL state
- * transition (rows-affected > 0) writes a `delete` audit row IN THE SAME
- * `db.transaction` (the audit trail is append-only and OUTLIVES the soft-delete —
- * the row is never removed). A no-op delete records NO audit row (§16.6 — audit
- * captures state transitions only). Mirrors `softDeleteGroup`.
+ * than overwriting the original delete time). The row stays; the audit trail is
+ * append-only and outlives the soft-delete.
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
  */
-export async function softDeleteTransaction({
-	userId,
-	groupId,
-	txnId,
-	actorUserId,
-	via,
-	now = () => new Date()
-}: {
+export async function softDeleteTransaction(args: {
 	userId: string;
 	groupId: string;
 	txnId: string;
@@ -1806,90 +1824,83 @@ export async function softDeleteTransaction({
 	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
 	via?: AuditVia;
 	now?: () => Date;
-}): Promise<void> {
-	const actor = actorUserId ?? userId;
-	await db.transaction(async (tx) => {
-		await assertGroupAccess(userId, groupId, tx);
-		const existing = await loadTransactionForMutation(tx, groupId, txnId);
-
-		// Only stamp `deleted_at` if still null → idempotent (no-op on an already
-		// soft-deleted txn; keeps the original delete time + audit history). `.returning`
-		// yields one row per AFFECTED row, so its length is the rows-affected count.
-		const affected = await tx
-			.update(transactions)
-			.set({ deletedAt: now() })
-			.where(and(eq(transactions.id, txnId), isNull(transactions.deletedAt)))
-			.returning({ id: transactions.id });
-
-		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op delete (the txn was
-		// already deleted → 0 rows affected) is an idempotent success with NO new audit
-		// row. Gate the write on rows-affected > 0.
-		if (affected.length > 0) {
-			await writeAuditLog(tx, {
-				groupId,
-				actorUserId: actor,
-				action: 'delete',
-				entityType: 'transaction',
-				entityId: txnId,
-				summary: `Deleted transaction '${existing.title}'`,
-				via,
-				metadata: { title: existing.title }
-			});
-		}
-	});
+}): Promise<TransactionStateChange> {
+	return setTransactionDeleted({ ...args, deleted: true });
 }
 
 /**
  * Restore a soft-deleted transaction (PLAN §9, §12.1) — clear `deleted_at`, guarded
  * by `isNotNull(deleted_at)` so restoring a LIVE txn is a no-op. Non-destructive (no
- * confirmation needed). Access-checked; on an ACTUAL state transition
- * (rows-affected > 0) writes a `restore` audit row IN THE SAME `db.transaction`. A
- * no-op restore records NO audit row (§16.6 — audit captures state transitions only).
+ * confirmation needed).
  *
  * @throws {GroupAccessError} (→404) no access.
  * @throws {TransactionNotFoundError} (→404) not a txn in this group.
  */
-export async function restoreTransaction({
-	userId,
-	groupId,
-	txnId,
-	actorUserId,
-	via
-}: {
+export async function restoreTransaction(args: {
 	userId: string;
 	groupId: string;
 	txnId: string;
 	actorUserId?: string;
 	/** API-key provenance (§16.2) — `/api/v1` only; see {@link createTransaction}. */
 	via?: AuditVia;
-}): Promise<void> {
+}): Promise<TransactionStateChange> {
+	return setTransactionDeleted({ ...args, deleted: false });
+}
+
+/**
+ * Flip `deleted_at` in ONE `db.transaction`, access-checked. The update's own guard
+ * (`isNull` / `isNotNull`) makes a repeat a no-op, and only an actual transition
+ * (rows-affected > 0) writes its audit row (PLAN §16.6 — audit records state
+ * transitions only).
+ */
+async function setTransactionDeleted({
+	userId,
+	groupId,
+	txnId,
+	actorUserId,
+	via,
+	deleted,
+	now = () => new Date()
+}: {
+	userId: string;
+	groupId: string;
+	txnId: string;
+	actorUserId?: string;
+	via?: AuditVia;
+	deleted: boolean;
+	now?: () => Date;
+}): Promise<TransactionStateChange> {
 	const actor = actorUserId ?? userId;
-	await db.transaction(async (tx) => {
+	return db.transaction(async (tx) => {
 		await assertGroupAccess(userId, groupId, tx);
 		const existing = await loadTransactionForMutation(tx, groupId, txnId);
 
-		// Only clear if currently deleted → no-op on a live txn. `.returning` yields one
-		// row per AFFECTED row, so its length is the rows-affected count.
+		// `.returning` yields one row per AFFECTED row, so its length is the rows-affected count.
 		const affected = await tx
 			.update(transactions)
-			.set({ deletedAt: null })
-			.where(and(eq(transactions.id, txnId), isNotNull(transactions.deletedAt)))
+			.set({ deletedAt: deleted ? now() : null })
+			.where(
+				and(
+					eq(transactions.id, txnId),
+					deleted ? isNull(transactions.deletedAt) : isNotNull(transactions.deletedAt)
+				)
+			)
 			.returning({ id: transactions.id });
 
-		// Audit records STATE TRANSITIONS ONLY (PLAN §16.6): a no-op restore (the txn was
-		// already live → 0 rows affected) is an idempotent success with NO new audit row.
-		// Gate the write on rows-affected > 0.
-		if (affected.length > 0) {
+		const changed = affected.length > 0;
+		if (changed) {
 			await writeAuditLog(tx, {
 				groupId,
 				actorUserId: actor,
-				action: 'restore',
+				action: deleted ? 'delete' : 'restore',
 				entityType: 'transaction',
 				entityId: txnId,
-				summary: `Restored transaction '${existing.title}'`,
+				summary: `${deleted ? 'Deleted' : 'Restored'} transaction '${existing.title}'`,
 				via,
 				metadata: { title: existing.title }
 			});
 		}
+
+		return { changed, detail: await readTransactionDetail(tx, groupId, txnId) };
 	});
 }

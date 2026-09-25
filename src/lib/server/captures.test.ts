@@ -868,12 +868,12 @@ describe('recordCaptureAsTransaction', () => {
 	/**
 	 * Stand in for the ledger: run the caller's same-transaction hook with the stub
 	 * executor (this is exactly what `createTransaction` does with its own `tx`) and
-	 * hand back the new transaction id.
+	 * hand back the new transaction.
 	 */
 	function ledgerWrites(transactionId = 'txn-9') {
 		createTransaction.mockImplementation(async ({ alsoWrite }) => {
 			await alsoWrite?.(db, transactionId);
-			return transactionId;
+			return { id: transactionId };
 		});
 	}
 

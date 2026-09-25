@@ -365,12 +365,14 @@ describeIntegration('integration: audit trail (task 6.4; PLAN §12.1)', () => {
 
 		// create
 		const before = await auditCount(group.id);
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'USD',
-			input: equalSpendingInput([memberId], memberId)
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'USD',
+				input: equalSpendingInput([memberId], memberId)
+			})
+		).id;
 		const afterCreate = await auditCount(group.id);
 		expect(afterCreate - before).toBe(1);
 		const createRows = await auditRow(group.id, 'transaction', txnId, 'create');
@@ -430,12 +432,14 @@ describeIntegration('integration: audit trail (task 6.4; PLAN §12.1)', () => {
 	it('transaction soft-delete: the create AND delete audit entries SURVIVE, unchanged', async () => {
 		const group = await freshGroup();
 		const memberId = await creatorMemberId(group.id);
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'USD',
-			input: equalSpendingInput([memberId], memberId)
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'USD',
+				input: equalSpendingInput([memberId], memberId)
+			})
+		).id;
 
 		// Snapshot the create row BEFORE the soft-delete.
 		const [createBefore] = await auditRow(group.id, 'transaction', txnId, 'create');
@@ -478,12 +482,14 @@ describeIntegration('integration: audit trail (task 6.4; PLAN §12.1)', () => {
 	it('listGroupActivity / listEntityActivity surface entries newest-first end-to-end', async () => {
 		const group = await freshGroup();
 		const memberId = await creatorMemberId(group.id);
-		const txnId = await createTransaction({
-			userId: userA.id,
-			groupId: group.id,
-			settlementCurrency: 'USD',
-			input: equalSpendingInput([memberId], memberId)
-		});
+		const txnId = (
+			await createTransaction({
+				userId: userA.id,
+				groupId: group.id,
+				settlementCurrency: 'USD',
+				input: equalSpendingInput([memberId], memberId)
+			})
+		).id;
 		await softDeleteTransaction({ userId: userA.id, groupId: group.id, txnId });
 
 		// Group feed: newest-first by occurred_at — the most recent entry is the delete.
