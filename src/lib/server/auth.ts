@@ -186,6 +186,9 @@ export interface AuthEnvInput {
 	BETTER_AUTH_SECRET?: string;
 	AUTH_RP_ID?: string;
 	AUTH_TRUSTED_ORIGINS?: string;
+	VERCEL_ENV?: string;
+	VERCEL_BRANCH_URL?: string;
+	VERCEL_URL?: string;
 }
 
 /** Fully-resolved auth env, ready to wire straight into `betterAuth(...)`. */
@@ -200,6 +203,27 @@ export interface ResolvedAuthEnv {
 	trustedOrigins: string[];
 	/** Session-signing secret (better-auth requires one in production). */
 	secret: string | undefined;
+}
+
+/**
+ * A Vercel preview is served from its own `*.vercel.app` host, so the production
+ * origin values can't work there. On previews, the stable per-branch URL replaces
+ * them: passkeys and magic links are bound to it, and the per-deployment URL is
+ * trusted too so forms posted from it pass the origin check.
+ */
+function withVercelPreviewOrigin(env: AuthEnvInput): AuthEnvInput {
+	const branchHost = env.VERCEL_BRANCH_URL?.trim();
+	if (env.VERCEL_ENV !== 'preview' || !branchHost) return env;
+
+	const branchOrigin = `https://${branchHost}`;
+	const deploymentHost = env.VERCEL_URL?.trim();
+	const origins = deploymentHost ? [branchOrigin, `https://${deploymentHost}`] : [branchOrigin];
+	return {
+		...env,
+		BETTER_AUTH_URL: branchOrigin,
+		AUTH_RP_ID: branchHost,
+		AUTH_TRUSTED_ORIGINS: origins.join(',')
+	};
 }
 
 /**
@@ -221,12 +245,13 @@ export interface ResolvedAuthEnv {
  * importing this module never throws when NODE_ENV is `test`/undefined.
  */
 export function resolveAuthEnv({
-	env: authEnv,
+	env: rawEnv,
 	isProduction
 }: {
 	env: AuthEnvInput;
 	isProduction: boolean;
 }): ResolvedAuthEnv {
+	const authEnv = withVercelPreviewOrigin(rawEnv);
 	const baseURL = authEnv.BETTER_AUTH_URL?.trim() || undefined;
 	const secret = authEnv.BETTER_AUTH_SECRET?.trim() || undefined;
 	const rpIDFromEnv = authEnv.AUTH_RP_ID?.trim() || undefined;
@@ -317,16 +342,20 @@ const { baseURL, secret, rpID, origin, trustedOrigins } = resolveAuthEnv({
 		BETTER_AUTH_URL: env.BETTER_AUTH_URL,
 		BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET,
 		AUTH_RP_ID: env.AUTH_RP_ID,
-		AUTH_TRUSTED_ORIGINS: env.AUTH_TRUSTED_ORIGINS
+		AUTH_TRUSTED_ORIGINS: env.AUTH_TRUSTED_ORIGINS,
+		VERCEL_ENV: env.VERCEL_ENV,
+		VERCEL_BRANCH_URL: env.VERCEL_BRANCH_URL,
+		VERCEL_URL: env.VERCEL_URL
 	},
 	isProduction: env.NODE_ENV === 'production' && !building
 });
 
-// Env-scoped API-key prefix (PLAN §16.1). Resolved with the SAME `isProduction`
-// signal as the auth env above so live keys carry `pwm_live_` and everything else
-// carries `pwm_test_`. Feeds the `apiKey` plugin's `defaultPrefix` below.
+// Env-scoped API-key prefix (PLAN §16.1): live keys carry `pwm_live_` and
+// everything else carries `pwm_test_`. Vercel previews run with
+// NODE_ENV=production, so they are excluded explicitly. Feeds the `apiKey`
+// plugin's `defaultPrefix` below.
 const apiKeyPrefix = resolveApiKeyPrefix({
-	isProduction: env.NODE_ENV === 'production' && !building
+	isProduction: env.NODE_ENV === 'production' && env.VERCEL_ENV !== 'preview' && !building
 });
 
 export const auth = betterAuth({
