@@ -57,7 +57,7 @@
 
 import { z } from 'zod';
 import { parseAmount } from '$lib/money';
-import { createTransaction, getTransactionDetail } from '$lib/server/transactions';
+import { createTransaction } from '$lib/server/transactions';
 import { auditVia } from '$lib/server/api/provenance';
 import { createDbIdempotencyStore, type IdempotentResponse } from '$lib/server/api/idempotency';
 import { toolError, toolSuccess } from '../errors';
@@ -371,11 +371,10 @@ export const settleUpTool: McpTool<z.infer<typeof settleUpArgs>> = {
 					expectedMemberNames,
 					via: auditVia(principal)
 				}),
-			respond: async (txnId) => {
-				// Re-read the PERSISTED detail and project both echo forms (see `../view/echo`):
+			respond: async (detail) => {
+				// Project both echo forms from the PERSISTED detail (see `../view/echo`):
 				//   - `recorded`: the structured view, every name wrapped + attributed (ADR-0003);
 				//   - `echo`:     the prose that names the humans (ADR-0006 legibility).
-				const detail = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
 				const recorded = toTransactionView({ detail, members, principal });
 
 				// The "other Nan" check — AFTER the write, over the roster, purely for the

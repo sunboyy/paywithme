@@ -194,8 +194,7 @@ describe('GET /api/v1/groups/{gid}/transactions/{txid}', () => {
 
 describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 	it('happy path → 200 with the replaced detail DTO; forwards the full input; drops `input`', async () => {
-		updateTransaction.mockResolvedValue(undefined);
-		getTransactionDetail.mockResolvedValue(detail);
+		updateTransaction.mockResolvedValue({ before: detail, after: detail });
 
 		const { status, body } = await read(
 			(await PUT(makeMutationEvent('PUT', validInput))) as Response
@@ -290,8 +289,8 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 
 		beforeEach(() => {
 			state.currencyRows = [BEER_ROW];
-			updateTransaction.mockResolvedValue(undefined);
 			getTransactionDetail.mockResolvedValue(beerDetail);
+			updateTransaction.mockResolvedValue({ before: beerDetail, after: beerDetail });
 		});
 
 		it('GET serves `BEER`, and PUTting that exact body back is accepted unchanged', async () => {
@@ -368,7 +367,7 @@ describe('PUT /api/v1/groups/{gid}/transactions/{txid}', () => {
 
 		it('a SEEDED body is forwarded byte-for-byte and reads no `currencies` rows', async () => {
 			// Regression: every pre-#68 client body keeps working, and pays no query.
-			getTransactionDetail.mockResolvedValue(detail);
+			updateTransaction.mockResolvedValue({ before: detail, after: detail });
 			await read((await PUT(makeMutationEvent('PUT', validInput))) as Response);
 			expect(updateTransaction.mock.calls[0][0].input).toEqual(validInput);
 			expect(select).not.toHaveBeenCalled();
@@ -408,8 +407,7 @@ describe('DELETE /api/v1/groups/{gid}/transactions/{txid}', () => {
 	const deletedDetail = { ...detail, deletedAt: '2026-01-03T10:00:00.000Z' };
 
 	it('happy path → 200 with the detail DTO carrying `deletedAt` set', async () => {
-		softDeleteTransaction.mockResolvedValue(undefined);
-		getTransactionDetail.mockResolvedValue(deletedDetail);
+		softDeleteTransaction.mockResolvedValue({ changed: true, detail: deletedDetail });
 
 		const { status, body } = await read(
 			(await DELETE(makeMutationEvent('DELETE', null))) as Response

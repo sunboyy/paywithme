@@ -17,14 +17,11 @@ import type { ApiKeyPrincipal } from '$lib/server/api/principal';
 import type { MemberListItem } from '$lib/server/members';
 import type { TransactionDetail } from '$lib/server/transactions';
 
-const { getGroupForUser, listMembers, restoreTransaction, getTransactionDetail } = vi.hoisted(
-	() => ({
-		getGroupForUser: vi.fn(),
-		listMembers: vi.fn(),
-		restoreTransaction: vi.fn(),
-		getTransactionDetail: vi.fn()
-	})
-);
+const { getGroupForUser, listMembers, restoreTransaction } = vi.hoisted(() => ({
+	getGroupForUser: vi.fn(),
+	listMembers: vi.fn(),
+	restoreTransaction: vi.fn()
+}));
 
 vi.mock('$lib/server/groups', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/groups')>()),
@@ -36,8 +33,7 @@ vi.mock('$lib/server/members', async (importOriginal) => ({
 }));
 vi.mock('$lib/server/transactions', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/transactions')>()),
-	restoreTransaction,
-	getTransactionDetail
+	restoreTransaction
 }));
 
 // Imported AFTER the mocks are registered.
@@ -98,16 +94,16 @@ function detailOf(overrides: Partial<TransactionDetail> = {}): TransactionDetail
 }
 
 /**
- * Script `getTransactionDetail`: the FIRST call is the before-state, the SECOND is what
- * a real `restoreTransaction` would leave behind (`deletedAt` cleared).
+ * Script `restoreTransaction` from a before-state: the result is what a real restore
+ * would leave behind (`deletedAt` cleared), and it changed something only if the
+ * transaction was deleted.
  */
 function scriptDetail(before: TransactionDetail = detailOf()) {
-	// RESET, never append: a nested `beforeEach` re-scripting the fixture must REPLACE the
-	// queue, not queue a second before-state behind the outer one.
-	getTransactionDetail.mockReset();
-	getTransactionDetail
-		.mockResolvedValueOnce(before)
-		.mockResolvedValue(detailOf({ ...before, deletedAt: null }));
+	restoreTransaction.mockReset();
+	restoreTransaction.mockResolvedValue({
+		changed: before.deletedAt !== null,
+		detail: detailOf({ ...before, deletedAt: null })
+	});
 }
 
 /** Run the tool and return its structured payload (asserting it did not error). */
@@ -136,7 +132,6 @@ beforeEach(() => {
 		deletedAt: null
 	});
 	listMembers.mockResolvedValue(ROSTER);
-	restoreTransaction.mockResolvedValue(undefined);
 	scriptDetail();
 });
 
@@ -214,15 +209,6 @@ describe('restore_transaction — the write', () => {
 		expect(payload.alreadyLive).toBe(false);
 	});
 
-	it('reaches a SOFT-DELETED transaction — `getTransactionDetail` still serves it, by design', async () => {
-		// If a deleted txn were invisible to the read path, this tool could not exist: the
-		// agent could never find the id to undo. That is why §9 keeps serving it.
-		await run();
-
-		expect(getTransactionDetail).toHaveBeenCalledTimes(2);
-		expect(restoreTransaction).toHaveBeenCalledOnce();
-	});
-
 	it('a group the caller cannot see THROWS the conflated not_found — no existence oracle', async () => {
 		getGroupForUser.mockResolvedValue(null);
 
@@ -236,13 +222,12 @@ describe('restore_transaction — the write', () => {
 	});
 
 	it('a txn id that is absent / in another group THROWS before anything is restored (§16.5)', async () => {
-		getTransactionDetail.mockReset();
-		getTransactionDetail.mockRejectedValue(new TransactionNotFoundError());
+		restoreTransaction.mockReset();
+		restoreTransaction.mockRejectedValue(new TransactionNotFoundError());
 
 		await expect(
 			restoreTransactionTool.run({ principal }, restoreTransactionTool.args.parse(ARGS))
 		).rejects.toThrow(TransactionNotFoundError);
-		expect(restoreTransaction).not.toHaveBeenCalled();
 	});
 });
 

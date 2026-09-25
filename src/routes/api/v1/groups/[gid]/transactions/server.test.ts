@@ -15,14 +15,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GroupAccessError } from '$lib/server/groups';
 
-const { listTransactions, createTransaction, getTransactionDetail } = vi.hoisted(() => ({
+const { listTransactions, createTransaction } = vi.hoisted(() => ({
 	listTransactions: vi.fn(),
-	createTransaction: vi.fn(),
-	getTransactionDetail: vi.fn()
+	createTransaction: vi.fn()
 }));
 vi.mock('$lib/server/transactions', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/transactions')>();
-	return { ...actual, listTransactions, createTransaction, getTransactionDetail };
+	return { ...actual, listTransactions, createTransaction };
 });
 
 // Swap ONLY the DB-backed idempotency store for an in-memory one (§16.6) so the
@@ -383,8 +382,7 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 	};
 
 	it('happy path → 201 with the detail DTO; forwards the raw input; drops `input`', async () => {
-		createTransaction.mockResolvedValue('t_new');
-		getTransactionDetail.mockResolvedValue(createdDetail);
+		createTransaction.mockResolvedValue(createdDetail);
 
 		const { status, body } = await read((await POST(makePostEvent(validInput))) as Response);
 		expect(status).toBe(201);
@@ -399,11 +397,6 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			expectedDisplayCode: 'THB',
 			// §16.2 audit provenance forwarded to the service (actor stays the user).
 			via: { kind: 'key', keyId: 'key_w', keyName: 'agent key' }
-		});
-		expect(getTransactionDetail).toHaveBeenCalledWith({
-			userId: 'user_1',
-			groupId: 'g1',
-			txnId: 't_new'
 		});
 		expect(body.amount).toEqual({ amount: 9000, currency: 'THB' });
 		expect(body).not.toHaveProperty('input');
@@ -485,8 +478,7 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 
 	describe('Idempotency-Key (§16.6)', () => {
 		it('same key + same body → the service runs ONCE and the 2nd call REPLAYS the 201', async () => {
-			createTransaction.mockResolvedValue('t_new');
-			getTransactionDetail.mockResolvedValue(createdDetail);
+			createTransaction.mockResolvedValue(createdDetail);
 
 			const first = await read(
 				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-1' }))) as Response
@@ -500,12 +492,10 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 			// The stored response is replayed byte-for-byte — no duplicate create.
 			expect(second.body).toEqual(first.body);
 			expect(createTransaction).toHaveBeenCalledTimes(1);
-			expect(getTransactionDetail).toHaveBeenCalledTimes(1);
 		});
 
 		it('same key + DIFFERENT body → 409 conflict (key_reused); no second create', async () => {
-			createTransaction.mockResolvedValue('t_new');
-			getTransactionDetail.mockResolvedValue(createdDetail);
+			createTransaction.mockResolvedValue(createdDetail);
 
 			const first = await read(
 				(await POST(makePostEvent(validInput, { idempotencyKey: 'key-2' }))) as Response
@@ -546,8 +536,7 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 		});
 
 		it('NO header → the service runs on every call (at-least-once, unchanged)', async () => {
-			createTransaction.mockResolvedValue('t_new');
-			getTransactionDetail.mockResolvedValue(createdDetail);
+			createTransaction.mockResolvedValue(createdDetail);
 
 			await read((await POST(makePostEvent(validInput))) as Response);
 			await read((await POST(makePostEvent(validInput))) as Response);
@@ -595,8 +584,7 @@ describe('POST /api/v1/groups/{gid}/transactions', () => {
 		};
 
 		beforeEach(() => {
-			createTransaction.mockResolvedValue('t_new');
-			getTransactionDetail.mockResolvedValue(createdDetail);
+			createTransaction.mockResolvedValue(createdDetail);
 		});
 
 		it('a group-defined DISPLAY code is translated to the internal key the ledger stores', async () => {

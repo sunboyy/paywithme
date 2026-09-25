@@ -41,7 +41,7 @@ import { z } from 'zod';
 import {
 	listTransactions,
 	createTransaction,
-	getTransactionDetail,
+	type TransactionDetail,
 	encodeTransactionCursor,
 	type TransactionListFilters
 } from '$lib/server/transactions';
@@ -234,7 +234,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 	const { input, expectedDisplayCode } = await resolveWriteCurrency(gid, body);
 
 	// The create (service call → 422/404 via the wrapper; settlement currency loaded
-	// server-side from the group) + the 201 DTO re-read (§16.4). Wrapped so a repeated
+	// server-side from the group) + the 201 DTO of what it persisted (§16.4). Wrapped so a repeated
 	// Idempotency-Key replays this exact response instead of re-running it.
 	const write = () =>
 		createTransaction({
@@ -247,12 +247,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params, request }) =
 			// audit row written in the SAME transaction as the create (no schema change).
 			via: auditVia(principal)
 		});
-	const respond = async (txnId: string) => {
-		const detail = await getTransactionDetail({
-			userId: principal.userId,
-			groupId: gid,
-			txnId
-		});
+	const respond = async (detail: TransactionDetail) => {
 		// §16.4's write payload is the FULL internal `TransactionInput`, whose entry
 		// currency may legitimately be one the group defined itself (PLAN §7.5.2) — so the
 		// 201 body resolves `display_code` exactly as the GET routes do.

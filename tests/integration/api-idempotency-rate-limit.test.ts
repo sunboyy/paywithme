@@ -290,12 +290,14 @@ describeIntegration('integration: /api/v1 idempotency + rate limits (issue #25)'
 
 		it('the WRITE window (20/60s) allows the 20th request and limits the 21st', async () => {
 			const key = await mintApiKey(s.user.id, 'write', 'write burst');
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
-				settlementCurrency: SETTLEMENT_CURRENCY
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
+					settlementCurrency: SETTLEMENT_CURRENCY
+				})
+			).id;
 			const max = RATE_LIMITS.write.max;
 			expect(max).toBe(20);
 

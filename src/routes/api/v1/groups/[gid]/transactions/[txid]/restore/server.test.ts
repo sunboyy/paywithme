@@ -84,8 +84,7 @@ beforeEach(() => {
 
 describe('POST /api/v1/groups/{gid}/transactions/{txid}/restore', () => {
 	it('happy path → 200 with the detail DTO carrying `deletedAt` null', async () => {
-		restoreTransaction.mockResolvedValue(undefined);
-		getTransactionDetail.mockResolvedValue(liveDetail);
+		restoreTransaction.mockResolvedValue({ changed: true, detail: liveDetail });
 
 		const { status, body } = await read((await POST(makeEvent())) as Response);
 		expect(status).toBe(200);

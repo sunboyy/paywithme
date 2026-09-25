@@ -9,7 +9,7 @@
 // (§16.4 response table).
 
 import { json } from '@sveltejs/kit';
-import { getTransactionDetail, restoreTransaction } from '$lib/server/transactions';
+import { restoreTransaction } from '$lib/server/transactions';
 import { toTransactionDetailDto } from '$lib/server/api/v1';
 import { resolveEntryCurrency } from '$lib/server/entry-currency';
 import { withWriteErrorHandling } from '$lib/server/api/write';
@@ -34,7 +34,7 @@ export const POST = withWriteErrorHandling(async ({ locals, params }) => {
 	if (limited) return limited;
 
 	// Throws GroupAccessError / TransactionNotFoundError (→ 404) — mapped by the wrapper.
-	await restoreTransaction({
+	const { detail } = await restoreTransaction({
 		userId: principal.userId,
 		groupId: gid,
 		txnId: txid,
@@ -43,11 +43,6 @@ export const POST = withWriteErrorHandling(async ({ locals, params }) => {
 		via: auditVia(principal)
 	});
 
-	const detail = await getTransactionDetail({
-		userId: principal.userId,
-		groupId: gid,
-		txnId: txid
-	});
 	// `display_code`, never the opaque row key of a group-defined currency (ADR-0014 #7).
 	return json(toTransactionDetailDto(detail, await resolveEntryCurrency(gid, detail.currency)));
 });

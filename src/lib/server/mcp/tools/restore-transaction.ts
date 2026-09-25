@@ -100,16 +100,16 @@ export const restoreTransactionTool: McpTool<z.infer<typeof restoreTransactionAr
 		}
 	},
 	run: async ({ principal }, { groupId, txnId }) => {
-		// The shared delete/restore flow (`./state-change`): group gate → before-state
-		// read → the guarded service call → a re-read of the persisted result, wrapped.
+		// The shared delete/restore flow (`./state-change`): group gate → the guarded
+		// service call, which returns the persisted result → wrapped.
 		// Restore + AUDIT happen in one DB transaction (§12.1); `auditVia(principal)`
 		// carries the key's `viaKey` provenance into the `restore` audit row — we never
 		// write audit ourselves, and the service gates that write on rows-affected > 0.
 		const {
 			view: restored,
-			wasDeleted,
+			changed,
 			minorUnits
-		} = await applyTransactionStateChange(principal, groupId, txnId, () =>
+		} = await applyTransactionStateChange(principal, groupId, () =>
 			restoreTransaction({
 				userId: principal.userId,
 				groupId,
@@ -117,7 +117,7 @@ export const restoreTransactionTool: McpTool<z.infer<typeof restoreTransactionAr
 				via: auditVia(principal)
 			})
 		);
-		const wasAlreadyLive = !wasDeleted;
+		const wasAlreadyLive = !changed;
 
 		return toolSuccess({
 			// The wrapped structured view (ADR-0003) — every name and the title inside an

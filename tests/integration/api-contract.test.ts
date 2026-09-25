@@ -103,12 +103,14 @@ describeIntegration('integration: /api/v1 live contract vs. OpenAPI (issue #25; 
 
 	describe('live success responses', () => {
 		it('the READ endpoints all serve spec-valid bodies', async () => {
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
-				settlementCurrency: SETTLEMENT_CURRENCY
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
+					settlementCurrency: SETTLEMENT_CURRENCY
+				})
+			).id;
 			const key = s.readKey.key;
 			const gid = s.group.id;
 
@@ -215,12 +217,14 @@ describeIntegration('integration: /api/v1 live contract vs. OpenAPI (issue #25; 
 	describe('live error envelopes', () => {
 		it('401 / 403 / 404 / 400 / 422 / 409 all match the Error schema', async () => {
 			const gid = s.group.id;
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: gid,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
-				settlementCurrency: SETTLEMENT_CURRENCY
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: gid,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
+					settlementCurrency: SETTLEMENT_CURRENCY
+				})
+			).id;
 			const body = spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] });
 
 			const unauthorized = await apiCall('GET', '/api/v1/groups', {});
@@ -268,12 +272,14 @@ describeIntegration('integration: /api/v1 live contract vs. OpenAPI (issue #25; 
 
 		it('the live 429 envelope (+ Retry-After) matches the Error schema', async () => {
 			const key = await mintApiKey(s.user.id, 'write', 'contract burst');
-			const txnId = await createTransaction({
-				userId: s.user.id,
-				groupId: s.group.id,
-				input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
-				settlementCurrency: SETTLEMENT_CURRENCY
-			});
+			const txnId = (
+				await createTransaction({
+					userId: s.user.id,
+					groupId: s.group.id,
+					input: spendingInput({ payerId: s.alice, beneficiaryIds: [s.alice, s.bob] }),
+					settlementCurrency: SETTLEMENT_CURRENCY
+				})
+			).id;
 
 			// Exhaust the write window with idempotent DELETEs, then trip it.
 			for (let i = 0; i < RATE_LIMITS.write.max; i++) {

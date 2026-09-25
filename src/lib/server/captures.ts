@@ -641,7 +641,7 @@ export async function recordCaptureAsTransaction({
 	settlementCurrency?: SeededCurrencyCode;
 	via?: AuditVia;
 }): Promise<string> {
-	return createTransaction({
+	const detail = await createTransaction({
 		userId,
 		groupId,
 		input,
@@ -651,6 +651,7 @@ export async function recordCaptureAsTransaction({
 			await stampCaptureResolved(tx, { userId, groupId, captureId, transactionId, via });
 		}
 	});
+	return detail.id;
 }
 
 /**

@@ -71,7 +71,7 @@ import {
 } from '../view';
 import type { McpTool } from '../types';
 import { GROUP_ID_PROPERTY, groupIdArg, TXN_ID_PROPERTY, txnIdArg } from './args';
-import { loadEntryCurrencyLookup, loadGroupView, loadMemberViews } from './load';
+import { loadEntryCurrency, loadEntryCurrencyLookup, loadGroupView, loadMemberViews } from './load';
 import {
 	AMOUNT_BENEFICIARIES_PROPERTY,
 	CHARGE_PROPERTY,
@@ -290,32 +290,22 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 
 		const members = await loadMemberViews(principal, groupId);
 
-		// The BEFORE state. Access-checked AND group-scoped: an absent id, an id in
+		// The CURRENT state. Access-checked AND group-scoped: an absent id, an id in
 		// another group, and an id the caller cannot see all throw
 		// `TransactionNotFoundError` → the SAME conflated `not_found` as an unseeable
-		// group (§16.5). It is also the source of every default below, and of the echo's
-		// "it WAS" half — read BEFORE the update, because after it the old values are gone.
-		const before = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
-		// The BEFORE state may be denominated in a currency the group defined itself — a
+		// group (§16.5). It is the source of every default below. It is read outside the
+		// write, so an edit that lands in between is overwritten (last save wins, §16.6);
+		// the echo's "it WAS" half comes from the service's own locked read instead.
+		const current = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
+		// The current state may be denominated in a currency the group defined itself — a
 		// web-app entry this tool cannot produce but must still describe honestly, by its
-		// `display_code` and never by the opaque row key (ADR-0014 decision 7). The AFTER
-		// state is always the settlement currency (the guard above), so one lookup covers
-		// both and costs no query unless the before-state really is custom.
-		const entryCurrencies = await loadEntryCurrencyLookup(groupId, [
-			before.currency,
-			settlementCurrency
-		]);
-		const beforeView = toTransactionView({
-			detail: before,
-			members,
-			principal,
-			entryCurrency: entryCurrencies(before.currency)
-		});
+		// `display_code` and never by the opaque row key (ADR-0014 decision 7).
+		const currentCurrency = await loadEntryCurrency(groupId, current.currency);
 
 		// A soft-deleted txn cannot be edited (the service throws `TransactionDeletedError`
 		// → `validation_error`, mapped in `../errors`). Caught here first only to say which
 		// tool fixes it — the agent's next move is `restore_transaction`, then this again.
-		if (before.deletedAt !== null) {
+		if (current.deletedAt !== null) {
 			return toolError(
 				'validation_error',
 				'That transaction is deleted, so it cannot be corrected. Call `restore_transaction` ' +
@@ -328,15 +318,15 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// settlement-currency transaction. Anything else would be FLATTENED — silently, and
 		// with no restore to undo it. Refuse, and say where the edit can actually be made.
 		// The currency named here is the DISPLAY code off the resolved row above, never
-		// `before.currency` (the raw column, which is an opaque `cur_…` for a
+		// `current.currency` (the raw column, which is an opaque `cur_…` for a
 		// group-defined currency). This branch is exactly where a custom currency lands:
 		// one is ALWAYS foreign (ADR-0014 decision 6), so every attempt to correct such a
 		// transaction reaches this sentence, and the opaque key must not be in it.
 		const unsupported =
-			before.payers.length !== 1
+			current.payers.length !== 1
 				? 'it has more than one payer'
-				: before.isForeign
-					? `it was entered in ${entryCurrencies(before.currency).displayCode}, not the ` +
+				: current.isForeign
+					? `it was entered in ${currentCurrency.displayCode}, not the ` +
 						"group's settlement currency"
 					: null;
 		if (unsupported !== null) {
@@ -351,7 +341,7 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 
 		// The DEFAULTS that keep an omitted argument from moving money (see the header):
 		// the payer and the category come from the EXISTING row, never from the caller.
-		// `before.payers.length === 1` is guaranteed by the shape gate above.
+		// `current.payers.length === 1` is guaranteed by the shape gate above.
 		//
 		// An EXPLICIT `paidBy` is a NAME (ADR-0015) and goes to the shared adapter unresolved,
 		// so all three write tools match names by one rule in one place. The default is the
@@ -360,18 +350,18 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 		// would be a lookup that can only fail or, worse, land on somebody else.
 		const payer: McpPayerReference =
 			paidBy === undefined
-				? { kind: 'default', memberId: before.payers[0].memberId }
+				? { kind: 'default', memberId: current.payers[0].memberId }
 				: { kind: 'name', memberName: paidBy };
-		const resolvedCategoryId = categoryId ?? before.categoryId;
+		const resolvedCategoryId = categoryId ?? current.categoryId;
 
 		let input;
 		try {
 			input = toTransactionInput(
 				{ amount, splitMode, splitBetween, beneficiaries, items, charges },
 				{
-					type: before.type,
+					type: current.type,
 					title,
-					date: before.input.date,
+					date: current.input.date,
 					categoryId: resolvedCategoryId,
 					currency: settlementCurrency,
 					payer,
@@ -385,7 +375,7 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 
 		// Update + AUDIT in one DB transaction (§12.1). `auditVia(principal)` carries the
 		// key's `viaKey` provenance into the `edit` audit row — audit comes for free.
-		await updateTransaction({
+		const { before, after } = await updateTransaction({
 			userId: principal.userId,
 			groupId,
 			txnId,
@@ -398,10 +388,21 @@ export const updateTransactionTool: McpTool<z.infer<typeof updateTransactionArgs
 			via: auditVia(principal)
 		});
 
-		// Re-read the PERSISTED result rather than describing what we asked for: the echo's
-		// job is to state what the ledger now HOLDS (a re-resolved split lands here, not in
-		// our `input`), and the diff is computed between two views of real rows.
-		const after = await getTransactionDetail({ userId: principal.userId, groupId, txnId });
+		// Both states come from the service's own locked reads, so the echo states what the
+		// ledger now HOLDS (a re-resolved split lands here, not in our `input`) and the
+		// diff is computed between two views of real rows. The before-state may be in a
+		// currency the group defined itself; the after-state is always the settlement
+		// currency (the guard above), so one lookup covers both.
+		const entryCurrencies = await loadEntryCurrencyLookup(groupId, [
+			before.currency,
+			settlementCurrency
+		]);
+		const beforeView = toTransactionView({
+			detail: before,
+			members,
+			principal,
+			entryCurrency: entryCurrencies(before.currency)
+		});
 		const afterView = toTransactionView({
 			detail: after,
 			members,

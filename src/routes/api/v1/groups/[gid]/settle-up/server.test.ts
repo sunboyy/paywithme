@@ -1,9 +1,9 @@
 // Unit test for POST /api/v1/groups/{gid}/settle-up (PLAN §16.4, §16.5, §8.4).
 //
 // HTTP-boundary test with a REAL principal + the REAL `toTransactionDetailDto`
-// mapper. `getGroupForUser` (settlement currency source), `createTransaction` (the
-// delegated create path), and `getTransactionDetail` (the 201 re-read) are
-// overridden via `importOriginal` so the real domain error classes stay intact.
+// mapper. `getGroupForUser` (settlement currency source) and `createTransaction` (the
+// delegated create path, which returns the persisted detail) are overridden via
+// `importOriginal` so the real domain error classes stay intact.
 // Asserts: settle-up builds the correct single-payer Transfer (rate 1, "Debt
 // settlement", currency = settlement) and delegates to createTransaction; read key →
 // 403; a bad body (self-settlement / non-positive amount) → 422 with field details;
@@ -18,13 +18,12 @@ vi.mock('$lib/server/groups', async (importOriginal) => {
 	return { ...actual, getGroupForUser };
 });
 
-const { createTransaction, getTransactionDetail } = vi.hoisted(() => ({
-	createTransaction: vi.fn(),
-	getTransactionDetail: vi.fn()
+const { createTransaction } = vi.hoisted(() => ({
+	createTransaction: vi.fn()
 }));
 vi.mock('$lib/server/transactions', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/server/transactions')>();
-	return { ...actual, createTransaction, getTransactionDetail };
+	return { ...actual, createTransaction };
 });
 
 // Swap ONLY the DB-backed idempotency store for an in-memory one (§16.6) so the
@@ -162,8 +161,7 @@ beforeEach(() => {
 describe('POST /api/v1/groups/{gid}/settle-up', () => {
 	it('builds a single-payer Transfer (rate 1, "Debt settlement") and → 201', async () => {
 		getGroupForUser.mockResolvedValue(group);
-		createTransaction.mockResolvedValue('t_settle');
-		getTransactionDetail.mockResolvedValue(transferDetail);
+		createTransaction.mockResolvedValue(transferDetail);
 
 		const { status, body } = await read(
 			(await POST(makeEvent({ from: 'm1', to: 'm2', amount: 5000 }))) as Response
@@ -269,8 +267,7 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 	describe('Idempotency-Key (§16.6)', () => {
 		it('same key + same body → settle-up runs ONCE and the 2nd call REPLAYS the 201', async () => {
 			getGroupForUser.mockResolvedValue(group);
-			createTransaction.mockResolvedValue('t_settle');
-			getTransactionDetail.mockResolvedValue(transferDetail);
+			createTransaction.mockResolvedValue(transferDetail);
 
 			const payload = { from: 'm1', to: 'm2', amount: 5000 };
 			const first = await read(
@@ -289,8 +286,7 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 
 		it('same key + DIFFERENT body → 409 conflict (key_reused)', async () => {
 			getGroupForUser.mockResolvedValue(group);
-			createTransaction.mockResolvedValue('t_settle');
-			getTransactionDetail.mockResolvedValue(transferDetail);
+			createTransaction.mockResolvedValue(transferDetail);
 
 			const first = await read(
 				(await POST(
@@ -312,8 +308,7 @@ describe('POST /api/v1/groups/{gid}/settle-up', () => {
 
 		it('NO header → settle-up runs on every call (at-least-once, unchanged)', async () => {
 			getGroupForUser.mockResolvedValue(group);
-			createTransaction.mockResolvedValue('t_settle');
-			getTransactionDetail.mockResolvedValue(transferDetail);
+			createTransaction.mockResolvedValue(transferDetail);
 
 			const payload = { from: 'm1', to: 'm2', amount: 5000 };
 			await read((await POST(makeEvent(payload))) as Response);
