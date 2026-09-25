@@ -212,8 +212,13 @@ export interface ResolvedAuthEnv {
  * trusted too so forms posted from it pass the origin check.
  */
 function withVercelPreviewOrigin(env: AuthEnvInput): AuthEnvInput {
+	if (env.VERCEL_ENV !== 'preview') return env;
 	const branchHost = env.VERCEL_BRANCH_URL?.trim();
-	if (env.VERCEL_ENV !== 'preview' || !branchHost) return env;
+	if (!branchHost) {
+		throw new Error(
+			'Auth misconfiguration: VERCEL_BRANCH_URL is missing on a Vercel preview. Enable System Environment Variables in the Vercel project, and deploy previews from a Git branch.'
+		);
+	}
 
 	const branchOrigin = `https://${branchHost}`;
 	const deploymentHost = env.VERCEL_URL?.trim();

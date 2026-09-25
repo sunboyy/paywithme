@@ -155,6 +155,13 @@ describe('resolveAuthEnv (strict per environment — PLAN §12)', () => {
 		expect(resolved.trustedOrigins).toEqual(['https://paywithme-git-feat-x-team.vercel.app']);
 	});
 
+	it('Vercel preview without VERCEL_BRANCH_URL → throws instead of using the production origin', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		expect(() =>
+			resolveAuthEnv({ env: { ...PROD_ENV, VERCEL_ENV: 'preview' }, isProduction: true })
+		).toThrow(/VERCEL_BRANCH_URL/);
+	});
+
 	it('Vercel production → keeps the configured production origin', async () => {
 		const { resolveAuthEnv } = await import('./auth');
 		const resolved = resolveAuthEnv({
