@@ -117,6 +117,57 @@ describe('resolveAuthEnv (strict per environment — PLAN §12)', () => {
 		expect(resolved.rpID).toBe('localhost');
 		expect(resolved.trustedOrigins).toEqual(['http://localhost:5173']);
 	});
+
+	it('Vercel preview → binds auth to the branch URL instead of the production origin', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({
+			env: {
+				...PROD_ENV,
+				VERCEL_ENV: 'preview',
+				VERCEL_BRANCH_URL: 'paywithme-git-feat-x-team.vercel.app',
+				VERCEL_URL: 'paywithme-abc123-team.vercel.app'
+			},
+			isProduction: true
+		});
+		expect(resolved).toEqual({
+			baseURL: 'https://paywithme-git-feat-x-team.vercel.app',
+			rpID: 'paywithme-git-feat-x-team.vercel.app',
+			origin: 'https://paywithme-git-feat-x-team.vercel.app',
+			trustedOrigins: [
+				'https://paywithme-git-feat-x-team.vercel.app',
+				'https://paywithme-abc123-team.vercel.app'
+			],
+			secret: 'super-secret-value-do-not-leak'
+		});
+	});
+
+	it('Vercel preview without origin vars → only the secret is required', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({
+			env: {
+				BETTER_AUTH_SECRET: 'preview-secret',
+				VERCEL_ENV: 'preview',
+				VERCEL_BRANCH_URL: 'paywithme-git-feat-x-team.vercel.app'
+			},
+			isProduction: true
+		});
+		expect(resolved.baseURL).toBe('https://paywithme-git-feat-x-team.vercel.app');
+		expect(resolved.trustedOrigins).toEqual(['https://paywithme-git-feat-x-team.vercel.app']);
+	});
+
+	it('Vercel production → keeps the configured production origin', async () => {
+		const { resolveAuthEnv } = await import('./auth');
+		const resolved = resolveAuthEnv({
+			env: {
+				...PROD_ENV,
+				VERCEL_ENV: 'production',
+				VERCEL_BRANCH_URL: 'paywithme-git-main-team.vercel.app'
+			},
+			isProduction: true
+		});
+		expect(resolved.baseURL).toBe('https://paywithme.example.com');
+		expect(resolved.rpID).toBe('paywithme.example.com');
+	});
 });
 
 describe('resolveApiKeyPrefix (env-scoped key prefix — PLAN §16.1)', () => {
