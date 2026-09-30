@@ -1,196 +1,68 @@
-# Autonomous build — protocol & operations
+# Autonomous build
 
-The canonical, project-agnostic contract for building an app hands-off from
-`PLAN.md` via an implement → review → test → commit loop. The single source of
-truth for _how_ the build runs.
-
-**Reusing this harness:** copy `.claude/agents/`, `scripts/`, and this file, then
-write a fresh `PLAN.md` (spec) and `CLAUDE.md` (conventions + a pointer here).
-Decompose the spec into a **map issue + sub-issues** on the tracker (e.g. via
-`/to-spec` then `/to-tickets`) — see _Task tracker_ below. The protocol is
-otherwise unchanged between projects.
-
-## Components
-
-| Piece         | File(s)                                                  | Role                                                      | Reusable?             |
-| ------------- | -------------------------------------------------------- | --------------------------------------------------------- | --------------------- |
-| Orchestrator  | the `/loop` main agent (this protocol)                   | Picks tasks, runs gate + git, delegates, pauses per phase | ✅                    |
-| Implementer   | `.claude/agents/implementer.md` (Opus)                   | Writes code + tests for one task                          | ✅                    |
-| Reviewer      | `.claude/agents/reviewer.md` (Sonnet)                    | Independent review → APPROVE / CHANGES                    | ✅                    |
-| Fast gate     | `scripts/gate.sh`                                        | lint + format + typecheck + unit (per task)               | ✅                    |
-| Full gate     | `scripts/gate-full.sh`                                   | fast gate + e2e (per phase)                               | ✅                    |
-| Spec          | `PLAN.md`                                                | _What_ to build                                           | ❌ per project        |
-| Task tracker  | **GitHub Issues** (map issue + sub-issues, `blocked_by`) | Progress source-of-truth                                  | ✅ (issue-tracker.md) |
-| Project guide | `CLAUDE.md`                                              | Project conventions + pointer here                        | ❌ per project        |
-
-## Task tracker: GitHub Issues
-
-Progress lives in **GitHub Issues**, managed via `gh` (see
-`docs/agents/issue-tracker.md` › _Wayfinding operations_ for the exact commands).
-The work breakdown maps onto native GitHub primitives:
-
-| Concept              | Represented as                                                     |
-| -------------------- | ------------------------------------------------------------------ |
-| A **phase**          | A **map/spec issue** with its tasks linked as **sub-issues**       |
-| A **task**           | A **sub-issue** of that map                                        |
-| Dependencies         | Native **`blocked_by`** dependency edges                           |
-| The `§` a task cites | Cited in the **sub-issue body** (the orchestrator slices those §s) |
-
-**Status encoding** — a sub-issue's state _is_ its status; no separate marker:
-
-| Lifecycle     | Represented as                                                   |
-| ------------- | ---------------------------------------------------------------- |
-| `todo`        | open · `ready-for-agent` · **no assignee** · `blocked_by == 0`   |
-| `in-progress` | open · **assignee set** (the assignee _is_ the claim / lock)     |
-| `in-review`   | open · assignee · `status:in-review`                             |
-| `blocked`     | open · `status:blocked` (and/or `needs-info`) + a reason comment |
-| `done`        | **closed**                                                       |
-
-**Frontier** = open sub-issues of the current map with
-`issue_dependencies_summary.blocked_by == 0` **and no assignee**; first in map
-order wins. **The current map** is the earliest one with an open sub-issue.
-
-**One-time setup** (per repo): labels `ready-for-agent`, `status:in-review`,
-`status:blocked`, `needs-info`. Native sub-issues + issue dependencies must be
-enabled (they are on GitHub by default).
-
-> **Concurrency = single worker (v1).** At most **one** sub-issue is claimed
-> (assigned) at a time — the "at most one `in-progress`" invariant, stored on
-> GitHub. The claim lock (`--add-assignee`) and native
-> dependencies are already the primitives a parallel pool needs; lifting the
-> single-claim invariant to N workers is the **only** additional change (see
-> _Parallel mode (future)_). Storage, frontier query, and close-on-commit are
-> identical either way, so the upgrade is additive.
-
-## How to run the build
-
-Driven by the `/loop` skill in an interactive session; the main agent is the
-**orchestrator**. Start or resume with:
+How the app gets built hands-off from `PLAN.md`: an implement → review → gate →
+commit loop driven by `/loop`, with the main agent as **orchestrator**.
 
 ```
 /loop continue the autonomous build per docs/autonomous-build.md
 ```
 
-The loop commits its work as it goes; `gh` infers the repo from the git remote.
+| Piece        | Where                                                         |
+| ------------ | ------------------------------------------------------------- |
+| Implementer  | `.claude/agents/implementer.md` — code + tests                |
+| Reviewer     | `.claude/agents/reviewer.md` — APPROVE / CHANGES              |
+| Fast gate    | `scripts/gate.sh` — lint, format, typecheck, unit             |
+| Full gate    | `scripts/gate-full.sh` — fast gate + e2e                      |
+| Task tracker | GitHub Issues (`gh` commands: `docs/agents/issue-tracker.md`) |
 
-## Orchestrator loop (each tick)
+## Tracker state
 
-1. **Resume check.** Query the current map's sub-issues for one that is open
-   **with an assignee** (`status:in-progress`/`in-review`); if found, recover it
-   (see _Resume contract_) before picking new work.
-2. **Pick task.** Run the **frontier query** (open sub-issues, `blocked_by == 0`,
-   no assignee, first in map order). **Claim it:** `gh issue edit <n> --add-assignee @me`
-   — the claim is the concurrency lock and the session's first write.
-   **Invariant:** at most one sub-issue is claimed at a time.
-3. **Phase boundary.** If the frontier is empty (every sub-issue closed, or the
-   only open ones carry `status:blocked`): run the **full gate**
-   (`scripts/gate-full.sh`). If green → **STOP** and hand back to the human; do
-   not start the next map. The hand-back must state whether the phase is **fully
-   done** (all sub-issues closed) or **done-with-blocks** (some open +
-   `status:blocked`), listing every blocked sub-issue with its reason
-   (`NEEDS-INPUT:` / reviewer notes) from its comment. A `blocked` task is
-   reported, not waited on — it does not prevent the boundary stop.
-4. **Implement.** Spawn the **`implementer`** (Opus) with the sub-issue body and
-   the **text of the `PLAN.md` sections it cites** — not the whole file (see
-   _Context scoping_). It writes code **and** tests.
-5. **Fast gate — trust the implementer's run.** The implementer already ran
-   `scripts/gate.sh` and reports its result; that run is authoritative. Do **not**
-   re-run it here. If the implementer reports **red**, hand the failures straight
-   back (draws from the shared 3-round budget, step 7); do not review until it
-   reports green. The gate is verified for real exactly once per task, at commit
-   (step 8) — see _Gate discipline_.
-6. **Review.** Add `status:in-review` (`gh issue edit <n> --add-label status:in-review`).
-   Spawn the **`reviewer`** (Sonnet) with the sub-issue body, the **same cited
-   `PLAN.md` sections** passed in step 4 (see _Context scoping_), and the full
-   diff **including new files** — use `git add -A && git diff --staged` (a bare
-   `git diff` omits the untracked files that scaffolding tasks create). It returns
-   **APPROVE** or findings.
-7. **Iterate.** On findings or a red gate, remove `status:in-review` and send them
-   back to the implementer. Red-gate fixes and review findings share **one budget
-   of 3 rounds** per task. If the budget is exhausted while still red or
-   unapproved → mark the sub-issue `blocked` (`--add-label status:blocked` + a
-   comment with the reviewer notes, or failing gate output if review was never
-   reached) and continue with other tasks.
-8. **Commit & close.** On APPROVE, run `scripts/gate.sh` **once** — this is the
-   orchestrator's single verification, and the only gate run it owns. If green:
-   commit (see _Commit format_), then **close the issue** (`gh issue close <n>`) —
-   closing automatically unblocks its dependents via native dependencies. If red
-   (the implementer misreported, or review-driven edits broke it), do not commit —
-   hand the failure back per step 7.
-9. **Reschedule** the loop and repeat.
+A **phase** is a map issue; each **task** is a sub-issue, ordered by the map and
+linked by native `blocked_by` dependencies. The sub-issue body cites the `PLAN.md`
+§s it implements. Issue state is the only status record:
 
-The orchestrator never writes feature code — it only manages issue status
-(assign / label / close), runs the gate/git, and delegates to the two subagents.
+| Status      | On GitHub                                                |
+| ----------- | -------------------------------------------------------- |
+| todo        | open, `ready-for-agent`, no assignee                     |
+| in-progress | open, assigned (the assignee is the lock)                |
+| in-review   | open, assigned, `status:in-review`                       |
+| blocked     | open, `status:blocked` (± `needs-info`) + reason comment |
+| done        | closed                                                   |
 
-## Context scoping (token discipline)
+The **current map** is the earliest one with an open sub-issue. The **frontier**
+is its open sub-issues with no assignee, no `status:blocked`, and
+`blocked_by == 0`; take the first in map order. A blocked task stays open, so
+its dependents stay off the frontier until it is closed.
 
-`PLAN.md` is the canonical spec but large; loading all of it into every subagent
-each task is the build's biggest avoidable token cost. So the orchestrator passes
-a subagent **only the `PLAN.md` sections the task cites** (by `§` number, read
-from the sub-issue body), as text — slice them straight from `PLAN.md` at their
-`##`/`###` headers. Pass the **same** slice to the implementer (step 4) and
-reviewer (step 6) so both judge against identical spec text.
+## Each tick
 
-The on-disk spec stays authoritative: if a provided section points elsewhere
-(`see §X`), the subagent opens `PLAN.md` and reads **just that section** — never
-the whole file. `CLAUDE.md` conventions are always in context, so they're never
-re-pasted.
-
-## Task lifecycle
-
-```
-todo ──> in-progress ──> in-review ──> done
-            ▲   │            │
-            └───┘            │   (iterate: review/gate sends it back)
-            │                │
-            └──> blocked <───┘   (shared budget of 3 rounds exhausted, or NEEDS-INPUT)
-```
-
-Status is the sub-issue's own state (see _Task tracker_): open+assignee =
-`in-progress`; `+ status:in-review`; closed = `done`; `+ status:blocked` =
-blocked. Only the orchestrator changes issue status.
-
-**Blocked dependents are automatic.** A `blocked` task stays **open**, so every
-task that (transitively) depends on it keeps `blocked_by > 0` and never appears on
-the frontier — no manual propagation needed. They re-enter the frontier the moment
-the blocker is resolved and **closed**.
-
-## Quality gates
-
-- **Fast gate** (`scripts/gate.sh`, every task): ESLint, Prettier check, type
-  check, unit tests. Must be green to commit.
-- **Full gate** (`scripts/gate-full.sh`, phase boundary): fast gate + e2e. Must
-  be green before the human merge pause.
-- Both no-op cleanly before Phase 1 scaffolds `package.json`. After scaffold, the
-  implementer wires these `package.json` scripts so the gate has teeth: `lint`,
-  `format:check`, `check`, `test:unit`, `test:e2e`.
-
-### Gate discipline
-
-`scripts/gate.sh` takes time on a project this size, so who runs it is a real
-cost. **Per round it runs exactly twice**, and only once with the orchestrator's
-authority:
-
-| Who          | When                           | Runs it?                                   |
-| ------------ | ------------------------------ | ------------------------------------------ |
-| Implementer  | before reporting (step 4)      | ✅ its result is what the loop advances on |
-| Orchestrator | after the implementer (step 5) | ❌ trusts the report                       |
-| Reviewer     | during review (step 6)         | ❌ reads the tests instead                 |
-| Orchestrator | before commit (step 8)         | ✅ the one verification with teeth         |
-
-The safety property is unchanged: **nothing is ever committed on a red gate**,
-because step 8 verifies for real. Dropping the other two runs only means a
-misreported green is caught at commit rather than before review — which costs one
-round, the same as reporting red honestly. The implementer is told this
-explicitly, so the incentive points at accurate reporting.
-
-Exception: on **resume** (see _Resume contract_) the orchestrator runs the gate
-itself, because there is no implementer report for a working tree it did not just
-delegate.
+1. **Resume.** If a sub-issue of the current map is open, assigned, and not
+   `status:blocked`, finish it first: run `scripts/gate.sh` on the working tree.
+   Green → go to review. Red → send the implementer to continue the existing
+   tree; never discard partial work.
+2. **Claim** the first frontier task: `gh issue edit <n> --add-assignee @me`.
+   Only one task is claimed at a time.
+3. **Phase end.** If the frontier is empty, run `scripts/gate-full.sh`. When green,
+   stop and report to the human: fully done or done-with-blocks (list each blocked
+   task and its reason) and what was committed. Don't start the next map.
+4. **Implement.** Spawn `implementer` with the sub-issue body and the text of the
+   `PLAN.md` sections it cites (sliced at their headers, not the whole file). The
+   implementer runs the fast gate and reports the result; trust it.
+5. **Review.** Add `status:in-review`, stage everything (`git add -A`) and spawn
+   `reviewer` with the sub-issue body, the same `PLAN.md` slice, and
+   `git diff --staged`.
+6. **Iterate.** On findings or a red gate report, remove `status:in-review` and
+   send them back to the implementer. Gate fixes and review rounds share a budget
+   of 3. When it runs out, add `status:blocked`, comment the last findings or gate
+   output, and move on.
+7. **Commit & close.** On APPROVE, run `scripts/gate.sh` once. If green, commit and
+   `gh issue close <n>` (closing unblocks dependents; don't rely on `Closes #n`).
+   If red, treat it as a round in step 6.
+8. Reschedule the loop.
 
 ## Commit format
 
-One commit per completed task. Conventional commits, referencing the **issue**:
+One commit per task:
 
 ```
 <type>(<scope>): <summary> (#<issue>)
@@ -200,75 +72,17 @@ One commit per completed task. Conventional commits, referencing the **issue**:
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 ```
 
-Commit only when the fast gate is green **and** the reviewer approved, then
-`gh issue close <n>` (step 8). Do **not** rely on a `Closes #n` keyword to
-auto-close — GitHub only fires that on merge to the **default** branch, which the
-loop does not do. Close explicitly at commit time; any later integration then
-reconciles cleanly.
+## Human inputs
 
-## Phase boundary (human checkpoint)
+When a task needs a secret or asset only the human can supply, build the
+local-dev path, mark the task `status:blocked` + `needs-info` with a
+`NEEDS-INPUT:` comment naming what is needed, and continue. Secrets go in `.env`
+and are documented in `.env.example`.
 
-When the current map has no actionable sub-issue left (all closed, or the only
-open ones are `status:blocked`) and the full gate is green, the loop stops and
-reports the phase status — **fully done** or **done-with-blocks** (listing each
-blocked sub-issue and reason) per loop step 3 — and hands back to the human,
-naming exactly what was committed so it can be reviewed and integrated.
+## Rules
 
-The human restarts the loop for the next phase. The loop **never integrates or
-publishes its own work** — that is the human's per-phase checkpoint.
-
-## Resume contract (continuable across token-out / API error)
-
-State lives **on GitHub and in git**, never only in context, so any fresh session
-can resume:
-
-1. A fresh session reads `CLAUDE.md` + this file + the current **map issue and its
-   open sub-issues** (`gh issue view`).
-2. If a sub-issue is open **with an assignee** (`status:in-progress`), run
-   `scripts/gate.sh` on the working tree:
-   - **green** → review → commit + close (resume at loop step 6);
-   - **red / partial** → implementer **continues** the existing working tree (do
-     **not** discard partial work).
-3. Closed issues are immutable history; only the one assigned-open sub-issue can be
-   partial.
-
-Because the orchestrator **assigns** a sub-issue _before_ delegating and **closes**
-it only _after_ committing, there is always exactly one recoverable point of
-uncertainty (the claimed task), with its partial work preserved in the tree.
-
-## Blocked / external inputs
-
-Tasks needing real secrets/assets only the human can supply are found by
-`gh issue list --label needs-info`. For these: build the local-dev path, mark the
-dependent sub-issue `blocked` (`status:blocked` + `needs-info` + a `NEEDS-INPUT:`
-comment), and continue. Supply the inputs when prompted; blocked tasks re-enter
-the frontier in a later pass once resolved and their blocker closed. Never
-hard-code secrets — everything via `.env` (documented in `.env.example`).
-
-## Parallel mode (future)
-
-The single-worker invariant (loop step 2) is the **only** thing standing between
-this protocol and parallel subagents; the storage, frontier query, claim lock, and
-close-on-commit are already parallel-safe. To lift it:
-
-- **Fan out.** Claim **every** frontier sub-issue at once (up to a worker cap) and
-  spawn an implementer per claim. `--add-assignee` is an atomic claim, so two
-  workers can never grab the same issue.
-- **Isolate the tree.** Parallel workers cannot share one working tree (gate runs
-  and commits collide) — give each a **git worktree** (or branch-per-issue) and
-  fold each back into the build's line of work on its own commit + close.
-- **Re-fan on completion.** Each close unblocks dependents; re-run the frontier
-  query and claim the newly-open issues. The graph drains itself (e.g. closing the
-  write-endpoints issue opens the idempotency/rate-limit/audit/docs fan-out).
-
-Everything else in this document — gates, review, commit format, resume, phase
-boundary — is unchanged. Adopt when token budget allows.
-
-## Guardrails
-
-- Orchestrator writes no feature code — only issue status (assign / label / close),
-  gate runs, and git.
-- Implementer never commits, and never changes issue status.
-- Reviewer never edits files.
-- No secrets in git.
-- The loop never merges or pushes — integration is the human's checkpoint.
+- The orchestrator writes no feature code; it only manages issues, runs gates,
+  commits, and delegates.
+- Only the orchestrator commits or changes issue status.
+- Never commit on a red gate. Never push or merge; integration is the human's
+  job at each phase end.

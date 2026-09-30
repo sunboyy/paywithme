@@ -1,39 +1,9 @@
 # Domain Docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+**Layout: single-context.** One `CONTEXT.md` (glossary) and `docs/adr/` at the
+repo root.
 
-**Layout: single-context.** One `CONTEXT.md` + `docs/adr/` at the repo root.
-
-## Before exploring, read these
-
-- **`CONTEXT.md`** at the repo root — the project's glossary / ubiquitous language.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in.
-
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
-
-## File structure
-
-Single-context repo:
-
-```
-/
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-....md
-│   └── 0002-....md
-└── src/
-```
-
-_(If this repo later splits into multiple bounded contexts, add a `CONTEXT-MAP.md` at the root pointing to one `CONTEXT.md` per context, and re-run `/setup-matt-pocock-skills` to switch to multi-context.)_
-
-## Use the glossary's vocabulary
-
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
-
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
-
-## Flag ADR conflicts
-
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
-
-> _Contradicts ADR-0007 (...) — but worth reopening because…_
+Before working in an area, read `CONTEXT.md` and the ADRs that touch it. Use the
+glossary's terms in issues, proposals, and test names. If you need a term it
+doesn't have, note the gap for `/domain-modeling`. If your work contradicts an
+ADR, say so explicitly instead of silently overriding it.
