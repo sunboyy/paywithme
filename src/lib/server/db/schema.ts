@@ -59,14 +59,15 @@
 //     per-key, class-aware `/api/v1` rate-limit counters. Mirrors `rate_limit`'s
 //     4-column shape, keyed `${apiKeyId}:${class}` (class ∈ read|write) with two
 //     independent counters (read 100/60s, write 20/60s).
-//   - oauth_application / oauth_access_token / oauth_consent (issue #38) →
-//     re-exported from `oauth-schema.ts`, hand-authored (ADR-0010) to back
-//     better-auth's `mcp` OAuth authorization server (the connector OAuth flow).
-//     The CLI can't generate them for this config (same `$app/server` constraint
-//     as `api_key` / `rate_limit`). The `mcp` plugin reuses the `oidcProvider`
-//     plugin's tables, so the export KEYS MUST be `oauthApplication`,
-//     `oauthAccessToken`, `oauthConsent` — the drizzle adapter resolves each
-//     model via `schema['oauthApplication']` etc.
+//   - jwks / oauth_client / oauth_resource / oauth_client_resource /
+//     oauth_refresh_token / oauth_access_token / oauth_consent /
+//     oauth_client_assertion (issue #38, replaced by ADR-0018) → re-exported from
+//     `oauth-schema.ts`, hand-authored to back the connector OAuth authorization
+//     server (`@better-auth/mcp` on `@better-auth/oauth-provider`) and the `jwt`
+//     plugin that signs its access tokens. The CLI can't generate them for this
+//     config (same `$app/server` constraint as `api_key` / `rate_limit`). The
+//     export KEYS MUST be the plugin model names (`jwks`, `oauthClient`, …) — the
+//     drizzle adapter resolves each model via `schema['oauthClient']` etc.
 
 //   - receiving_method (issue #83) → re-exported from `receiving-schema.ts`,
 //     hand-authored (PLAN §17.1–§17.2, §17.6; ADR-0016): a user's ordered list of

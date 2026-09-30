@@ -53,7 +53,7 @@
 		</p>
 	</div>
 
-	{#if !data.consentCode}
+	{#if !data.oauthQuery}
 		<!-- Reached without an active consent request (e.g. a stale/expired link). -->
 		<Card.Root>
 			<Card.Header>
@@ -72,11 +72,17 @@
 		<Card.Root>
 			<Card.Header>
 				<Card.Title>Requesting app</Card.Title>
-				<Card.Description>
-					{#if data.clientId}
+				<Card.Description class="space-y-1">
+					{#if data.clientName}
+						<span class="block font-medium text-foreground">{data.clientName}</span>
+					{/if}
+					{#if data.returnsTo}
+						<span class="block"
+							>Returns you to <span class="font-mono break-all">{data.returnsTo}</span></span
+						>
+					{/if}
+					{#if !data.clientName && !data.returnsTo}
 						<span class="font-mono break-all">{data.clientId}</span>
-					{:else}
-						An unnamed client
 					{/if}
 				</Card.Description>
 			</Card.Header>
@@ -129,7 +135,8 @@
 			use:enhance={followExternalRedirect}
 			class="flex flex-col gap-3 sm:flex-row-reverse"
 		>
-			<input type="hidden" name="consent_code" value={data.consentCode} />
+			<!-- The provider-signed authorization request, posted back verbatim. -->
+			<input type="hidden" name="oauth_query" value={data.oauthQuery} />
 			<Button type="submit" formaction="?/allow" class="w-full sm:w-auto">
 				Allow{data.canMoveMoney ? ' — this can move money' : ''}
 			</Button>

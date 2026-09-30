@@ -14,16 +14,16 @@
 // cannot tell the two credential paths apart.
 //
 // ── Why OAuth first ──────────────────────────────────────────────────────────
-// An api-key string is never stored in the `oauthAccessToken` table, so
-// `getMcpSession` returns `null` for it and the key fallback runs — trying OAuth
-// first therefore costs a lookup that misses, never a mis-auth. Crucially the key
+// An api-key string is not a JWT, so `verifyMcpAccessToken` returns `null` for
+// it without any I/O and the key fallback runs — trying OAuth first costs
+// nothing and can never mis-authenticate. Crucially the key
 // path (and ONLY the key path) rate-limits: OAuth resolution does no rate-limit
 // bookkeeping, so a token that fails to resolve does not burn a key's budget.
 //
 // This module is also the clean seam #42 (audit provenance / `viaOAuth`) will
 // extend: the branch taken is decided HERE and nowhere else.
 
-import { auth } from '$lib/server/auth';
+import { verifyMcpAccessToken } from './oauth-token';
 import { verifyBearerKey, type BearerVerification } from '$lib/server/api/verify';
 import { scopeToPermissions, OAUTH_WRITE_SCOPE } from '$lib/server/api/scope';
 import type { ApiKeyPrincipal } from '$lib/server/api/principal';
@@ -41,8 +41,7 @@ const WRITE_SCOPE = OAUTH_WRITE_SCOPE;
  * Map an OAuth access token's `scopes` onto the plugin `permissions` shape the
  * §16.2 scope model reads.
  *
- * `session.scopes` is a SPACE-SEPARATED string (better-auth's `OAuthAccessToken`
- * shape). We split it and, if it carries the `write` scope token, encode a write
+ * `scopes` is the access token's SPACE-SEPARATED `scope` claim. We split it and, if it carries the `write` scope token, encode a write
  * principal; otherwise a read principal — LEAST PRIVILEGE by default, matching
  * `scope.ts`'s philosophy, so a token with an empty / unknown / missing scope set
  * can never move money. Encoding through `scopeToPermissions` (rather than a bare
@@ -60,26 +59,17 @@ export function oauthScopesToPermissions(
 
 /**
  * Resolve an OAuth access token into an {@link ApiKeyPrincipal}, or `null` when
- * there is no usable OAuth session.
+ * there is no usable OAuth token.
  *
- * `getMcpSession` reads the `Authorization: Bearer <token>` header itself and
- * returns `OAuthAccessToken | null` — `null` for a missing / expired / unknown
- * token (it also sets its own `WWW-Authenticate`, which we IGNORE; `/mcp` emits
- * its own via `mcpUnauthorized`). A session without a `userId` is treated as
- * unauthenticated. A thrown call (a DB blip) is swallowed to `null` so the
- * request simply falls through to the api-key path — the OAuth branch never turns
- * an infrastructure error into a hard failure of the whole endpoint.
+ * `verifyMcpAccessToken` checks the `Authorization` header's JWT (signature,
+ * issuer, `/mcp` audience, expiry, DPoP binding) and returns `null` for anything
+ * else, including an API key or an infrastructure error. So the request simply
+ * falls through to the api-key path: the OAuth branch never turns an error into
+ * a hard failure of the whole endpoint.
  */
 async function resolveOAuthPrincipal(request: Request): Promise<ApiKeyPrincipal | null> {
-	let session: Awaited<ReturnType<typeof auth.api.getMcpSession>>;
-	try {
-		session = await auth.api.getMcpSession({ headers: request.headers });
-	} catch (error) {
-		console.error('[mcp/auth] getMcpSession threw', error);
-		return null;
-	}
-
-	if (!session?.userId) return null;
+	const token = await verifyMcpAccessToken(request);
+	if (!token) return null;
 
 	return {
 		// `keyId` is the downstream PER-CALLER ISOLATION key: it is folded into the
@@ -93,18 +83,18 @@ async function resolveOAuthPrincipal(request: Request): Promise<ApiKeyPrincipal 
 		// budget. Composing `${clientId}:${userId}` restores per-user isolation while
 		// keeping the client as a correlation prefix. (#42 uses the branch taken here to
 		// record OAuth provenance.)
-		keyId: `${session.clientId}:${session.userId}`,
+		keyId: `${token.clientId}:${token.userId}`,
 		// No human key label on the OAuth path.
 		name: null,
-		userId: session.userId,
-		permissions: oauthScopesToPermissions(session.scopes),
+		userId: token.userId,
+		permissions: oauthScopesToPermissions(token.scopes),
 		// #42 (ADR-0010 §Consequences): the RAW client id (the connected app), carried as
 		// AUDIT PROVENANCE so a mutation over this OAuth connection is tagged
 		// `metadata.viaOAuth = <clientId>` — the OAuth equivalent of `viaKey`. Its mere
 		// PRESENCE marks this principal as OAuth-originated (`auditVia` branches on it).
 		// Deliberately the bare `clientId`, NOT the composed `keyId` above: the actor tag
 		// records which APP a change entered through, and the user is already `userId`.
-		oauthClientId: session.clientId
+		oauthClientId: token.clientId
 	};
 }
 

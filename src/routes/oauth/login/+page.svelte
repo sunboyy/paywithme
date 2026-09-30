@@ -1,14 +1,13 @@
 <script lang="ts">
 	// `/oauth/login` — the dedicated sign-in for the Claude.ai (MCP OAuth connector)
-	// authorization flow. Reached only from better-auth's authorize endpoint
+	// authorization flow. Reached only from the OAuth authorize endpoint
 	// (`mcp({ loginPage: '/oauth/login' })`); the load redirects here-without-an-
 	// OAuth-request back to the normal `/login`, so `oauthResume` is ALWAYS set.
 	//
 	// After sign-in we complete the authorization with a FULL-PAGE navigation to the
 	// authorize endpoint (a client `goto`/fetch can't cross to the OAuth client's
-	// origin). Passkey (WebAuthn) is a client fetch, and the plugin's post-login
-	// hook can rewrite that response into a swallowed cross-origin redirect, so we
-	// decide by the REAL session (`getSession`), not the fetch outcome.
+	// origin). Passkey (WebAuthn) is a client fetch, so we decide by the REAL
+	// session (`getSession`), not the fetch outcome.
 	import { authClient } from '$lib/auth-client';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';

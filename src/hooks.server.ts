@@ -43,7 +43,7 @@ function isApiV1Request(pathname: string): boolean {
 
 // ── CSRF origin guard (replaces SvelteKit's built-in one) ────────────────────
 // SvelteKit's built-in `csrf.checkOrigin` is turned OFF in `vite.config.ts`
-// because it blanket-403s the OAuth token exchange (`POST /api/auth/mcp/token`),
+// because it blanket-403s the OAuth token exchange (`POST /api/auth/oauth2/token`),
 // which the Claude.ai connector makes server-to-server as an
 // `application/x-www-form-urlencoded` POST with NO `Origin` header — and the
 // built-in check runs before hooks, so it can't be exempted per-route. We re-add
