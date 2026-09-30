@@ -204,120 +204,129 @@ describe('auth instance wiring', () => {
 		expect(auth.options).toBeDefined();
 	});
 
-	it('registers exactly the magic-link, passkey, api-key, mcp, and sveltekit-cookies plugins', async () => {
+	it('registers exactly the magic-link, passkey, api-key, jwt, oauth-provider, and sveltekit-cookies plugins', async () => {
 		const { auth } = await import('./auth');
 		const pluginIds = (auth.options.plugins ?? []).map((p) => p.id);
 		expect(pluginIds).toContain('magic-link');
 		expect(pluginIds).toContain('passkey');
 		// `api-key` (PLAN §16.1) exposes the server-side key API for later tickets.
 		expect(pluginIds).toContain('api-key');
-		// `mcp` (ADR-0010, issue #37) turns better-auth into the OAuth authorization
-		// server for the Claude.ai connector.
-		expect(pluginIds).toContain('mcp');
+		// `jwt` signs the connector's OAuth access tokens (ADR-0018).
+		expect(pluginIds).toContain('jwt');
+		// `mcp()` from `@better-auth/mcp` IS the oauth-provider plugin, preset for MCP
+		// (ADR-0010, ADR-0018), so it registers under that id.
+		expect(pluginIds).toContain('oauth-provider');
 		// `sveltekit-cookies` (added in task 2.10) makes server-side `auth.api.*`
 		// calls route their Set-Cookie through SvelteKit so cleared/refreshed
 		// session cookies reach the browser (e.g. logout). It MUST stay last.
 		expect(pluginIds).toContain('sveltekit-cookies');
-		// Exactly these five — asserting the exact set still catches an accidental
+		// Exactly these six — asserting the exact set still catches an accidental
 		// extra plugin such as a forbidden social provider (PLAN §5.1).
-		expect(pluginIds).toHaveLength(5);
+		expect(pluginIds).toHaveLength(6);
 		expect(new Set(pluginIds)).toEqual(
-			new Set(['magic-link', 'passkey', 'api-key', 'mcp', 'sveltekit-cookies'])
+			new Set(['magic-link', 'passkey', 'api-key', 'jwt', 'oauth-provider', 'sveltekit-cookies'])
 		);
 	});
 
-	it('registers the mcp plugin BEFORE sveltekit-cookies, with sveltekit-cookies last (ADR-0010)', async () => {
+	it('registers jwt and the OAuth provider BEFORE sveltekit-cookies, with sveltekit-cookies last', async () => {
 		const { auth } = await import('./auth');
 		const pluginIds = (auth.options.plugins ?? []).map((p) => p.id);
-		const mcpIndex = pluginIds.indexOf('mcp');
 		const cookiesIndex = pluginIds.indexOf('sveltekit-cookies');
-		expect(mcpIndex).toBeGreaterThanOrEqual(0);
-		// mcp comes before sveltekit-cookies…
-		expect(mcpIndex).toBeLessThan(cookiesIndex);
-		// …and sveltekit-cookies stays LAST (better-auth requirement).
+		for (const id of ['jwt', 'oauth-provider'] as const) {
+			expect(pluginIds.indexOf(id)).toBeGreaterThanOrEqual(0);
+			expect(pluginIds.indexOf(id)).toBeLessThan(cookiesIndex);
+		}
+		// sveltekit-cookies stays LAST (better-auth requirement).
 		expect(cookiesIndex).toBe(pluginIds.length - 1);
 	});
 
-	it('configures the mcp OAuth login page as the dedicated /oauth/login (ADR-0010 §Decision(1))', async () => {
+	/** The registered OAuth provider's resolved options. */
+	async function oauthProviderOptions() {
+		const { auth } = await import('./auth');
+		const plugin = (auth.options.plugins ?? []).find((p) => p.id === 'oauth-provider') as
+			| {
+					options?: {
+						loginPage?: string;
+						consentPage?: string;
+						scopes?: string[];
+						advertisedMetadata?: { scopes_supported?: string[] };
+						resources?: unknown[];
+						allowDynamicClientRegistration?: boolean;
+						allowUnauthenticatedClientRegistration?: boolean;
+					};
+			  }
+			| undefined;
+		expect(plugin).toBeDefined();
+		return plugin!.options ?? {};
+	}
+
+	it('configures the OAuth login page as the dedicated /oauth/login (ADR-0010 §Decision(1))', async () => {
 		// The AS redirects an unauthenticated resource-owner to this DEDICATED login
 		// surface (not the everyday /login) to establish a session before the
 		// authorization/consent step; that page then resumes the authorization.
-		const { auth } = await import('./auth');
-		const mcpPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'mcp') as {
-			options?: { loginPage?: string };
-		};
-		expect(mcpPlugin).toBeDefined();
-		expect(mcpPlugin.options?.loginPage).toBe('/oauth/login');
+		expect((await oauthProviderOptions()).loginPage).toBe('/oauth/login');
 	});
 
-	it('advertises read/write as grantable OAuth scopes with a consent page (ADR-0010 §Decision(4), #41)', async () => {
-		const { auth, OAUTH_CONSENT_PATH } = await import('./auth');
-		const mcpPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'mcp') as {
-			options?: {
-				oidcConfig?: {
-					scopes?: string[];
-					consentPage?: string;
-					metadata?: { scopes_supported?: string[] };
-				};
-			};
-		};
-		const oidc = mcpPlugin.options?.oidcConfig;
-		// GRANTABLE: the plugin's grantable set becomes `[...base, ...scopes]`, and
-		// `/mcp/authorize` refuses any scope outside it (`invalid_scope`). Exactly the
-		// two custom scopes, no more (an accidental extra scope must fail HERE).
-		expect(oidc?.scopes).toEqual(['read', 'write']);
-		// ADVERTISED: read/write appear in the RFC 9728 protected-resource discovery
-		// document (#39), alongside the base OIDC scopes.
-		expect(oidc?.metadata?.scopes_supported).toEqual([
-			'openid',
-			'profile',
-			'email',
-			'offline_access',
-			'read',
-			'write'
-		]);
+	it('grants and advertises read/write, with a consent page (ADR-0010 §Decision(4), #41)', async () => {
+		const { OAUTH_CONSENT_PATH } = await import('./auth');
+		const options = await oauthProviderOptions();
+		const expected = ['openid', 'profile', 'email', 'offline_access', 'read', 'write'];
+		// GRANTABLE: `/oauth2/authorize` refuses any scope outside this set
+		// (`invalid_scope`). An accidental extra scope must fail HERE.
+		expect(options.scopes).toEqual(expected);
+		// ADVERTISED in discovery, so a connector can find out read/write exist.
+		expect(options.advertisedMetadata?.scopes_supported).toEqual(expected);
 		// The conscious read/write consent choice (ADR-0007) is reproduced at this
 		// route — and the config points at the SAME literal the route lives at.
-		expect(oidc?.consentPage).toBe(OAUTH_CONSENT_PATH);
+		expect(options.consentPage).toBe(OAUTH_CONSENT_PATH);
 		expect(OAUTH_CONSENT_PATH).toBe('/oauth/consent');
 	});
 
-	it('resolves OAuth discovery metadata against the wired auth instance (ADR-0010)', async () => {
-		// Proves the mcp plugin is actually wired into `auth`: the discovery helper
-		// resolves the AS metadata from the instance without a live DB or request
-		// context. The server test project supplies a deterministic BETTER_AUTH_URL,
-		// so this behaves identically in a clean CI checkout and on a machine with a
-		// local ignored `.env` file.
-		const { oAuthDiscoveryMetadata } = await import('better-auth/plugins');
-		const { auth } = await import('./auth');
-		const handler = oAuthDiscoveryMetadata(auth);
-		expect(typeof handler).toBe('function');
-		const response = await handler(
-			new Request('http://localhost/.well-known/oauth-authorization-server')
-		);
-		expect(response).toBeInstanceOf(Response);
-		const metadata = (await response.json()) as Record<string, unknown>;
-		// The AS advertises its authorize / token endpoints, proving the mcp plugin
-		// contributed its OAuth surface to this instance.
-		expect(metadata.authorization_endpoint).toContain('/api/auth/mcp/authorize');
-		expect(metadata.token_endpoint).toContain('/api/auth/mcp/token');
-		expect(Array.isArray(metadata.response_types_supported)).toBe(true);
+	it('lets a connector register itself: unauthenticated dynamic client registration is on', async () => {
+		// Claude.ai self-registers (RFC 7591) before it can start the flow. With
+		// either flag off, the connector fails at "Connect".
+		const options = await oauthProviderOptions();
+		expect(options.allowDynamicClientRegistration).toBe(true);
+		expect(options.allowUnauthenticatedClientRegistration).toBe(true);
 	});
 
-	it('advertises read/write in the RFC 9728 protected-resource discovery document (#41 acceptance)', async () => {
-		// The END-TO-END advertisement: not just the config, but the metadata the
-		// discovery route actually serves. `getMCPProtectedResourceMetadata` sources
-		// `scopes_supported` from our `oidcConfig.metadata`, so a real connector
-		// discovers that `read`/`write` exist. Driven through the SAME real helper the
-		// `/.well-known/oauth-protected-resource` route wraps, no live DB needed.
-		const { oAuthProtectedResourceMetadata } = await import('better-auth/plugins');
+	it('binds tokens to the /mcp resource on the app origin, which is also the issuer', async () => {
+		const { MCP_RESOURCE, OAUTH_ISSUER } = await import('./auth');
+		// The server test project pins BETTER_AUTH_URL=http://localhost:5173.
+		expect(OAUTH_ISSUER).toBe('http://localhost:5173');
+		expect(MCP_RESOURCE).toBe('http://localhost:5173/mcp');
+		expect((await oauthProviderOptions()).resources).toContain(MCP_RESOURCE);
+	});
+
+	it('pins the jwt issuer to the app origin and keeps the session-JWT surface off', async () => {
+		const { auth, OAUTH_ISSUER } = await import('./auth');
+		const jwtPlugin = (auth.options.plugins ?? []).find((p) => p.id === 'jwt') as {
+			options?: { jwt?: { issuer?: string }; disableSettingJwtHeader?: boolean };
+		};
+		// `/mcp` verifies `iss` against OAUTH_ISSUER, and RFC 8414 discovery lives
+		// at the root because the issuer has no path.
+		expect(jwtPlugin.options?.jwt?.issuer).toBe(OAUTH_ISSUER);
+		// No `set-auth-jwt` header on session responses, and no `/token` endpoint.
+		expect(jwtPlugin.options?.disableSettingJwtHeader).toBe(true);
+		expect(auth.options.disabledPaths).toContain('/token');
+	});
+
+	it('builds its context with no database: the OAuth resource seed is deferred, not fatal', async () => {
+		// The provider seeds `oauth_resource` during init, inside better-auth's
+		// one-shot `$context` promise. The unit-test project has no DATABASE_URL, so
+		// this is the "database unreachable at startup" case: `$context` must still
+		// resolve, or every auth request on the instance would fail
+		// (`deferResourceSeedFailure` in auth.ts).
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		// A FRESH instance, so its init runs under the spy.
+		vi.resetModules();
 		const { auth } = await import('./auth');
-		const handler = oAuthProtectedResourceMetadata(auth);
-		const response = await handler(
-			new Request('http://localhost/.well-known/oauth-protected-resource')
+		await expect(auth.$context).resolves.toBeDefined();
+		expect(warn).toHaveBeenCalledWith(
+			'[auth] OAuth resource seed deferred to first use:',
+			expect.any(Error)
 		);
-		const metadata = (await response.json()) as { scopes_supported?: string[] };
-		expect(metadata.scopes_supported).toEqual(expect.arrayContaining(['read', 'write']));
+		warn.mockRestore();
 	});
 
 	it('registers the api-key plugin BEFORE sveltekit-cookies, with sveltekit-cookies last (PLAN §16.1)', async () => {

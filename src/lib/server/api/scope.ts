@@ -33,7 +33,7 @@ export type ApiScope = 'read' | 'write';
  * / `write` grant maps 1:1 onto the api-key scope model, so a `read`-only
  * Claude.ai connection still cannot move money. Exported as the SINGLE source of
  * truth so three places can't drift:
- *   - `lib/server/auth.ts` advertises them as the grantable `oidcConfig.scopes`,
+ *   - `lib/server/auth.ts` advertises them as grantable OAuth provider `scopes`,
  *   - `lib/server/mcp/auth.ts` (#40's resolver) matches the returned token's
  *     `write` scope against {@link OAUTH_WRITE_SCOPE},
  *   - the `/oauth/consent` screen labels the requested scopes with them.
@@ -42,8 +42,8 @@ export const OAUTH_READ_SCOPE: ApiScope = 'read';
 export const OAUTH_WRITE_SCOPE: ApiScope = 'write';
 
 /**
- * The grantable OAuth scopes, in advertise order. Fed to the mcp plugin's
- * `oidcConfig.scopes` (making them grantable) and into the discovery
+ * The grantable OAuth scopes, in advertise order. Fed to the OAuth provider's
+ * `scopes` (making them grantable) and into the discovery
  * `scopes_supported` (making them advertised).
  */
 export const OAUTH_SCOPES = [OAUTH_READ_SCOPE, OAUTH_WRITE_SCOPE] as const;

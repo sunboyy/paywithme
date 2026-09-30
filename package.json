@@ -51,6 +51,7 @@
 		"eslint-plugin-svelte": "^3.19.0",
 		"formsnap": "^2.0.1",
 		"globals": "^17.6.0",
+		"jose": "^6.2.12",
 		"jsdom": "^27.4.0",
 		"mode-watcher": "^1.1.0",
 		"prettier": "^3.8.4",
@@ -77,12 +78,14 @@
 		"yaml": "^2.9.0"
 	},
 	"dependencies": {
-		"@better-auth/api-key": "^1.6.26",
-		"@better-auth/passkey": "^1.6.26",
-		"better-auth": "^1.6.26",
+		"@better-auth/api-key": "^1.7.6",
+		"@better-auth/mcp": "^1.7.6",
+		"@better-auth/oauth-provider": "1.7.6",
+		"@better-auth/passkey": "^1.7.6",
+		"better-auth": "^1.7.6",
 		"drizzle-orm": "^0.45.2",
 		"pg": "^8.21.0",
 		"qrcode-generator": "^2.0.4",
-		"zod": "^4.4.3"
+		"zod": "^4.6.5"
 	}
 }

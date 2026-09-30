@@ -14,19 +14,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RequestEvent } from '@sveltejs/kit';
 
-const { verifyApiKey, getSession, getMcpSession, consumeRateLimit, listGroupsForUser } = vi.hoisted(
-	() => ({
+const { verifyApiKey, getSession, verifyMcpAccessToken, consumeRateLimit, listGroupsForUser } =
+	vi.hoisted(() => ({
 		verifyApiKey: vi.fn(),
 		getSession: vi.fn(),
-		getMcpSession: vi.fn(),
+		verifyMcpAccessToken: vi.fn(),
 		consumeRateLimit: vi.fn(),
 		listGroupsForUser: vi.fn()
-	})
-);
+	}));
 
 vi.mock('$lib/server/auth', () => ({
-	auth: { api: { verifyApiKey, getSession, getMcpSession } }
+	auth: { api: { verifyApiKey, getSession } }
 }));
+vi.mock('./oauth-token', () => ({ verifyMcpAccessToken }));
 vi.mock('$lib/server/api/rate-limit', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/server/api/rate-limit')>()),
 	consumeRateLimit
@@ -107,12 +107,8 @@ function call(name: string, args?: Record<string, unknown>) {
 	return { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: args } };
 }
 
-/** An OAuth access token, as `getMcpSession` returns it (space-separated scopes). */
-const OAUTH_SESSION = {
-	accessToken: 'oat_abc',
-	refreshToken: 'ort_abc',
-	accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
-	refreshTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+/** A verified OAuth access token, as `verifyMcpAccessToken` returns it. */
+const OAUTH_TOKEN = {
 	clientId: 'client_1',
 	userId: 'user_oauth',
 	scopes: 'read'
@@ -122,7 +118,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	verifyApiKey.mockResolvedValue(VALID_KEY);
 	// Default: no OAuth token → the api-key path runs (the regression baseline).
-	getMcpSession.mockResolvedValue(null);
+	verifyMcpAccessToken.mockResolvedValue(null);
 	consumeRateLimit.mockResolvedValue({
 		allowed: true,
 		count: 1,
@@ -175,7 +171,7 @@ describe('auth (ADR-0009: the 401 must carry WWW-Authenticate)', () => {
 
 describe('OAuth dual-auth (ADR-0010 §Decision(3): EITHER credential → ONE principal)', () => {
 	it('a WRITE-scoped OAuth token resolves to a WRITE principal (sees the write tools)', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, scopes: 'read write' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, scopes: 'read write' });
 
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 
@@ -187,7 +183,7 @@ describe('OAuth dual-auth (ADR-0010 §Decision(3): EITHER credential → ONE pri
 	});
 
 	it('a READ-only OAuth token resolves to a READ principal (write tool → 403 forbidden_scope)', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, scopes: 'read' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, scopes: 'read' });
 
 		// `tools/list` is scope-filtered: no write tools for a read principal.
 		const list = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
@@ -205,14 +201,14 @@ describe('OAuth dual-auth (ADR-0010 §Decision(3): EITHER credential → ONE pri
 	});
 
 	it('an unknown/empty OAuth scope set is READ by default (least privilege)', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, scopes: '' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, scopes: '' });
 
 		const res = await post({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 		expect((res.body.result?.tools ?? []).map((t) => t.name)).not.toContain('create_transaction');
 	});
 
-	it('OAuth-first precedence: when a session resolves, the api-key path is NOT consulted', async () => {
-		getMcpSession.mockResolvedValue(OAUTH_SESSION);
+	it('OAuth-first precedence: when a token resolves, the api-key path is NOT consulted', async () => {
+		verifyMcpAccessToken.mockResolvedValue(OAUTH_TOKEN);
 
 		const res = await post(call('list_groups'));
 
@@ -222,19 +218,8 @@ describe('OAuth dual-auth (ADR-0010 §Decision(3): EITHER credential → ONE pri
 		expect(verifyApiKey).not.toHaveBeenCalled();
 	});
 
-	it('a session WITHOUT a userId is treated as unauthenticated → falls back to the api key', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, userId: undefined });
-
-		const res = await post(call('list_groups'));
-
-		// The api-key fallback authenticated the KEY's owner instead.
-		expect(res.status).toBe(200);
-		expect(verifyApiKey).toHaveBeenCalled();
-		expect(listGroupsForUser).toHaveBeenCalledWith('user_1');
-	});
-
 	it('no OAuth token AND no/invalid key → 401 with the resource_metadata pointer', async () => {
-		getMcpSession.mockResolvedValue(null);
+		verifyMcpAccessToken.mockResolvedValue(null);
 		verifyApiKey.mockResolvedValue({ valid: false, error: { code: 'INVALID_API_KEY' } });
 
 		const res = await post({ jsonrpc: '2.0', id: 1, method: 'initialize' }, { key: null });

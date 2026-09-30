@@ -8,7 +8,7 @@ import type { PageData } from './$types';
 // These assert the SERVER-FIRST contract at the level it is observable — the HTML:
 // a JS-disabled browser can only submit a real POST <form> with real, named
 // controls, so the Allow/Deny decision must ride native submit buttons + a hidden
-// `consent_code`. And the read-vs-write ("can it move money?") distinction must be
+// `oauth_query` (the provider-signed request). And the read-vs-write ("can it move money?") distinction must be
 // spelled out, mirroring the api-key scope picker.
 
 // `$app/forms` is a SvelteKit virtual module; stub it so `use:enhance` is a no-op
@@ -20,8 +20,10 @@ vi.mock('$app/forms', () => ({
 
 function pageData(overrides: Partial<PageData> = {}): PageData {
 	return {
-		consentCode: 'c1',
+		oauthQuery: 'client_id=claude-connector&scope=openid+read&sig=abc',
 		clientId: 'claude-connector',
+		clientName: 'Claude',
+		returnsTo: 'claude.ai',
 		scopes: ['openid', 'read'],
 		canMoveMoney: false,
 		...overrides
@@ -31,13 +33,28 @@ function pageData(overrides: Partial<PageData> = {}): PageData {
 afterEach(cleanup);
 
 describe('/oauth/consent page', () => {
-	it('renders a real POST form carrying the consent_code (the no-JS submit path)', () => {
+	it('renders a real POST form carrying the signed oauth_query (the no-JS submit path)', () => {
 		const { container } = render(Page, { props: { data: pageData(), form: null } });
 
 		const form = container.querySelector('form');
 		expect(form?.getAttribute('method')?.toLowerCase()).toBe('post');
-		const hidden = container.querySelector<HTMLInputElement>('input[name="consent_code"]');
-		expect(hidden?.value).toBe('c1');
+		const hidden = container.querySelector<HTMLInputElement>('input[name="oauth_query"]');
+		expect(hidden?.value).toBe('client_id=claude-connector&scope=openid+read&sig=abc');
+	});
+
+	it('names the requesting app and the host it returns the user to', () => {
+		const { getByText } = render(Page, { props: { data: pageData(), form: null } });
+
+		expect(getByText('Claude')).toBeTruthy();
+		expect(getByText('claude.ai')).toBeTruthy();
+	});
+
+	it('falls back to the raw client id when there is no name or return host', () => {
+		const { getByText } = render(Page, {
+			props: { data: pageData({ clientName: null, returnsTo: null }), form: null }
+		});
+
+		expect(getByText('claude-connector')).toBeTruthy();
 	});
 
 	it('offers Allow and Deny as native submit buttons wired to the two actions', () => {
@@ -71,9 +88,9 @@ describe('/oauth/consent page', () => {
 		expect(getByText(/can move money on your behalf/i)).toBeTruthy();
 	});
 
-	it('shows an expired-request state (and no Allow/Deny) when there is no consent code', () => {
+	it('shows an expired-request state (and no Allow/Deny) when there is no signed request', () => {
 		const { container, getByText } = render(Page, {
-			props: { data: pageData({ consentCode: null }), form: null }
+			props: { data: pageData({ oauthQuery: null }), form: null }
 		});
 
 		expect(getByText(/this request has expired/i)).toBeTruthy();

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { oauthResumeUrl, MCP_AUTHORIZE_PATH } from './oauth-resume';
+import { oauthResumeUrl, requiresFreshLogin, MCP_AUTHORIZE_PATH } from './oauth-resume';
 
-/** The params better-auth's authorize endpoint appends when it bounces to /login. */
+/** The params the OAuth authorize endpoint appends when it bounces to /oauth/login. */
 function authorizeParams(overrides: Record<string, string> = {}): URLSearchParams {
 	return new URLSearchParams({
 		response_type: 'code',
@@ -41,6 +41,39 @@ describe('oauthResumeUrl', () => {
 		expect(url!.startsWith(MCP_AUTHORIZE_PATH)).toBe(true);
 	});
 
+	it('targets the oauth-provider authorize endpoint', () => {
+		expect(MCP_AUTHORIZE_PATH).toBe('/api/auth/oauth2/authorize');
+	});
+
+	it('drops the provider signing params (sig, exp, ba_*), which are not part of the request', () => {
+		const signed = authorizeParams({ exp: '1790784420', ba_iat: '1790783820375', sig: 'abc=' });
+		signed.append('ba_param', 'client_id');
+		signed.append('ba_param', 'scope');
+		signed.set('ba_pl', 'session_1');
+
+		const forwarded = new URLSearchParams(oauthResumeUrl(signed)!.split('?')[1]);
+
+		for (const param of ['sig', 'exp', 'ba_iat', 'ba_param', 'ba_pl']) {
+			expect(forwarded.has(param)).toBe(false);
+		}
+		expect(forwarded.get('client_id')).toBe('client_abc');
+	});
+
+	it('drops prompt=login and max_age so the resumed authorize does not loop back to login', () => {
+		const forwarded = new URLSearchParams(
+			oauthResumeUrl(authorizeParams({ prompt: 'login consent', max_age: '0' }))!.split('?')[1]
+		);
+
+		// Other prompt values survive.
+		expect(forwarded.get('prompt')).toBe('consent');
+		expect(forwarded.has('max_age')).toBe(false);
+
+		const onlyLogin = new URLSearchParams(
+			oauthResumeUrl(authorizeParams({ prompt: 'login' }))!.split('?')[1]
+		);
+		expect(onlyLogin.has('prompt')).toBe(false);
+	});
+
 	it('drops our own redirectTo param (it is not part of the OAuth request)', () => {
 		const url = oauthResumeUrl(authorizeParams({ redirectTo: '/invite/tok' }));
 		const forwarded = new URLSearchParams(url!.slice(url!.indexOf('?') + 1));
@@ -66,5 +99,18 @@ describe('oauthResumeUrl', () => {
 		const noRedirect = authorizeParams();
 		noRedirect.delete('redirect_uri');
 		expect(oauthResumeUrl(noRedirect)).toBeNull();
+	});
+});
+
+describe('requiresFreshLogin', () => {
+	it('is true for prompt=login (alone or with other prompts) and for max_age', () => {
+		expect(requiresFreshLogin(authorizeParams({ prompt: 'login' }))).toBe(true);
+		expect(requiresFreshLogin(authorizeParams({ prompt: 'consent login' }))).toBe(true);
+		expect(requiresFreshLogin(authorizeParams({ max_age: '3600' }))).toBe(true);
+	});
+
+	it('is false otherwise', () => {
+		expect(requiresFreshLogin(authorizeParams())).toBe(false);
+		expect(requiresFreshLogin(authorizeParams({ prompt: 'consent' }))).toBe(false);
 	});
 });

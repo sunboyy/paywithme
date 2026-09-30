@@ -1,8 +1,14 @@
 # ADR-0010 — Connector auth: OAuth, via the better-auth `mcp` plugin
 
-- **Status:** Accepted
+- **Status:** Accepted — mechanism superseded by ADR-0018
 - **Date:** 2026-07-18
 - **Advances:** ADR-0007 (resolves its deferral)
+
+> **Mechanism superseded by ADR-0018.** better-auth 1.7 removed the `mcp` plugin
+> described below. The connector now runs on `@better-auth/mcp`
+> (`@better-auth/oauth-provider`), with JWT access tokens, different tables, and
+> `/oauth2/*` endpoints. The decision itself (OAuth for Claude.ai, one principal
+> for both credentials, `read`/`write` consent) is unchanged.
 
 ## Context
 

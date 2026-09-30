@@ -2,26 +2,27 @@
 //
 // `resolveMcpAuth` is the ONE place that knows OAuth-vs-key: it tries the OAuth
 // access token first and falls back to the api-key path, converging both on a
-// single `ApiKeyPrincipal`. These tests drive it with `auth.api.getMcpSession`
+// single `ApiKeyPrincipal`. These tests drive it with `verifyMcpAccessToken`
 // and `auth.api.verifyApiKey` mocked, asserting the branch precedence, the
 // scope derivation, and that only the key path rate-limits.
+//
+// The OAuth token check itself (JWT signature / issuer / audience / DPoP) is
+// `oauth-token.ts`, tested on its own; here it is mocked.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { getMcpSession, verifyApiKey } = vi.hoisted(() => ({
-	getMcpSession: vi.fn(),
+const { verifyMcpAccessToken, verifyApiKey } = vi.hoisted(() => ({
+	verifyMcpAccessToken: vi.fn(),
 	verifyApiKey: vi.fn()
 }));
 
-vi.mock('$lib/server/auth', () => ({ auth: { api: { getMcpSession, verifyApiKey } } }));
+vi.mock('./oauth-token', () => ({ verifyMcpAccessToken }));
+vi.mock('$lib/server/auth', () => ({ auth: { api: { verifyApiKey } } }));
 
 import { resolveMcpAuth, oauthScopesToPermissions } from './auth';
 
-const OAUTH_SESSION = {
-	accessToken: 'oat_abc',
-	refreshToken: 'ort_abc',
-	accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
-	refreshTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+/** A verified access token, as `verifyMcpAccessToken` returns it. */
+const OAUTH_TOKEN = {
 	clientId: 'client_1',
 	userId: 'user_oauth',
 	scopes: 'read'
@@ -41,7 +42,7 @@ function req(authorization?: string): Request {
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	getMcpSession.mockResolvedValue(null);
+	verifyMcpAccessToken.mockResolvedValue(null);
 	verifyApiKey.mockResolvedValue(VALID_KEY);
 });
 
@@ -68,7 +69,7 @@ describe('oauthScopesToPermissions — scope derivation (least privilege)', () =
 
 describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 	it('resolves a WRITE-scoped token to a write principal built from the token', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, scopes: 'read write' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, scopes: 'read write' });
 
 		const result = await resolveMcpAuth(req('Bearer oat_abc'));
 
@@ -88,11 +89,15 @@ describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 		expect(verifyApiKey).not.toHaveBeenCalled();
 	});
 
-	it('sets `oauthClientId` to the session’s RAW clientId — the audit actor tag (#42)', async () => {
+	it('sets `oauthClientId` to the token’s RAW clientId — the audit actor tag (#42)', async () => {
 		// ADR-0010 §Consequences: an OAuth-originated mutation needs a `viaOAuth` actor
 		// tag. That tag is the BARE client id (the connected app), NOT the composed
 		// `keyId`, so `auditVia` can record HOW the change entered.
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, clientId: 'app_xyz', userId: 'user_z' });
+		verifyMcpAccessToken.mockResolvedValue({
+			...OAUTH_TOKEN,
+			clientId: 'app_xyz',
+			userId: 'user_z'
+		});
 
 		const result = await resolveMcpAuth(req('Bearer oat_abc'));
 
@@ -103,7 +108,7 @@ describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 	});
 
 	it('resolves a READ-only token to a read principal', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, scopes: 'read' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, scopes: 'read' });
 
 		const result = await resolveMcpAuth(req('Bearer oat_abc'));
 
@@ -115,10 +120,10 @@ describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 		// `clientId` identifies the connector APP, shared by every human using it. If
 		// `keyId` were `clientId` alone, two users' identical writes would dedup into one
 		// (cross-tenant leak) and share a rate-limit bucket. It must fold in `userId`.
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, clientId: 'app_1', userId: 'user_a' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, clientId: 'app_1', userId: 'user_a' });
 		const a = await resolveMcpAuth(req('Bearer oat_a'));
 
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, clientId: 'app_1', userId: 'user_b' });
+		verifyMcpAccessToken.mockResolvedValue({ ...OAUTH_TOKEN, clientId: 'app_1', userId: 'user_b' });
 		const b = await resolveMcpAuth(req('Bearer oat_b'));
 
 		const keyIdOf = (r: Awaited<ReturnType<typeof resolveMcpAuth>>) =>
@@ -130,8 +135,8 @@ describe('resolveMcpAuth — OAuth branch (tried first)', () => {
 });
 
 describe('resolveMcpAuth — api-key fallback', () => {
-	it('falls back to verifyBearerKey when getMcpSession returns null', async () => {
-		getMcpSession.mockResolvedValue(null);
+	it('falls back to verifyBearerKey when there is no valid OAuth token', async () => {
+		verifyMcpAccessToken.mockResolvedValue(null);
 
 		const result = await resolveMcpAuth(req('Bearer pwm_valid'));
 
@@ -145,26 +150,6 @@ describe('resolveMcpAuth — api-key fallback', () => {
 			}
 		});
 		expect(verifyApiKey).toHaveBeenCalledWith({ body: { key: 'pwm_valid' } });
-	});
-
-	it('falls back when the session carries no userId (unauthenticated OAuth)', async () => {
-		getMcpSession.mockResolvedValue({ ...OAUTH_SESSION, userId: undefined });
-
-		const result = await resolveMcpAuth(req('Bearer pwm_valid'));
-
-		expect(result).toMatchObject({ ok: true, principal: { userId: 'user_1' } });
-		expect(verifyApiKey).toHaveBeenCalled();
-	});
-
-	it('falls back (and stays resilient) when getMcpSession throws', async () => {
-		const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-		getMcpSession.mockRejectedValue(new Error('db blip'));
-
-		const result = await resolveMcpAuth(req('Bearer pwm_valid'));
-
-		expect(result).toMatchObject({ ok: true, principal: { userId: 'user_1' } });
-		expect(verifyApiKey).toHaveBeenCalled();
-		spy.mockRestore();
 	});
 
 	it('surfaces the key path rate-limit outcome verbatim (only the key path rate-limits)', async () => {

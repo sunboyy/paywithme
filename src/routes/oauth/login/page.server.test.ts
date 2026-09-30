@@ -47,6 +47,17 @@ describe('/oauth/login load', () => {
 		expect(r?.location.startsWith(`${MCP_AUTHORIZE_PATH}?`)).toBe(true);
 	});
 
+	it('asks a logged-in user to sign in again when the client requested a fresh login', async () => {
+		// `prompt=login` / `max_age`: an existing session is not enough, so the page
+		// renders instead of resuming (the resume URL then drops both params).
+		for (const extra of ['&prompt=login', '&max_age=0']) {
+			const { value, redirect: r } = await runLoad(OAUTH_QUERY + extra, { id: 'user_1' });
+			expect(r).toBeNull();
+			expect(value?.oauthResume).not.toContain('prompt=login');
+			expect(value?.oauthResume).not.toContain('max_age');
+		}
+	});
+
 	it('redirects to the normal /login when reached WITHOUT an OAuth request (not a general login)', async () => {
 		const { redirect: r } = await runLoad('');
 		expect(r?.status).toBe(303);

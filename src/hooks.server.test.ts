@@ -137,7 +137,7 @@ describe('csrfGuard (same-origin CSRF guard)', () => {
 	it('EXEMPTS the better-auth subtree: cross-origin OAuth token POST passes through', async () => {
 		// This is the exact request Claude.ai makes — cross-origin, no matching
 		// Origin, form-encoded — that SvelteKit used to 403 (the reported bug).
-		const event = makePost('/api/auth/mcp/token', {
+		const event = makePost('/api/auth/oauth2/token', {
 			headers: { 'content-type': FORM }
 		});
 		const sentinel = new Response('ok');
