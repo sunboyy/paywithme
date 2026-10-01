@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 
 // Unit test for the better-auth server config (PLAN §5.1, §5.2, §5.7).
 //
@@ -18,6 +18,14 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // `vi.stubEnv` values set at runtime, so the env-PARSING contract is asserted
 // directly through the pure `parseTrustedOrigins` helper rather than by trying
 // to drive `auth.options.trustedOrigins` from a stubbed env var.
+
+// The first import of `./auth` loads better-auth and every plugin (including the
+// OAuth provider) cold. Under a parallel run that can approach the 5s per-test
+// limit, so load it once here with room to spare; every test's own
+// `await import('./auth')` then hits the module cache.
+beforeAll(async () => {
+	await import('./auth');
+}, 30_000);
 
 describe('parseTrustedOrigins', () => {
 	it('splits a comma-separated list, trimming whitespace', async () => {

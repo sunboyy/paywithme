@@ -4,8 +4,8 @@ import { defaults } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { loginSchema } from '$lib/schemas/auth';
 
-// Mock the browser auth client: passkey sign-in + the session check the resume
-// decision hinges on.
+// Mock the browser auth client's passkey sign-in. The page never checks the
+// session itself: the server `load` decides whether to resume.
 const { signInPasskey, getSession } = vi.hoisted(() => ({
 	signInPasskey: vi.fn(),
 	getSession: vi.fn()
@@ -17,14 +17,15 @@ vi.mock('$lib/auth-client', () => ({
 import Page from './+page.svelte';
 import type { PageData } from './$types';
 
-const RESUME_URL =
-	'/api/auth/mcp/authorize?response_type=code&client_id=client_abc&scope=openid%20write';
+/** This page's own URL, with the signed OAuth request. */
+const CONTINUE_TO =
+	'/oauth/login?response_type=code&client_id=client_abc&scope=openid%20write&prompt=login&sig=abc';
 
 function pageData(): PageData {
-	return { form: defaults(zod4(loginSchema)), oauthResume: RESUME_URL } as unknown as PageData;
+	return { form: defaults(zod4(loginSchema)), continueTo: CONTINUE_TO } as unknown as PageData;
 }
 
-// Replace window.location so we can observe the full-page resume navigation
+// Replace window.location so we can observe the full-page reload
 // without jsdom attempting a real (unimplemented) navigation.
 let assignMock: ReturnType<typeof vi.fn>;
 const realLocation = window.location;
@@ -52,41 +53,42 @@ describe('/oauth/login page', () => {
 		expect(getByText(/read-only, or full access/i)).toBeTruthy();
 		expect(getByRole('button', { name: /passkey/i })).toBeTruthy();
 
-		// The magic-link fallback is a real POST form carrying the resume URL, so the
-		// no-JS path also completes the authorization.
+		// The magic-link fallback is a real POST form that comes back to THIS page
+		// (with the request), so the no-JS path also completes the authorization.
 		const form = container.querySelector('form[method="POST"]');
 		expect(form).not.toBeNull();
 		const hidden = container.querySelector<HTMLInputElement>(
 			'input[type="hidden"][name="redirectTo"]'
 		);
-		expect(hidden?.value).toBe(RESUME_URL);
+		expect(hidden?.value).toBe(CONTINUE_TO);
 	});
 
-	it('passkey success → RESUMES the authorization with a full-page navigation to the authorize URL', async () => {
+	it('passkey success → reloads this page, so the server decides whether to resume', async () => {
 		signInPasskey.mockResolvedValue({ data: {}, error: null });
-		getSession.mockResolvedValue({ data: { user: { id: 'u1' } } });
 
 		const { getByRole } = render(Page, { props: { data: pageData() } });
 		await fireEvent.click(getByRole('button', { name: /passkey/i }));
 
-		await waitFor(() => expect(assignMock).toHaveBeenCalledWith(RESUME_URL));
+		await waitFor(() => expect(assignMock).toHaveBeenCalledWith(CONTINUE_TO));
+		// Resuming never hinges on whatever session the browser already has.
+		expect(getSession).not.toHaveBeenCalled();
 	});
 
-	it('resumes based on the REAL session even when the passkey call throws (swallowed resume redirect)', async () => {
-		// The plugin's post-login hook can turn the passkey response into a swallowed
-		// cross-origin redirect (a thrown fetch), yet the session was created.
+	it('a cancelled/failed passkey prompt shows an error and does NOT navigate, even with an existing session', async () => {
+		// The old session is still valid (the `prompt=login` case). It must not be
+		// used to resume.
+		getSession.mockResolvedValue({ data: { user: { id: 'u1' } } });
+		signInPasskey.mockResolvedValue({ data: null, error: { message: 'cancelled' } });
+
+		const { getByRole } = render(Page, { props: { data: pageData() } });
+		await fireEvent.click(getByRole('button', { name: /passkey/i }));
+
+		await waitFor(() => expect(getByRole('alert')).toBeTruthy());
+		expect(assignMock).not.toHaveBeenCalled();
+	});
+
+	it('a thrown passkey call is a failure too: error, no navigation', async () => {
 		signInPasskey.mockRejectedValue(new TypeError('Failed to fetch'));
-		getSession.mockResolvedValue({ data: { user: { id: 'u1' } } });
-
-		const { getByRole } = render(Page, { props: { data: pageData() } });
-		await fireEvent.click(getByRole('button', { name: /passkey/i }));
-
-		await waitFor(() => expect(assignMock).toHaveBeenCalledWith(RESUME_URL));
-	});
-
-	it('no session after the passkey attempt → shows an error and does NOT navigate', async () => {
-		signInPasskey.mockResolvedValue({ data: null, error: { message: 'nope' } });
-		getSession.mockResolvedValue({ data: null });
 
 		const { getByRole } = render(Page, { props: { data: pageData() } });
 		await fireEvent.click(getByRole('button', { name: /passkey/i }));
