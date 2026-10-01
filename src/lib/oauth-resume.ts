@@ -31,9 +31,6 @@ export const MCP_AUTHORIZE_PATH = '/api/auth/oauth2/authorize';
  */
 const SIGNING_PARAMS = ['sig', 'exp', 'ba_iat', 'ba_pl', 'ba_param'];
 
-/** The provider's signed issue time (ms) of the request it redirected with. */
-const ISSUED_AT_PARAM = 'ba_iat';
-
 /**
  * The params that identify a login as an OAuth-authorization continuation. All
  * three must be present (and `response_type` must be `code`) — a bare `/login`
@@ -48,24 +45,17 @@ export function isOAuthContinuation(search: URLSearchParams): boolean {
 }
 
 /**
- * Was the session created AFTER the provider sent the user to the login page?
- * That is a sign-in made for this request, which is what `prompt=login` asks for.
- * Same rule as the provider's own resume (`isSessionFreshForSignedQuery`). A
- * request without the issue time (never one the provider built) is not fresh.
- */
-function isFreshForRequest(search: URLSearchParams, sessionCreatedAt: Date): boolean {
-	const issuedAt = Number(search.get(ISSUED_AT_PARAM));
-	if (!Number.isFinite(issuedAt) || issuedAt <= 0) return false;
-	return sessionCreatedAt.getTime() >= issuedAt;
-}
-
-/**
  * The same-origin path that resumes the authorization for a signed-in user, or
  * `null` when their session doesn't satisfy the request and they must sign in
  * again on this page first.
  *
  * The client can ask for a recent login:
- *   - `prompt=login`: only a session created for THIS request will do;
+ *   - `prompt=login`: only a session created for THIS request will do, i.e.
+ *     after `requestIssuedAt`. That is the provider-signed issue time, VERIFIED by
+ *     the caller (`verifiedRequestIssuedAt` in `$lib/server/oauth-request`), or
+ *     `null` when the signature didn't check out — then no session is fresh,
+ *     because an unverified `ba_iat` is just a number the user could have typed.
+ *     Same rule as the provider's own resume (`isSessionFreshForSignedQuery`);
  *   - `max_age=N`: the session must be at most N seconds old.
  * A fresh session satisfies both, and both are then dropped, as the provider does
  * when it resumes a flow itself (`max_age=0` could otherwise never pass). An
@@ -80,10 +70,11 @@ function isFreshForRequest(search: URLSearchParams, sessionCreatedAt: Date): boo
 export function oauthResumeUrl(
 	search: URLSearchParams,
 	sessionCreatedAt: Date,
+	requestIssuedAt: Date | null,
 	now: Date = new Date()
 ): string | null {
 	if (!isOAuthContinuation(search)) return null;
-	const fresh = isFreshForRequest(search, sessionCreatedAt);
+	const fresh = requestIssuedAt !== null && sessionCreatedAt.getTime() >= requestIssuedAt.getTime();
 	const prompts = (search.get('prompt') ?? '').split(' ').filter(Boolean);
 	if (prompts.includes('login') && !fresh) return null;
 	const forwarded = new URLSearchParams(search);

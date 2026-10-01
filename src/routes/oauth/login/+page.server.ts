@@ -22,6 +22,7 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { loginSchema } from '$lib/schemas/auth';
 import { auth } from '$lib/server/auth';
+import { verifiedRequestIssuedAt } from '$lib/server/oauth-request';
 import { isOAuthContinuation, oauthResumeUrl } from '$lib/oauth-resume';
 import { magicLinkCallbackURL } from '$lib/magic-link';
 import { pathAndQuery, safeRedirectTo } from '$lib/redirect';
@@ -40,7 +41,12 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 	// `max_age` (e.g. the old one, after a cancelled passkey prompt) just gets the
 	// form again.
 	if (locals.user && locals.session) {
-		const resume = oauthResumeUrl(url.searchParams, new Date(locals.session.createdAt));
+		const resume = oauthResumeUrl(
+			url.searchParams,
+			new Date(locals.session.createdAt),
+			// Trusted only if the provider's signature on the request checks out.
+			await verifiedRequestIssuedAt(url.searchParams)
+		);
 		if (resume) redirect(303, resume);
 	}
 
