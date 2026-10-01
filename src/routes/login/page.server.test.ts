@@ -50,7 +50,7 @@ describe('/login default action', () => {
 
 		expect(signInMagicLink).toHaveBeenCalledTimes(1);
 		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe(
-			'/auth/magic-link?redirectTo=' + encodeURIComponent('/invite/tok-abc')
+			'/auth/magic-link?redirectTo=' + encodeURIComponent(encodeURIComponent('/invite/tok-abc'))
 		);
 	});
 

@@ -14,6 +14,7 @@ import { message, superValidate } from 'sveltekit-superforms';
 import { zod4 } from 'sveltekit-superforms/adapters';
 import { registerSchema } from '$lib/schemas/auth';
 import { auth } from '$lib/server/auth';
+import { magicLinkCallbackURL } from '$lib/magic-link';
 import { safeRedirectTo } from '$lib/redirect';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -60,8 +61,7 @@ export const actions: Actions = {
 				body: {
 					email,
 					name,
-					callbackURL:
-						'/auth/magic-link' + (redirectTo ? '?redirectTo=' + encodeURIComponent(redirectTo) : '')
+					callbackURL: magicLinkCallbackURL(redirectTo)
 				},
 				headers
 			});

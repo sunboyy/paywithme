@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { oauthResumeUrl, requiresFreshLogin, MCP_AUTHORIZE_PATH } from './oauth-resume';
+import { isOAuthContinuation, oauthResumeUrl, MCP_AUTHORIZE_PATH } from './oauth-resume';
+
+const NOW = new Date('2026-10-01T12:00:00.000Z');
+const MINUTE = 60_000;
+/** When the provider sent the user to the login page (the signed `ba_iat`). */
+const ISSUED_AT = NOW.getTime() - 2 * MINUTE;
+/** A session from before the request (e.g. signed in yesterday). */
+const OLD = new Date(ISSUED_AT - 24 * 60 * MINUTE);
+/** A session created by signing in for this request. */
+const FRESH = new Date(ISSUED_AT + MINUTE);
+
+/** Resume for a session created at `createdAt` (default: an old one). */
+function resume(search: URLSearchParams, createdAt: Date = OLD): string | null {
+	return oauthResumeUrl(search, createdAt, NOW);
+}
 
 /** The params the OAuth authorize endpoint appends when it bounces to /oauth/login. */
 function authorizeParams(overrides: Record<string, string> = {}): URLSearchParams {
@@ -15,9 +29,9 @@ function authorizeParams(overrides: Record<string, string> = {}): URLSearchParam
 	});
 }
 
-describe('oauthResumeUrl', () => {
+describe('oauthResumeUrl — the forwarded request', () => {
 	it('rebuilds the authorization endpoint URL for a genuine OAuth continuation', () => {
-		const url = oauthResumeUrl(authorizeParams());
+		const url = resume(authorizeParams());
 		expect(url).not.toBeNull();
 		expect(url!.startsWith(`${MCP_AUTHORIZE_PATH}?`)).toBe(true);
 
@@ -34,7 +48,7 @@ describe('oauthResumeUrl', () => {
 	});
 
 	it('is a same-origin path (never an open redirect, despite the off-origin redirect_uri param)', () => {
-		const url = oauthResumeUrl(authorizeParams());
+		const url = resume(authorizeParams());
 		expect(url!.startsWith('/')).toBe(true);
 		expect(url!.startsWith('//')).toBe(false);
 		// The claude.ai URL is only a query param, not the navigation target.
@@ -51,7 +65,7 @@ describe('oauthResumeUrl', () => {
 		signed.append('ba_param', 'scope');
 		signed.set('ba_pl', 'session_1');
 
-		const forwarded = new URLSearchParams(oauthResumeUrl(signed)!.split('?')[1]);
+		const forwarded = new URLSearchParams(resume(signed)!.split('?')[1]);
 
 		for (const param of ['sig', 'exp', 'ba_iat', 'ba_param', 'ba_pl']) {
 			expect(forwarded.has(param)).toBe(false);
@@ -59,58 +73,89 @@ describe('oauthResumeUrl', () => {
 		expect(forwarded.get('client_id')).toBe('client_abc');
 	});
 
-	it('drops prompt=login and max_age so the resumed authorize does not loop back to login', () => {
-		const forwarded = new URLSearchParams(
-			oauthResumeUrl(authorizeParams({ prompt: 'login consent', max_age: '0' }))!.split('?')[1]
-		);
-
-		// Other prompt values survive.
-		expect(forwarded.get('prompt')).toBe('consent');
-		expect(forwarded.has('max_age')).toBe(false);
-
-		const onlyLogin = new URLSearchParams(
-			oauthResumeUrl(authorizeParams({ prompt: 'login' }))!.split('?')[1]
-		);
-		expect(onlyLogin.has('prompt')).toBe(false);
-	});
-
 	it('drops our own redirectTo param (it is not part of the OAuth request)', () => {
-		const url = oauthResumeUrl(authorizeParams({ redirectTo: '/invite/tok' }));
+		const url = resume(authorizeParams({ redirectTo: '/invite/tok' }));
 		const forwarded = new URLSearchParams(url!.slice(url!.indexOf('?') + 1));
 		expect(forwarded.has('redirectTo')).toBe(false);
 	});
 
 	it('returns null for a plain login visit (no OAuth params)', () => {
-		expect(oauthResumeUrl(new URLSearchParams())).toBeNull();
+		expect(resume(new URLSearchParams())).toBeNull();
 	});
 
 	it('returns null for the invite flow (redirectTo only, no OAuth request)', () => {
-		expect(oauthResumeUrl(new URLSearchParams({ redirectTo: '/invite/tok' }))).toBeNull();
+		expect(resume(new URLSearchParams({ redirectTo: '/invite/tok' }))).toBeNull();
 	});
 
 	it('returns null when any required OAuth param is missing', () => {
 		// response_type not "code"
-		expect(oauthResumeUrl(authorizeParams({ response_type: 'token' }))).toBeNull();
+		expect(resume(authorizeParams({ response_type: 'token' }))).toBeNull();
 		// missing client_id
 		const noClient = authorizeParams();
 		noClient.delete('client_id');
-		expect(oauthResumeUrl(noClient)).toBeNull();
+		expect(resume(noClient)).toBeNull();
 		// missing redirect_uri
 		const noRedirect = authorizeParams();
 		noRedirect.delete('redirect_uri');
-		expect(oauthResumeUrl(noRedirect)).toBeNull();
+		expect(resume(noRedirect)).toBeNull();
 	});
 });
 
-describe('requiresFreshLogin', () => {
-	it('is true for prompt=login (alone or with other prompts) and for max_age', () => {
-		expect(requiresFreshLogin(authorizeParams({ prompt: 'login' }))).toBe(true);
-		expect(requiresFreshLogin(authorizeParams({ prompt: 'consent login' }))).toBe(true);
-		expect(requiresFreshLogin(authorizeParams({ max_age: '3600' }))).toBe(true);
+describe('oauthResumeUrl — prompt=login', () => {
+	const params = (prompt: string) => authorizeParams({ prompt, ba_iat: String(ISSUED_AT) });
+
+	it('refuses an older session, so the user signs in again first', () => {
+		expect(resume(params('login'), OLD)).toBeNull();
+		expect(resume(params('consent login'), OLD)).toBeNull();
 	});
 
-	it('is false otherwise', () => {
-		expect(requiresFreshLogin(authorizeParams())).toBe(false);
-		expect(requiresFreshLogin(authorizeParams({ prompt: 'consent' }))).toBe(false);
+	it('resumes for a session created after the request, dropping only `login`', () => {
+		const forwarded = new URLSearchParams(resume(params('login consent'), FRESH)!.split('?')[1]);
+		expect(forwarded.get('prompt')).toBe('consent');
+		expect(new URLSearchParams(resume(params('login'), FRESH)!.split('?')[1]).has('prompt')).toBe(
+			false
+		);
+	});
+
+	it('cannot be satisfied without the provider issue time (never a request it built)', () => {
+		expect(resume(authorizeParams({ prompt: 'login' }), FRESH)).toBeNull();
+	});
+});
+
+describe('oauthResumeUrl — max_age', () => {
+	const params = (maxAge: string) =>
+		authorizeParams({ max_age: maxAge, ba_iat: String(ISSUED_AT) });
+
+	it('lets an older session through when it is within max_age, keeping the param for authorize', () => {
+		// The reviewed bug: max_age=3600 must not force a re-login for a 10-minute-old session.
+		const tenMinutesOld = new Date(NOW.getTime() - 10 * MINUTE - 3 * MINUTE);
+		const url = resume(
+			authorizeParams({ max_age: '3600', ba_iat: String(NOW.getTime()) }),
+			tenMinutesOld
+		);
+		expect(url).not.toBeNull();
+		expect(new URLSearchParams(url!.split('?')[1]).get('max_age')).toBe('3600');
+	});
+
+	it('refuses a session older than max_age', () => {
+		expect(resume(params('3600'), OLD)).toBeNull();
+	});
+
+	it('max_age=0 refuses any older session, and a fresh one passes with the param dropped', () => {
+		expect(resume(params('0'), OLD)).toBeNull();
+		const url = resume(params('0'), FRESH);
+		expect(new URLSearchParams(url!.split('?')[1]).has('max_age')).toBe(false);
+	});
+
+	it('refuses a malformed max_age unless the session is fresh', () => {
+		expect(resume(params('soon'), OLD)).toBeNull();
+		expect(resume(params('soon'), FRESH)).not.toBeNull();
+	});
+});
+
+describe('isOAuthContinuation', () => {
+	it('needs response_type=code, client_id and redirect_uri', () => {
+		expect(isOAuthContinuation(authorizeParams())).toBe(true);
+		expect(isOAuthContinuation(new URLSearchParams({ redirectTo: '/invite/tok' }))).toBe(false);
 	});
 });

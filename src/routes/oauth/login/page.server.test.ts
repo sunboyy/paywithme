@@ -14,16 +14,24 @@ const OAUTH_QUERY =
 	encodeURIComponent('https://claude.ai/api/mcp/auth_callback') +
 	'&scope=openid%20read&code_challenge=abc&code_challenge_method=S256&state=xyz';
 
-function makeLoadEvent(query = '', user: { id: string } | null = null) {
+/** A signed-in visitor whose session was created at `createdAt`. */
+interface Visitor {
+	createdAt: Date;
+}
+
+function makeLoadEvent(query = '', visitor: Visitor | null = null) {
 	return {
 		url: new URL(`http://localhost/oauth/login${query}`),
-		locals: { user }
+		locals: {
+			user: visitor ? { id: 'user_1' } : null,
+			session: visitor ? { createdAt: visitor.createdAt } : null
+		}
 	} as unknown as Parameters<typeof load>[0];
 }
 
-async function runLoad(query = '', user: { id: string } | null = null) {
+async function runLoad(query = '', visitor: Visitor | null = null) {
 	try {
-		return { value: await load(makeLoadEvent(query, user)), redirect: null as null };
+		return { value: await load(makeLoadEvent(query, visitor)), redirect: null as null };
 	} catch (thrown) {
 		if (isRedirect(thrown)) return { value: null, redirect: thrown };
 		throw thrown;
@@ -34,28 +42,62 @@ function isRedirect(e: unknown): e is { status: number; location: string } {
 	return typeof e === 'object' && e !== null && 'status' in e && 'location' in e;
 }
 
+const MINUTE = 60_000;
+/** When the provider sent the user here (the signed `ba_iat`). */
+const ISSUED_AT = Date.now() - 2 * MINUTE;
+/** A session from before this request. */
+const OLD_SESSION = { createdAt: new Date(ISSUED_AT - 30 * MINUTE) };
+/** A session made by signing in on this page. */
+const FRESH_SESSION = { createdAt: new Date(ISSUED_AT + MINUTE) };
+const SIGNED = `&ba_iat=${ISSUED_AT}&exp=1&sig=abc`;
+
 describe('/oauth/login load', () => {
-	it('exposes the authorize resume URL and the magic-link form on a genuine OAuth continuation', async () => {
-		const { value } = await runLoad(OAUTH_QUERY);
-		expect(value?.oauthResume?.startsWith(`${MCP_AUTHORIZE_PATH}?`)).toBe(true);
+	it('shows the sign-in form to an anonymous visitor, continuing back to this page', async () => {
+		const { value } = await runLoad(OAUTH_QUERY + SIGNED);
 		expect(value?.form).toBeDefined();
+		// Both sign-in paths come back HERE, with the request intact; `load` then resumes.
+		expect(value?.continueTo).toBe(`/oauth/login${OAUTH_QUERY}${SIGNED}`);
 	});
 
-	it('sends an ALREADY-logged-in user straight to the authorize endpoint (no re-login)', async () => {
-		const { redirect: r } = await runLoad(OAUTH_QUERY, { id: 'user_1' });
+	it('sends an already-signed-in user straight to the authorize endpoint (no re-login)', async () => {
+		const { redirect: r } = await runLoad(OAUTH_QUERY + SIGNED, OLD_SESSION);
 		expect(r?.status).toBe(303);
 		expect(r?.location.startsWith(`${MCP_AUTHORIZE_PATH}?`)).toBe(true);
 	});
 
-	it('asks a logged-in user to sign in again when the client requested a fresh login', async () => {
-		// `prompt=login` / `max_age`: an existing session is not enough, so the page
-		// renders instead of resuming (the resume URL then drops both params).
-		for (const extra of ['&prompt=login', '&max_age=0']) {
-			const { value, redirect: r } = await runLoad(OAUTH_QUERY + extra, { id: 'user_1' });
-			expect(r).toBeNull();
-			expect(value?.oauthResume).not.toContain('prompt=login');
-			expect(value?.oauthResume).not.toContain('max_age');
-		}
+	it('prompt=login: an older session gets the form, not a resume (e.g. after a cancelled passkey)', async () => {
+		const { value, redirect: r } = await runLoad(
+			OAUTH_QUERY + '&prompt=login' + SIGNED,
+			OLD_SESSION
+		);
+		expect(r).toBeNull();
+		expect(value?.form).toBeDefined();
+	});
+
+	it('prompt=login: a session created for this request resumes, without prompt=login', async () => {
+		const { redirect: r } = await runLoad(OAUTH_QUERY + '&prompt=login' + SIGNED, FRESH_SESSION);
+		expect(r?.status).toBe(303);
+		expect(r?.location.startsWith(`${MCP_AUTHORIZE_PATH}?`)).toBe(true);
+		expect(r?.location).not.toContain('prompt');
+	});
+
+	it('max_age: a session within the allowed age resumes without signing in again', async () => {
+		const { redirect: r } = await runLoad(OAUTH_QUERY + '&max_age=3600' + SIGNED, OLD_SESSION);
+		expect(r?.status).toBe(303);
+		// Kept: the authorize endpoint checks it again.
+		expect(r?.location).toContain('max_age=3600');
+	});
+
+	it('max_age: a session older than allowed gets the form', async () => {
+		const { redirect: r } = await runLoad(OAUTH_QUERY + '&max_age=60' + SIGNED, OLD_SESSION);
+		expect(r).toBeNull();
+	});
+
+	it('max_age=0: only a fresh sign-in passes, and the param is then dropped', async () => {
+		expect((await runLoad(OAUTH_QUERY + '&max_age=0' + SIGNED, OLD_SESSION)).redirect).toBeNull();
+		const { redirect: r } = await runLoad(OAUTH_QUERY + '&max_age=0' + SIGNED, FRESH_SESSION);
+		expect(r?.status).toBe(303);
+		expect(r?.location).not.toContain('max_age');
 	});
 
 	it('redirects to the normal /login when reached WITHOUT an OAuth request (not a general login)', async () => {
@@ -87,13 +129,13 @@ describe('/oauth/login default action (mirrors /login privacy contract)', () => 
 		signInMagicLink.mockResolvedValue({ status: true });
 	});
 
-	it('threads the OAuth resume URL (the hidden redirectTo) into the magic-link callbackURL', async () => {
-		const resume = `${MCP_AUTHORIZE_PATH}?response_type=code&client_id=client_abc`;
+	it('threads this page (the hidden redirectTo) into the magic-link callbackURL', async () => {
+		const resume = `/oauth/login${OAUTH_QUERY}`;
 		await actions.default(makeActionEvent({ email: 'a@b.com', redirectTo: resume }));
 
 		expect(signInMagicLink).toHaveBeenCalledTimes(1);
 		expect(signInMagicLink.mock.calls[0][0].body.callbackURL).toBe(
-			'/auth/magic-link?redirectTo=' + encodeURIComponent(resume)
+			'/auth/magic-link?redirectTo=' + encodeURIComponent(encodeURIComponent(resume))
 		);
 		// Email-only (login collects no name), same as /login.
 		expect(signInMagicLink.mock.calls[0][0].body).not.toHaveProperty('name');

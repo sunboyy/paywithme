@@ -2,12 +2,13 @@
 	// `/oauth/login` — the dedicated sign-in for the Claude.ai (MCP OAuth connector)
 	// authorization flow. Reached only from the OAuth authorize endpoint
 	// (`mcp({ loginPage: '/oauth/login' })`); the load redirects here-without-an-
-	// OAuth-request back to the normal `/login`, so `oauthResume` is ALWAYS set.
+	// OAuth-request back to the normal `/login`.
 	//
-	// After sign-in we complete the authorization with a FULL-PAGE navigation to the
-	// authorize endpoint (a client `goto`/fetch can't cross to the OAuth client's
-	// origin). Passkey (WebAuthn) is a client fetch, so we decide by the REAL
-	// session (`getSession`), not the fetch outcome.
+	// The page never resumes the authorization itself. After a successful sign-in
+	// it RELOADS (a full-page navigation to `continueTo`, this page's own URL), and
+	// the server `load` resumes only if the session satisfies the request
+	// (`prompt=login` / `max_age`). A cancelled passkey prompt therefore can't let
+	// an older session through: it shows an error and stays here.
 	import { authClient } from '$lib/auth-client';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
@@ -17,9 +18,8 @@
 
 	let { data }: { data: PageData } = $props();
 
-	// The same-origin `/api/auth/mcp/authorize?…` URL that resumes the connector
-	// flow. Always present on this page.
-	const oauthResume = $derived(data.oauthResume);
+	// This page, with the signed OAuth request intact. Server-built local path.
+	const continueTo = $derived(data.continueTo);
 
 	let signingIn = $state(false);
 	let passkeyError = $state<string | null>(null);
@@ -31,27 +31,18 @@
 		passkeyError = null;
 
 		try {
-			// The passkey response may have been rewritten into a swallowed cross-origin
-			// resume redirect (surfacing as an error/throw) even though the session WAS
-			// created — so swallow any outcome here and decide by the session below.
-			await authClient.signIn.passkey().catch(() => undefined);
-			await resumeIfSignedIn();
+			const result = await authClient.signIn.passkey().catch(() => null);
+			if (!result || result.error) {
+				// A failure or a cancelled prompt — never resume on whatever session
+				// may already exist.
+				passkeyError = PASSKEY_ERROR;
+				return;
+			}
+			// Full-page reload so the server decides, with the new session.
+			window.location.assign(continueTo);
 		} finally {
 			signingIn = false;
 		}
-	}
-
-	async function resumeIfSignedIn() {
-		const { data: session } = await authClient.getSession();
-		if (session?.user) {
-			// Full-page navigation so the authorize endpoint's 302 to the OAuth client's
-			// callback is followed by the browser. `oauthResume` is a server-built local
-			// path, so this is not an open redirect.
-			window.location.assign(oauthResume);
-			return;
-		}
-		// No session → a genuine passkey failure (or the user cancelled).
-		passkeyError = PASSKEY_ERROR;
 	}
 </script>
 
@@ -86,9 +77,9 @@
 			<span class="h-px flex-1 bg-border"></span>
 		</div>
 
-		<!-- Fallback: email magic link. `oauthResume` rides the hidden `redirectTo` so
-		     the `/auth/magic-link` landing forwards to the authorize endpoint after
-		     verification (also covering the cross-device case). -->
-		<MagicLinkForm data={data.form} redirectTo={oauthResume} />
+		<!-- Fallback: email magic link. `continueTo` rides the hidden `redirectTo` so
+		     the `/auth/magic-link` landing comes back here after verification, and
+		     `load` resumes (also covering the cross-device case). -->
+		<MagicLinkForm data={data.form} redirectTo={continueTo} />
 	</Card.Content>
 </Card.Root>
