@@ -10,9 +10,16 @@ const OLD = new Date(ISSUED_AT - 24 * 60 * MINUTE);
 /** A session created by signing in for this request. */
 const FRESH = new Date(ISSUED_AT + MINUTE);
 
-/** Resume for a session created at `createdAt` (default: an old one). */
-function resume(search: URLSearchParams, createdAt: Date = OLD): string | null {
-	return oauthResumeUrl(search, createdAt, NOW);
+/**
+ * Resume for a session created at `createdAt` (default: an old one), for a
+ * request whose VERIFIED issue time is `issuedAt` (`null`: signature unverified).
+ */
+function resume(
+	search: URLSearchParams,
+	createdAt: Date = OLD,
+	issuedAt: Date | null = new Date(ISSUED_AT)
+): string | null {
+	return oauthResumeUrl(search, createdAt, issuedAt, NOW);
 }
 
 /** The params the OAuth authorize endpoint appends when it bounces to /oauth/login. */
@@ -102,7 +109,7 @@ describe('oauthResumeUrl — the forwarded request', () => {
 });
 
 describe('oauthResumeUrl — prompt=login', () => {
-	const params = (prompt: string) => authorizeParams({ prompt, ba_iat: String(ISSUED_AT) });
+	const params = (prompt: string) => authorizeParams({ prompt });
 
 	it('refuses an older session, so the user signs in again first', () => {
 		expect(resume(params('login'), OLD)).toBeNull();
@@ -117,22 +124,22 @@ describe('oauthResumeUrl — prompt=login', () => {
 		);
 	});
 
-	it('cannot be satisfied without the provider issue time (never a request it built)', () => {
-		expect(resume(authorizeParams({ prompt: 'login' }), FRESH)).toBeNull();
+	it('cannot be satisfied when the request signature did not verify', () => {
+		// Even a session created "after" a typed-in `ba_iat`: unverified means no
+		// session counts as fresh.
+		expect(
+			resume(authorizeParams({ prompt: 'login', ba_iat: String(ISSUED_AT) }), FRESH, null)
+		).toBeNull();
 	});
 });
 
 describe('oauthResumeUrl — max_age', () => {
-	const params = (maxAge: string) =>
-		authorizeParams({ max_age: maxAge, ba_iat: String(ISSUED_AT) });
+	const params = (maxAge: string) => authorizeParams({ max_age: maxAge });
 
 	it('lets an older session through when it is within max_age, keeping the param for authorize', () => {
 		// The reviewed bug: max_age=3600 must not force a re-login for a 10-minute-old session.
 		const tenMinutesOld = new Date(NOW.getTime() - 10 * MINUTE - 3 * MINUTE);
-		const url = resume(
-			authorizeParams({ max_age: '3600', ba_iat: String(NOW.getTime()) }),
-			tenMinutesOld
-		);
+		const url = resume(authorizeParams({ max_age: '3600' }), tenMinutesOld, NOW);
 		expect(url).not.toBeNull();
 		expect(new URLSearchParams(url!.split('?')[1]).get('max_age')).toBe('3600');
 	});
@@ -145,6 +152,10 @@ describe('oauthResumeUrl — max_age', () => {
 		expect(resume(params('0'), OLD)).toBeNull();
 		const url = resume(params('0'), FRESH);
 		expect(new URLSearchParams(url!.split('?')[1]).has('max_age')).toBe(false);
+	});
+
+	it('an unverified request never drops max_age=0 (the reviewed bypass)', () => {
+		expect(resume(params('0'), FRESH, null)).toBeNull();
 	});
 
 	it('refuses a malformed max_age unless the session is fresh', () => {
