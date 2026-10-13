@@ -146,7 +146,7 @@ test.describe('group flow e2e — create → split → settle → activity', () 
 		await expect(splitBetween.getByRole('checkbox', { name: OTHER_MEMBER })).toBeChecked();
 		// The acting user is the (single) default payer.
 		const paidBy = page.getByRole('group', { name: 'Paid by' });
-		await expect(paidBy.getByRole('checkbox', { name: TEST_NAME })).toBeChecked();
+		await expect(paidBy.getByRole('radio', { name: TEST_NAME })).toBeChecked();
 
 		await page.getByRole('button', { name: 'Add transaction' }).click();
 

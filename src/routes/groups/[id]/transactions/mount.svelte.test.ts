@@ -45,6 +45,7 @@ function txn(overrides: Partial<ListItem> = {}): ListItem {
 		amountTotalSettlement: 9000,
 		settlementCurrency: 'THB',
 		isForeign: false,
+		payerIds: ['m1'],
 		createdAt: '2026-08-01T12:00:00.000Z',
 		occurredAt: '2026-08-01T12:00:00.000Z',
 		...overrides
@@ -64,7 +65,10 @@ function pageData(transactions: ListItem[], captures: Tray = []): PageData {
 		],
 		transactions,
 		captures,
-		members: [{ id: 'm1', displayName: 'Alex', isSelf: true, isInactive: false }],
+		members: [
+			{ id: 'm1', displayName: 'Alex', isSelf: true, isInactive: false },
+			{ id: 'm2', displayName: 'Bo', isSelf: false, isInactive: false }
+		],
 		filters: { type: null, category: null, member: null, role: null },
 		categories: {
 			spending: [{ id: 'spending-food-drink', name: 'Food & Drink', icon: 'utensils' }],
@@ -74,6 +78,23 @@ function pageData(transactions: ListItem[], captures: Tray = []): PageData {
 }
 
 afterEach(cleanup);
+
+describe('transaction list — who paid', () => {
+	it('names the single payer', () => {
+		const { container } = render(Page, {
+			props: { data: pageData([txn({ payerIds: ['m2'] })]), form: null }
+		});
+		expect(container.textContent).toContain('Paid by Bo');
+	});
+
+	it('says "Multiple payers" instead of listing them', () => {
+		const { container } = render(Page, {
+			props: { data: pageData([txn({ payerIds: ['m1', 'm2'] })]), form: null }
+		});
+		expect(container.textContent).toContain('Multiple payers');
+		expect(container.textContent).not.toContain('Paid by');
+	});
+});
 
 describe('transaction list — a row recorded in a CUSTOM currency (§7.6 Display)', () => {
 	/** 3 BEER @ ฿250 = ฿750.00 — a 0-dp custom entry currency, foreign by definition. */

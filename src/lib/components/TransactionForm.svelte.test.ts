@@ -459,14 +459,70 @@ describe('TransactionForm per-payer amounts', () => {
 		});
 		expect(paidInput(container, 'Alex')).toBeNull();
 
-		const paidBy = [...container.querySelectorAll('fieldset')].find(
-			(f) => f.querySelector('legend')?.textContent === 'Paid by'
-		)!;
+		const paidBy = paidByFieldset(container);
+		await fireEvent.click(getButton(paidBy, 'Add another payer'));
 		const boCheckbox = [...paidBy.querySelectorAll('[role="checkbox"]')][1];
 		await fireEvent.click(boCheckbox);
 
 		expect(paidInput(container, 'Alex')?.value).toBe('90.00');
 		expect(paidInput(container, 'Bo')?.value).toBe('');
+	});
+});
+
+// ── Single-payer picker (the default) ────────────────────────────────────────
+
+function paidByFieldset(container: HTMLElement): HTMLFieldSetElement {
+	return [...container.querySelectorAll('fieldset')].find(
+		(f) => f.querySelector('legend')?.textContent === 'Paid by'
+	)!;
+}
+
+function getButton(root: HTMLElement, text: string): HTMLButtonElement {
+	return [...root.querySelectorAll('button')].find((b) => b.textContent?.trim() === text)!;
+}
+
+describe('TransactionForm single-payer picker', () => {
+	it('picks exactly one payer, who covers the whole total', async () => {
+		const { container, form } = renderForm({
+			amountTotal: 9000,
+			payers: [{ memberId: 'm-alex', amountPaid: 9000 }]
+		});
+		const paidBy = paidByFieldset(container);
+		expect(paidBy.querySelectorAll('[role="checkbox"]')).toHaveLength(0);
+
+		const radios = paidBy.querySelectorAll<HTMLInputElement>('input[type="radio"]');
+		await fireEvent.click(radios[1]);
+
+		expect(get(form.form).payers).toEqual([{ memberId: 'm-bo', amountPaid: 9000 }]);
+		expect(radios[0].checked).toBe(false);
+		expect(radios[1].checked).toBe(true);
+	});
+
+	it('opens a multi-payer transaction in the multi-payer picker', () => {
+		const { container } = renderForm({
+			amountTotal: 9000,
+			payers: [
+				{ memberId: 'm-alex', amountPaid: 6000 },
+				{ memberId: 'm-bo', amountPaid: 3000 }
+			]
+		});
+		const paidBy = paidByFieldset(container);
+		expect(paidBy.querySelectorAll('[role="checkbox"]').length).toBeGreaterThan(0);
+		expect(getButton(paidBy, 'Just one payer')).toBeTruthy();
+	});
+
+	it('going back to one payer keeps the first and gives them the whole total', async () => {
+		const { container, form } = renderForm({
+			amountTotal: 9000,
+			payers: [
+				{ memberId: 'm-alex', amountPaid: 6000 },
+				{ memberId: 'm-bo', amountPaid: 3000 }
+			]
+		});
+		await fireEvent.click(getButton(paidByFieldset(container), 'Just one payer'));
+
+		expect(get(form.form).payers).toEqual([{ memberId: 'm-alex', amountPaid: 9000 }]);
+		expect(container.querySelector('[aria-label="Amount paid by Alex"]')).toBeNull();
 	});
 });
 

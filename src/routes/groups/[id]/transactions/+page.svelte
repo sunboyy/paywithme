@@ -49,6 +49,19 @@
 			: formatAmount(minor, asEntryCurrencyCode(code), { code: isForeign });
 	}
 
+	const memberNames = $derived(new Map(data.members.map((m) => [m.id, m.displayName])));
+
+	/**
+	 * Who paid, for skimming the list: the one payer's name, or just "Multiple
+	 * payers" — the split between them is on the transaction page.
+	 */
+	function payerLabel(payerIds: string[]): string | null {
+		if (payerIds.length === 0) return null;
+		if (payerIds.length > 1) return 'Multiple payers';
+		const name = memberNames.get(payerIds[0]);
+		return name ? `Paid by ${name}` : null;
+	}
+
 	// Empty-state branching (task 8.1): distinguish "no transactions yet" (offer
 	// the create CTA) from "your filter matched nothing" (offer to clear it).
 	const filterActive = $derived(
@@ -300,6 +313,7 @@
 				</h2>
 				<ul class="space-y-2">
 					{#each group.items as txn (txn.id)}
+						{@const payer = payerLabel(txn.payerIds)}
 						<li>
 							<!-- Links to the per-transaction view/edit page (task 4.11). -->
 							<a
@@ -325,8 +339,8 @@
 											<Badge variant="secondary" class="shrink-0">transfer</Badge>
 										{/if}
 									</span>
-									<span class="block text-xs text-muted-foreground">
-										{txn.categoryName}
+									<span class="block truncate text-xs text-muted-foreground">
+										{txn.categoryName}{#if payer}&nbsp;· {payer}{/if}
 									</span>
 								</span>
 								<!-- §7.6 display: show the ORIGINAL amount + currency; for a foreign

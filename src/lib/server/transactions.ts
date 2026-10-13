@@ -1184,6 +1184,11 @@ export interface TransactionListItem {
 	settlementCurrency: SeededCurrencyCode;
 	/** Whether the entry currency differs from the group's settlement currency (§7.6). */
 	isForeign: boolean;
+	/**
+	 * The member ids of the row's payers (`transaction_payers`), so the list can show
+	 * who paid at a glance. Never empty for a valid transaction (§7.1: ≥1 payer).
+	 */
+	payerIds: string[];
 	/** The real-world date (PLAN §7.1 `created_at`), ISO string — the display/sort date. */
 	createdAt: string;
 	/**
@@ -1273,6 +1278,11 @@ export async function listTransactions({
 			amountTotal: transactions.amountTotal,
 			amountTotalSettlement: transactions.amountTotalSettlement,
 			currency: transactions.currency,
+			// Correlated per-row aggregate rather than a join, so a multi-payer row is
+			// still ONE row (the same reason the member filter is a semi-join).
+			payerIds: sql<
+				string[] | null
+			>`(select array_agg(${transactionPayers.memberId} order by ${transactionPayers.memberId}) from ${transactionPayers} where ${transactionPayers.transactionId} = ${transactions.id})`,
 			createdAt: transactions.createdAt,
 			occurredAt: transactions.occurredAt
 		})
@@ -1307,6 +1317,7 @@ export async function listTransactions({
 			amountTotalSettlement: r.amountTotalSettlement,
 			settlementCurrency,
 			isForeign: entryCurrency !== settlementCurrency,
+			payerIds: r.payerIds ?? [],
 			createdAt: r.createdAt.toISOString(),
 			occurredAt: r.occurredAt.toISOString()
 		};

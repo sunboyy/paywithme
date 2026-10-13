@@ -546,6 +546,26 @@
 		}
 	}
 
+	// Most transactions have ONE payer, so the default picker is single-choice: a tap
+	// makes that member the sole payer (their amount mirrors the total via the effect
+	// above). Several payers is an explicit opt-in that reveals the checkbox picker +
+	// per-payer amounts. An edit of a multi-payer transaction opens in that mode.
+	let multiPayerMode = $state($formData.payers.length > 1);
+
+	/** Single-payer mode: make `memberId` the only payer, covering the whole total. */
+	function setSolePayer(memberId: string) {
+		if ($formData.payers.length === 1 && $formData.payers[0].memberId === memberId) return;
+		$formData.payers = [{ memberId, amountPaid: $formData.amountTotal }];
+		paidInputs = {};
+	}
+
+	/** Switch between the single- and multi-payer pickers. */
+	function setMultiPayerMode(on: boolean) {
+		multiPayerMode = on;
+		// Back to one payer: keep the first selected (it then mirrors the total).
+		if (!on && $formData.payers.length > 1) setSolePayer($formData.payers[0].memberId);
+	}
+
 	/** A keystroke in a payer's amount box (see the money-field note above). */
 	function setPaid(memberId: string, raw: string) {
 		const cleaned = sanitizeAmountInput(raw, entryCurrency);
@@ -1252,19 +1272,42 @@
 	     Wrapping CHIPS, not a full-width column. "Paid by" and "Split between" are
 	     the same roster rendered twice, and as two identical stacked columns a
 	     four-person group cost eight rows of names for what is almost always "I
-	     paid, split evenly". These are still real checkboxes with the member name as
-	     their accessible name — only the layout changed. -->
+	     paid, split evenly". Each chip is a real radio (one payer, the default) or
+	     checkbox ("Add another payer") with the member name as its accessible name. -->
 	<fieldset class="space-y-2">
 		<legend class="text-sm font-medium">Paid by</legend>
+		<div class="flex items-center gap-1">
+			<Button
+				type="button"
+				variant="ghost"
+				size="sm"
+				class="h-8 px-2 text-xs"
+				onclick={() => setMultiPayerMode(!multiPayerMode)}
+			>
+				{multiPayerMode ? 'Just one payer' : 'Add another payer'}
+			</Button>
+		</div>
 		<div class="flex flex-wrap gap-2">
 			{#each members as member (member.id)}
 				{@const isPayer = selectedPayerIds.has(member.id)}
 				<label
-					class="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors {isPayer
+					class="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring {isPayer
 						? 'border-primary bg-primary/10'
 						: 'hover:bg-accent'}"
 				>
-					<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
+					{#if multiPayerMode}
+						<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
+					{:else}
+						<!-- A plain radio (visually hidden): the chip itself is the control.
+						     Unnamed, so it never joins the POST — the hidden `payers[i]` inputs
+						     below do. -->
+						<input
+							type="radio"
+							class="sr-only"
+							checked={isPayer}
+							onchange={() => setSolePayer(member.id)}
+						/>
+					{/if}
 					{member.displayName}
 				</label>
 			{/each}
