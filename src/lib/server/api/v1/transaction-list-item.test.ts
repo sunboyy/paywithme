@@ -21,6 +21,7 @@ function makeItem(overrides: Partial<TransactionListItem> = {}): TransactionList
 		amountTotalSettlement: 3000,
 		settlementCurrency: 'THB',
 		isForeign: false,
+		payerIds: ['m1'],
 		createdAt: '2026-05-01T10:00:00.000Z',
 		occurredAt: '2026-05-01T10:00:00.000Z',
 		...overrides

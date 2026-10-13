@@ -185,6 +185,7 @@ function listRow(id: string, currency: EntryCurrencyCode): TransactionListItem {
 		amountTotalSettlement: 75000,
 		settlementCurrency: 'THB',
 		isForeign: currency !== 'THB',
+		payerIds: ['m1'],
 		createdAt: '2026-05-04T12:00:00.000Z',
 		occurredAt: '2026-05-04T12:00:05.000Z'
 	};

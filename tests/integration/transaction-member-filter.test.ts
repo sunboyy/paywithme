@@ -303,4 +303,31 @@ describeIntegration('integration: transaction member filter (PLAN §10)', () => 
 		});
 		expect(next.map((r) => r.title)).toEqual(['T3', 'T1']);
 	});
+
+	// ── Payers on each row (the list's "Paid by" line) ──────────────────────────
+
+	it("carries each row's payer ids — one row per transaction even with two payers", async () => {
+		const { group, a, b, c } = await fixture();
+		await createTransaction({
+			userId: owner.id,
+			groupId: group.id,
+			settlementCurrency: 'USD',
+			input: {
+				...equalSpending(a, [a, b.id], 'T5', '2026-01-05'),
+				payers: [
+					{ memberId: a, amountPaid: 400 },
+					{ memberId: b.id, amountPaid: 600 }
+				]
+			}
+		});
+
+		const rows = await listTransactions({ userId: owner.id, groupId: group.id });
+		const payersByTitle = Object.fromEntries(rows.map((r) => [r.title, r.payerIds]));
+
+		expect(rows).toHaveLength(5);
+		expect(payersByTitle.T5).toEqual([a, b.id].sort());
+		expect(payersByTitle.T1).toEqual([a]);
+		expect(payersByTitle.T2).toEqual([b.id]);
+		expect(payersByTitle.T4).toEqual([c.id]);
+	});
 });

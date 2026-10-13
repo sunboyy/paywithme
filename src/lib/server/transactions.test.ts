@@ -242,6 +242,7 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotal: 9000,
 			amountTotalSettlement: 9000,
 			currency: 'THB',
+			payerIds: ['m1', 'm2'],
 			createdAt: now,
 			occurredAt: now
 		},
@@ -256,6 +257,8 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotal: 5000, // CN¥50.00 (entry currency)
 			amountTotalSettlement: 24250, // ฿242.50 @4.85
 			currency: 'CNY',
+			// No payer rows → an empty list, not `null` (the aggregate's no-rows result).
+			payerIds: null,
 			createdAt: now,
 			occurredAt: now
 		}
@@ -287,6 +290,7 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotalSettlement: 9000,
 			settlementCurrency: 'THB',
 			isForeign: false,
+			payerIds: ['m1', 'm2'],
 			createdAt: now.toISOString(),
 			occurredAt: now.toISOString()
 		});
@@ -304,6 +308,7 @@ describe('listTransactions (PLAN §7, §10)', () => {
 			amountTotalSettlement: 24250,
 			settlementCurrency: 'THB',
 			isForeign: true,
+			payerIds: [],
 			createdAt: now.toISOString(),
 			occurredAt: now.toISOString()
 		});
