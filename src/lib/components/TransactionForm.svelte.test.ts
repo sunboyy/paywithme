@@ -498,6 +498,19 @@ describe('TransactionForm single-payer picker', () => {
 		expect(radios[1].checked).toBe(true);
 	});
 
+	it('groups the radios under one shared name (native arrow-key navigation)', () => {
+		const { container } = renderForm({
+			amountTotal: 9000,
+			payers: [{ memberId: 'm-alex', amountPaid: 9000 }]
+		});
+		const radios = [
+			...paidByFieldset(container).querySelectorAll<HTMLInputElement>('input[type="radio"]')
+		];
+		expect(radios.length).toBe(2);
+		expect(radios[0].name).not.toBe('');
+		expect(new Set(radios.map((r) => r.name)).size).toBe(1);
+	});
+
 	it('opens a multi-payer transaction in the multi-payer picker', () => {
 		const { container } = renderForm({
 			amountTotal: 9000,

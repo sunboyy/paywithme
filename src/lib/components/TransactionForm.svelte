@@ -131,6 +131,11 @@
 		action
 	}: TransactionFormProps = $props();
 
+	// Unique per form instance: the single-payer radios share it so the browser
+	// treats them as one group (arrow-key navigation, one tab stop).
+	const uid = $props.id();
+	const solePayerRadioName = `sole-payer-${uid}`;
+
 	// The parent owns `form` for the component's lifetime; destructuring its stores
 	// once at setup is the intended superForm usage (not a reactive re-read).
 	// svelte-ignore state_referenced_locally
@@ -1299,10 +1304,12 @@
 						<Checkbox checked={isPayer} onCheckedChange={(v) => togglePayer(member.id, !!v)} />
 					{:else}
 						<!-- A plain radio (visually hidden): the chip itself is the control.
-						     Unnamed, so it never joins the POST — the hidden `payers[i]` inputs
-						     below do. -->
+						     Its name is outside the schema, so the POST ignores it — the hidden
+						     `payers[i]` inputs below carry the payer. -->
 						<input
 							type="radio"
+							name={solePayerRadioName}
+							value={member.id}
 							class="sr-only"
 							checked={isPayer}
 							onchange={() => setSolePayer(member.id)}
